@@ -118,28 +118,41 @@ class EmailService:
         message.set_content(body)
 
         try:
-            if self.settings.email_use_ssl:
-                server = smtplib.SMTP_SSL(
-                    self.settings.email_smtp_host,
-                    self.settings.email_smtp_port,
-                    timeout=30,
-                )
+            last_error = ""
+            for attempt in range(1, 3):  # 简单重试 2 次
+                try:
+                    if self.settings.email_use_ssl:
+                        server = smtplib.SMTP_SSL(
+                            self.settings.email_smtp_host,
+                            self.settings.email_smtp_port,
+                            timeout=30,
+                        )
+                    else:
+                        server = smtplib.SMTP(
+                            self.settings.email_smtp_host,
+                            self.settings.email_smtp_port,
+                            timeout=30,
+                        )
+                        server.starttls()
+                    try:
+                        if self.settings.email_smtp_user:
+                            server.login(
+                                self.settings.email_smtp_user,
+                                self.settings.email_smtp_password,
+                            )
+                        server.send_message(message)
+                        break
+                    finally:
+                        server.quit()
+                except Exception as e:
+                    last_error = str(e)
+                    logger.warning("邮件发送 attempt %d 失败：%s", attempt, last_error[:200])
+                    if attempt < 2:
+                        import time
+
+                        time.sleep(3)
             else:
-                server = smtplib.SMTP(
-                    self.settings.email_smtp_host,
-                    self.settings.email_smtp_port,
-                    timeout=30,
-                )
-                server.starttls()
-            try:
-                if self.settings.email_smtp_user:
-                    server.login(
-                        self.settings.email_smtp_user,
-                        self.settings.email_smtp_password,
-                    )
-                server.send_message(message)
-            finally:
-                server.quit()
+                raise RuntimeError(last_error)
         except Exception as e:
             logger.exception("邮件发送失败")
             return False, f"SMTP 错误：{str(e)[:300]}"
