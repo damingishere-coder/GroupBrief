@@ -60,6 +60,43 @@
 
 ---
 
+## P6 — 邮件（2026-08-17）
+
+### 状态：P6 PASS（真实发信：REAL_ENV_PENDING）
+
+### 做了什么
+- `EmailService`：SMTP SSL/TLS、UTF-8（中文+emoji）、每天一封、每群=排行榜+Prompt、无额外内容
+- 发送前检查：ranking_status=success 且数据存在；无数据不发送；SEND_PARTIAL_REPORT=true 时部分失败仍发送成功群
+- 邮件主题：普通日 `群报 GroupBrief｜2026-08-14`、周一 `周末汇总` 版
+- `/api/email/preview`、`/api/email/send`
+
+### 测试结果
+- pytest 30 passed（内容组装、无多余分析内容、主题、未配置不发信、部分成功策略）
+- 预览冒烟：正文只含排行+Prompt
+
+### Commit
+- `feat: add email delivery`（已 push）
+
+---
+
+## P7 — Scheduler 自动任务（2026-08-17）
+
+### 状态：P7 PASS
+
+### 做了什么
+- APScheduler BackgroundScheduler（Asia/Shanghai）：08:45 GenerateDailyReports、09:00 SendDailyEmail，misfire_grace_time=3600、coalesce=True 防堆积
+- 周日由日历规则跳过（job 函数内二次判断）
+- main.py lifespan 自动启停调度器（GROUPBRIEF_NO_SCHEDULER=1 可禁用，用于测试）
+
+### 测试结果
+- pytest 32 passed（两个 job 配置正确、自动任务函数可执行）
+- 冒烟：服务启动后调度日志正常，/api/system/status 显示 next=08:45
+
+### Commit
+- `feat: add scheduled daily jobs`（待 push）
+
+---
+
 ## P5 — 本地文件输出 + V2 Handoff（2026-08-17）
 
 ### 状态：P5 PASS

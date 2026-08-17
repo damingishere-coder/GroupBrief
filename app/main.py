@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+import os
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -24,7 +25,15 @@ async def lifespan(app: FastAPI):
     setup_logging(settings.logs_dir)
     repository.init_db(settings)
     app.state.settings = settings
+    if os.environ.get("GROUPBRIEF_NO_SCHEDULER", "") != "1":
+        from app.scheduler.manager import start_scheduler
+
+        start_scheduler(settings)
     yield
+    if os.environ.get("GROUPBRIEF_NO_SCHEDULER", "") != "1":
+        from app.scheduler.manager import stop_scheduler
+
+        stop_scheduler()
 
 
 app = FastAPI(title="GroupBrief", version=APP_VERSION, lifespan=lifespan)
