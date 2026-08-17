@@ -62,11 +62,14 @@ class EmailService:
                 if gr.ranking_status != "success":
                     missing.append(f"群 {gr.group_id}：排行榜未生成（{gr.ranking_status}）")
                     continue
+                group = repo.get_group(session, gr.group_id)
+                if group is None or not group.enabled:
+                    # 停用/已删除的群不发送（如用户停用了不需要的群）
+                    continue
                 report = repo.get_report_by_group_run(session, gr.id)
                 if report is None or not report.ranking_text:
                     missing.append(f"群 {gr.group_id}：报告数据缺失")
                     continue
-                group = repo.get_group(session, gr.group_id)
                 group_name = (group.display_name or group.wechat_group_name) if group else f"群 {gr.group_id}"
                 blocks.append(
                     GroupMailBlock(
