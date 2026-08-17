@@ -60,6 +60,35 @@
 
 ---
 
+## P9 — 稳定性 / 测试 / 文档 / 验收（2026-08-17）
+
+### 状态：P9 PASS
+
+### 做了什么
+- 邮件发送增加 2 次重试（指数间隔）
+- README.md（完整：功能/安装/启动/配置/Provider/DeepSeek/邮件/自动任务/文件输出/隐私/故障）
+- LICENSE（MIT）
+- V1_ACCEPTANCE_REPORT.md（20 项验收说明，结论：GroupBrief V1：PARTIAL，待真实外部配置）
+- 清理测试残留数据（data/、output/），用户首次启动自动重建干净数据库
+- 最终测试：pytest 32 passed + 前端 build 通过 + 端到端冒烟 PASS
+
+### Commit
+- `fix: improve Windows stability and error recovery`（737a0fc，含文档）
+
+### Push 状态
+- 已 push，本地 = GitHub 最新（master），工作区干净
+
+---
+
+## V1 结论
+
+```
+GroupBrief V1：PARTIAL
+```
+
+10 个阶段全部 PASS（代码+自动化测试）；真实微信读取 / DeepSeek 调用 / 邮件发送三项
+需真实外部环境（微信数据、API Key、SMTP）联调，补齐后即转完整 PASS。
+
 ## P8 — Apple 风格本地 Web UI（2026-08-17）
 
 ### 状态：P8 PASS
