@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from sqlmodel import Session
+from sqlmodel import Session, select
 
 from app.db import repository as repo
 from app.db.models import Group
@@ -26,6 +26,11 @@ class GroupUpdate(BaseModel):
     wechat_group_name: str | None = None
     enabled: bool | None = None
     provider_preference: str | None = None
+
+
+class FromNameRequest(BaseModel):
+    name: str
+    group_id: str | None = None
 
 
 @router.get("")
@@ -80,6 +85,69 @@ def discover_groups():
         }
         for g in groups
     ]
+
+
+@router.get("/resolve")
+def resolve_groups(name: str = Query("")):
+    """按群名搜索真实导出数据。空名称返回 400。"""
+    if not name.strip():
+        raise HTTPException(400, "参数 name 不能为空")
+    from app.services.history_service import HistoryService
+
+    service = HistoryService()
+    matches = service.resolve_group_names(name.strip())
+    return [m.to_dict() for m in matches]
+
+
+@router.post("/from-name")
+def bind_group_from_name(
+    payload: FromNameRequest, session: Session = Depends(repo.get_session)
+):
+    """按群名解析并绑定真实群。单精确匹配自动绑定；歧义需显式 group_id。"""
+    name = payload.name.strip()
+    if not name:
+        raise HTTPException(400, "群名称不能为空")
+
+    from app.services.history_service import HistoryService
+
+    service = HistoryService()
+    candidates = service.resolve_group_names(name)
+    if not candidates:
+        raise HTTPException(404, "未找到匹配的群")
+
+    exact_matches = [c for c in candidates if c.match_type == "exact"]
+
+    selected = None
+    if len(exact_matches) == 1:
+        selected = exact_matches[0]
+    elif payload.group_id:
+        selected = next(
+            (c for c in candidates if c.group_id == payload.group_id),
+            None,
+        )
+
+    if selected is None:
+        raise HTTPException(
+            409,
+            detail={
+                "message": "群名称匹配到多个候选，请携带 group_id 指定其中一个",
+                "candidates": [m.to_dict() for m in candidates],
+            },
+        )
+
+    existing = session.exec(
+        select(Group).where(Group.wechat_group_id == selected.group_id)
+    ).first()
+    if existing:
+        return {"id": existing.id, "bound": True, "already_existed": True}
+
+    group = Group(
+        display_name=selected.group_name or name,
+        wechat_group_id=selected.group_id,
+        wechat_group_name=selected.group_name,
+    )
+    group = repo.save_group(session, group)
+    return {"id": group.id, "bound": True, "already_existed": False}
 
 
 @router.post("/{group_id}/test-read")

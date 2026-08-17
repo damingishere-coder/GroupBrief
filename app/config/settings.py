@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
+from typing import Any
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -30,7 +31,16 @@ class Settings(BaseSettings):
     history_provider_fallback: str = "wechat_cli"
     history_provider_mock_enabled: bool = True
     wechat_data_dir: str = ""
+    wechat_export_dir: str = ""
     wechat_cli_path: str = ""
+
+    # WeChatDataAnalysis 本地 MCP 服务（可选，启用后优先于 JSON 导出）
+    # 仅允许本机回环地址（127.0.0.1 / localhost / ::1）；token 为敏感值，
+    # 不会通过设置 API 回显。未配置时回退到结构化 JSON 导出（wechat_export_dir）。
+    wechat_mcp_url: str = "http://127.0.0.1:10392/mcp"
+    wechat_mcp_token: str = ""
+    wechat_mcp_account: str = ""
+    wechat_mcp_timeout_seconds: int = 10
 
     # DeepSeek
     ai_provider: str = "deepseek"
@@ -85,6 +95,52 @@ class Settings(BaseSettings):
     def ensure_dirs(self) -> None:
         for d in (self.data_dir, self.output_dir, self.logs_dir):
             d.mkdir(parents=True, exist_ok=True)
+
+    def apply_runtime_values(self, values: dict[str, Any]) -> list[str]:
+        """把持久化设置安全应用到当前运行实例。
+
+        - 仅应用 Settings 已知字段；
+        - 保持字段原始类型（bool/int/string）；
+        - 忽略掩码敏感值（"******"），绝不覆盖运行时非空值；
+        - 不会把凭据写入数据库（调用方负责）。
+        返回实际生效的字段名列表。
+        """
+        applied: list[str] = []
+        field_map = Settings.model_fields
+        for key, raw in values.items():
+            if key not in field_map:
+                continue
+            if isinstance(raw, str) and raw.strip() == "******":
+                continue
+            try:
+                converted = _coerce_setting_value(key, raw, field_map[key].annotation)
+            except (TypeError, ValueError):
+                continue
+            setattr(self, key, converted)
+            applied.append(key)
+        return applied
+
+
+_BOOL_TRUE = frozenset({"1", "true", "yes", "on"})
+_BOOL_FALSE = frozenset({"0", "false", "no", "off", ""})
+
+
+def _coerce_setting_value(key: str, raw: Any, annotation: Any) -> Any:
+    """把持久化的字符串设置转换为字段声明的类型。"""
+    if annotation is bool or annotation == bool:
+        if isinstance(raw, bool):
+            return raw
+        text = str(raw).strip().lower()
+        if text in _BOOL_TRUE:
+            return True
+        if text in _BOOL_FALSE:
+            return False
+        return bool(text)
+    if annotation is int or annotation == int:
+        if isinstance(raw, bool):
+            return int(raw)
+        return int(str(raw).strip())
+    return str(raw)
 
 
 @lru_cache

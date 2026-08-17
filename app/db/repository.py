@@ -24,6 +24,7 @@ def init_db(settings: Settings) -> Any:
     )
     SQLModel.metadata.create_all(engine)
     _seed_defaults(settings)
+    apply_db_settings(settings)
     return engine
 
 
@@ -48,6 +49,19 @@ def _seed_defaults(settings: Settings) -> None:
             if existing is None:
                 session.add(Setting(key=key, value=str(value)))
         session.commit()
+
+
+def apply_db_settings(settings: Settings) -> list[str]:
+    """把数据库中已保存的设置应用到 Settings 运行实例。
+
+    数据库只在用户通过设置 API 显式保存时写入（见 app/api/settings.py），
+    因此未来启动时数据库值优先于 .env；掩码敏感值（"******"）与凭据
+    不会被写入数据库，也不会覆盖运行时非空值。
+    """
+    with Session(engine) as session:
+        rows = session.exec(select(Setting)).all()
+        values = {s.key: s.value for s in rows}
+    return settings.apply_runtime_values(values)
 
 
 def get_session():

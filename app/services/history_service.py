@@ -2,10 +2,12 @@
 
 业务层只依赖 ChatHistoryProvider 接口，不直接依赖任何开源项目内部实现。
 自动降级：主 Provider 失败 → 备用 Provider → Mock。
+群名解析（resolve）路径只搜索真实的非 Mock Provider，绝不回落到 fixtures。
 """
 
 from __future__ import annotations
 
+import unicodedata
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -21,6 +23,46 @@ from app.providers.history.base import (
 from app.providers.history.registry import build_providers, check_all_health
 
 logger = get_logger("groupbrief.providers")
+
+# 需移除的 Unicode 控制/变体连接码点：零宽空格/连接符与 emoji 变体选择符
+_STRIP_CODEPOINTS = frozenset(
+    [0x200B, 0x200C, 0x200D, 0x2060] + list(range(0xFE00, 0xFE10))
+)
+
+
+def normalize_name(text: str) -> str:
+    """确定性群名归一化：NFKC → 大小写折叠 → 去除空白与 emoji 变体/连接码点。
+
+    保留有意义的 CJK/ASCII 字符与基础 emoji 字符本身。
+    """
+    text = unicodedata.normalize("NFKC", text or "")
+    text = text.casefold()
+    text = "".join(
+        ch
+        for ch in text
+        if not ch.isspace() and ord(ch) not in _STRIP_CODEPOINTS
+    )
+    return text
+
+
+@dataclass
+class GroupMatch:
+    """群名解析结果（JSON 安全）。"""
+
+    group_id: str
+    group_name: str
+    member_count: int
+    provider: str
+    match_type: str  # exact / partial
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.group_id,
+            "name": self.group_name,
+            "member_count": self.member_count,
+            "provider": self.provider,
+            "match_type": self.match_type,
+        }
 
 
 @dataclass
@@ -99,3 +141,58 @@ class HistoryService:
             except Exception:
                 continue
         return list(seen.values())
+
+    def resolve_group_names(self, name: str) -> list[GroupMatch]:
+        """按群名搜索真实群，返回规范化精确匹配优先、其次子串候选。
+
+        只搜索非 Mock 且健康检查通过的 Provider；Mock/fixtures 永不参与。
+        支持直接解析方法的 Provider（如 WeChatDataAnalysis MCP）优先走
+        `resolve_groups`，其余 Provider 回落到底层 `list_groups` 全量匹配。
+        """
+        needle = normalize_name(name)
+        exact: list[GroupMatch] = []
+        partial: list[GroupMatch] = []
+        seen: set[tuple[str, str]] = set()
+        for provider in self.providers:
+            if provider.name == "mock":
+                continue
+            try:
+                health = provider.health_check()
+                if not health.ok:
+                    logger.info("resolve 跳过不可用 provider %s：%s", provider.name, health.detail)
+                    continue
+                resolver = getattr(provider, "resolve_groups", None)
+                if callable(resolver):
+                    candidates = resolver(name)
+                else:
+                    candidates = provider.list_groups()
+                for g in candidates:
+                    candidate = normalize_name(g.group_name)
+                    key = (g.group_id, candidate)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    if candidate == needle:
+                        exact.append(
+                            GroupMatch(
+                                group_id=g.group_id,
+                                group_name=g.group_name,
+                                member_count=g.member_count,
+                                provider=provider.name,
+                                match_type="exact",
+                            )
+                        )
+                    elif needle and needle in candidate:
+                        partial.append(
+                            GroupMatch(
+                                group_id=g.group_id,
+                                group_name=g.group_name,
+                                member_count=g.member_count,
+                                provider=provider.name,
+                                match_type="partial",
+                            )
+                        )
+            except Exception as e:
+                logger.warning("resolve 时 provider %s 异常：%s", provider.name, str(e)[:120])
+                continue
+        return exact + partial

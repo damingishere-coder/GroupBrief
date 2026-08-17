@@ -13,14 +13,25 @@ from app.db import repository as repo
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
 
-SENSITIVE_KEYS = {"ai_api_key", "email_smtp_password", "email_smtp_user", "email_from"}
+SENSITIVE_KEYS = {
+    "ai_api_key",
+    "email_smtp_password",
+    "email_smtp_user",
+    "email_from",
+    "wechat_mcp_token",
+}
 
 EDITABLE_KEYS = {
     "history_provider_primary",
     "history_provider_fallback",
     "history_provider_mock_enabled",
     "wechat_data_dir",
+    "wechat_export_dir",
     "wechat_cli_path",
+    "wechat_mcp_url",
+    "wechat_mcp_token",
+    "wechat_mcp_account",
+    "wechat_mcp_timeout_seconds",
     "ai_provider",
     "ai_base_url",
     "ai_api_key",
@@ -63,10 +74,17 @@ def get_settings(session: Session = Depends(repo.get_session)):
 
 @router.put("")
 def update_settings(payload: SettingsPayload, session: Session = Depends(repo.get_session)):
+    applied: dict[str, str] = {}
     for key, value in payload.values.items():
         if key not in EDITABLE_KEYS:
             continue
         if key in SENSITIVE_KEYS and value in ("", "******"):
             continue  # 不覆盖已有密钥
         repo.set_setting_value(session, key, value)
+        applied[key] = value
+    if applied:
+        # 让本次修改立即在运行中的 Settings 实例生效（类型安全、忽略掩码值）。
+        from app.config.settings import get_settings
+
+        get_settings().apply_runtime_values(applied)
     return {"ok": True}
