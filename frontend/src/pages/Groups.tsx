@@ -54,7 +54,7 @@ export default function Groups() {
 
   const active = groups.find((g) => g.id === activeId) ?? null;
   const report = active
-    ? reports.find((r) => r.group_run_id === activeId) ?? null
+    ? reports.find((r) => r.group_id === activeId) ?? null
     : null;
 
   const generate = async (force: boolean, groupId?: number) => {

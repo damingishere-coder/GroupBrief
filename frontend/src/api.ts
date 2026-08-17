@@ -60,6 +60,7 @@ export interface Run {
 export interface LatestReport {
   id: number;
   group_run_id: number;
+  group_id: number | null;
   ranking_text: string;
   prompt_text: string;
   ranking_file: string;
