@@ -1,0 +1,35 @@
+# --- 环境与密钥 ---
+.env
+.env.local
+.env.*.local
+
+# --- 本地数据 ---
+data/
+output/
+logs/
+*.db
+*.sqlite
+*.sqlite3
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+dist/
+build/
+
+# --- Node / 前端 ---
+node_modules/
+frontend/dist/
+frontend/.vite/
+*.tsbuildinfo
+
+# --- 系统文件 ---
+Thumbs.db
+.DS_Store
+desktop.ini

@@ -1,0 +1,50 @@
+import { useCallback, useEffect, useRef, useState } from "react";
+
+export function useToast() {
+  const [msg, setMsg] = useState("");
+  const timer = useRef<number | null>(null);
+
+  const toast = useCallback((text: string) => {
+    setMsg(text);
+    if (timer.current) window.clearTimeout(timer.current);
+    timer.current = window.setTimeout(() => setMsg(""), 2600);
+  }, []);
+
+  return { msg, toast };
+}
+
+export function copyText(text: string, toast: (s: string) => void) {
+  navigator.clipboard
+    .writeText(text)
+    .then(() => toast("已复制到剪贴板"))
+    .catch(() => toast("复制失败，请手动选择复制"));
+}
+
+export function downloadText(text: string, filename: string) {
+  const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+export function useFetch<T>(loader: () => Promise<T>, deps: unknown[] = []) {
+  const [data, setData] = useState<T | null>(null);
+  const [error, setError] = useState("");
+
+  const reload = useCallback(() => {
+    loader()
+      .then(setData)
+      .catch((e) => setError(String(e)))
+      .finally(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, deps);
+
+  useEffect(() => {
+    reload();
+  }, [reload]);
+
+  return { data, error, reload };
+}
