@@ -9,7 +9,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from app.api import files, groups, reports, runs, settings, system
+from app.api import email, files, groups, reports, runs, settings, system
 from app.config.settings import PROJECT_ROOT, get_settings
 from app.core.logging import setup_logging
 from app.db import repository
@@ -42,6 +42,7 @@ app.include_router(reports.router)
 app.include_router(runs.router)
 app.include_router(settings.router)
 app.include_router(files.router)
+app.include_router(email.router)
 
 
 @app.get("/api/version")
