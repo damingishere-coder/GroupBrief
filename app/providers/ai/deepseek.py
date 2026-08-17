@@ -110,7 +110,7 @@ class DeepSeekV4FlashProvider(PromptGeneratorProvider):
             chunk_results: list[str] = []
             for idx, chunk in enumerate(chunks, start=1):
                 chunk_results.append(
-                    self._analyze_chunk(chunk, f"第 {idx}/{len(chunks)} 块")
+                    self._analyze_chunk(chunk.text, f"第 {idx}/{len(chunks)} 块")
                 )
             return self._merge(context, chunk_results)
         except Exception as e:

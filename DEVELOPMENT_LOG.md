@@ -118,6 +118,27 @@ GroupBrief V1：PARTIAL
 ### 下一步（用户侧）
 - 在设置页填写 WeChatDataAnalysis MCP 令牌（若本地服务已启动）→ 即可「按群名绑定」真实群并测试读取
 
+## V1 真实数据接通（2026-08-17 ~ 2026-08-18 第三轮）
+
+### 状态：PASS（真实微信数据验证通过）
+
+### 做了什么
+1. **WeChatDataAnalysis v2.1.0 部署**：下载安装、修复 output 目录迁移卡死（清空 desktop-settings.json 的 pendingOutputDir）、配置 MCP 令牌并打通
+2. **代理绕过**：本机系统代理导致本地回环 502，urllib/curl 一律绕过代理（_PROXY_FREE_OPENER）
+3. **群发现修复**：resolve_session 拒绝空 query，群发现改用 list_sessions，成功发现 60 个真实群
+4. **中文编码 bug（关键）**：Python json.dumps 默认把中文转 \uXXXX 转义，WeChatDataAnalysis 服务端不解析转义 → 中文查询词匹配不到。修复：ensure_ascii=False 原样发送
+5. **消息读取优化**：get_messages 传 startTime/endTime（秒级时间戳，按上海时区换算）+ 数字 offset 翻页 + source_message_id 去重；默认超时 10s → 60s（单次调用实测 5~12s）
+6. **真实绑定与生成**：绑定茶馆V3.0（三周年纪念）🐮🐴、Grok App 交流群、Eason张UED-4群🤘 三个真实群
+7. **排行榜准确性验证（核心）**：独立统计 vs 日报排行榜逐人核对——茶馆群 Top1~9 条数与排序完全一致（鲁布斯96/停用94/啊菌菌阿菌53…），Grok 群 Top1~7 一致（c2341298 1272/1270）；差异仅为"无法识别发言人的消息"被系统过滤（属设计行为）
+
+### 测试结果
+- pytest 43 passed（test_wechat_mcp.py，含分页/时间窗/去重），全量 98 passed
+- 真实读取：茶馆 415 条 / Grok 1657 条 / Eason 572 条（昨天全天）
+- 真实日报：茶馆 run#52（409 条、26 人、Prompt 含《牛来》票房真实事件）、Grok run#53（1517 条、11 人）均生成成功
+
+### Commit
+- 本轮修复（3 个文件 + 测试）待 commit
+
 ## P8 — Apple 风格本地 Web UI（2026-08-17）
 
 ### 状态：P8 PASS

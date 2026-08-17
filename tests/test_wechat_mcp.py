@@ -173,7 +173,7 @@ def test_mcp_client_sends_auth_and_parses(monkeypatch):
         ).encode("utf-8")
         return FakeResponse(body)
 
-    monkeypatch.setattr("app.providers.history.wechat_mcp.urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("app.providers.history.wechat_mcp._PROXY_FREE_OPENER.open", fake_urlopen)
     client = MCPClient("http://127.0.0.1:10392/mcp", "secret-token-1", timeout=10)
     result = client.call("wechat.core.get_status", {})
     assert result == {"status": "ok", "running": True}
@@ -186,7 +186,7 @@ def test_mcp_client_http_401_no_token_leak(monkeypatch):
     def fake_urlopen(request, timeout=None):
         raise urllib.error.HTTPError("http://127.0.0.1/mcp", 401, "Unauthorized", {}, None)
 
-    monkeypatch.setattr("app.providers.history.wechat_mcp.urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("app.providers.history.wechat_mcp._PROXY_FREE_OPENER.open", fake_urlopen)
     client = MCPClient("http://127.0.0.1:10392/mcp", "secret-token-1")
     with pytest.raises(MCPError) as exc:
         client.call("wechat.core.get_status", {})
@@ -198,7 +198,7 @@ def test_mcp_client_http_500(monkeypatch):
     def fake_urlopen(request, timeout=None):
         raise urllib.error.HTTPError("http://127.0.0.1/mcp", 500, "Server Error", {}, None)
 
-    monkeypatch.setattr("app.providers.history.wechat_mcp.urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("app.providers.history.wechat_mcp._PROXY_FREE_OPENER.open", fake_urlopen)
     client = MCPClient("http://127.0.0.1:10392/mcp", "secret-token-1")
     with pytest.raises(MCPError) as exc:
         client.call("wechat.core.get_status", {})
@@ -209,7 +209,7 @@ def test_mcp_client_malformed_json(monkeypatch):
     def fake_urlopen(request, timeout=None):
         return FakeResponse(b"not-json")
 
-    monkeypatch.setattr("app.providers.history.wechat_mcp.urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("app.providers.history.wechat_mcp._PROXY_FREE_OPENER.open", fake_urlopen)
     client = MCPClient("http://127.0.0.1:10392/mcp", "token")
     with pytest.raises(MCPError):
         client.call("wechat.core.get_status", {})
@@ -219,7 +219,7 @@ def test_mcp_client_missing_structured_content(monkeypatch):
     def fake_urlopen(request, timeout=None):
         return FakeResponse(json.dumps({"jsonrpc": "2.0", "id": 1, "result": {"content": []}}).encode())
 
-    monkeypatch.setattr("app.providers.history.wechat_mcp.urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("app.providers.history.wechat_mcp._PROXY_FREE_OPENER.open", fake_urlopen)
     client = MCPClient("http://127.0.0.1:10392/mcp", "token")
     with pytest.raises(MCPError):
         client.call("wechat.core.get_status", {})
@@ -236,7 +236,7 @@ def test_mcp_client_is_error_result(monkeypatch):
         ).encode()
         return FakeResponse(body)
 
-    monkeypatch.setattr("app.providers.history.wechat_mcp.urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("app.providers.history.wechat_mcp._PROXY_FREE_OPENER.open", fake_urlopen)
     client = MCPClient("http://127.0.0.1:10392/mcp", "token")
     with pytest.raises(MCPError) as exc:
         client.call("wechat.chat.get_messages", {})
@@ -344,14 +344,15 @@ def test_resolve_never_mixes_mock():
     assert all(m.provider == "wechat_data_analysis" for m in matches)
 
 
-def test_list_groups_mcp_uses_resolve():
+def test_list_groups_mcp_uses_list_sessions():
     fake = FakeMCPClient().on(
-        "wechat.chat.resolve_session",
+        "wechat.chat.list_sessions",
         lambda params: {"sessions": [{"username": "g@chatroom", "name": "群", "memberCount": 3}]},
     )
     groups = _provider(fake).list_groups()
     assert [g.group_id for g in groups] == ["g@chatroom"]
-    assert fake.calls[0][0] == "wechat.chat.resolve_session"
+    assert fake.calls[0][0] == "wechat.chat.list_sessions"
+    assert "query" not in fake.calls[0][1]
 
 
 # ---------- 消息读取：分页、时间窗、转换 ----------
@@ -460,7 +461,7 @@ def test_timestamp_invalid_returns_none():
 def test_export_fallback_when_mcp_unconfigured():
     provider = WeChatDataAnalysisProvider(
         export_dir="C:/does/not/exist/xyz",
-        settings=Settings(),
+        settings=Settings(wechat_mcp_url="", wechat_mcp_token=""),
     )
     assert provider._mcp_client is None
     health = provider.health_check()

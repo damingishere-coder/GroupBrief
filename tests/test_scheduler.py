@@ -34,6 +34,8 @@ def test_generate_job_runs_on_weekday():
     from app.scheduler.generate_job import run_generate_job
 
     settings = get_settings()
+    settings.ensure_dirs()
+    repo.init_db(settings)  # 该测试不依赖其他测试文件的副作用，独立初始化
     window = get_report_window(timezone=settings.app_timezone)
     if not window.should_run:
         return  # 周日跳过

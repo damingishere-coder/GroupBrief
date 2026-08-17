@@ -40,7 +40,7 @@ class Settings(BaseSettings):
     wechat_mcp_url: str = "http://127.0.0.1:10392/mcp"
     wechat_mcp_token: str = ""
     wechat_mcp_account: str = ""
-    wechat_mcp_timeout_seconds: int = 10
+    wechat_mcp_timeout_seconds: int = 60
 
     # DeepSeek
     ai_provider: str = "deepseek"

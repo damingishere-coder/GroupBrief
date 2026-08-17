@@ -189,11 +189,12 @@ class WeChatDataAnalysisProvider(ChatHistoryProvider):
         return groups
 
     def _list_groups_mcp(self) -> list[GroupInfo]:
-        params = {"query": "", "source": "auto", "limit": 100}
+        # resolve_session 要求非空 query，全量列出会话改用 list_sessions
+        params = {"limit": 100, "source": "auto"}
         if self.wechat_mcp_account:
             params["account"] = self.wechat_mcp_account
         try:
-            structured = self._mcp_client.call("wechat.chat.resolve_session", params)
+            structured = self._mcp_client.call("wechat.chat.list_sessions", params)
             return _parse_group_candidates(structured)
         except MCPError as e:
             logger.warning("MCP 群发现失败：%s", e)
@@ -263,15 +264,35 @@ class WeChatDataAnalysisProvider(ChatHistoryProvider):
         start_time: datetime,
         end_time: datetime,
     ) -> FetchResult:
+        """通过 MCP 读取群消息。
+
+        上游 get_messages 支持 startTime/endTime（秒级时间戳）过滤，
+        按 offset 数字翻页。上游每次调用较慢（数秒），超时由
+        wechat_mcp_timeout_seconds 控制（默认 60 秒）。
+        """
+        from zoneinfo import ZoneInfo
+
+        tz = ZoneInfo("Asia/Shanghai")
+        # naive 时间按上海时区解释后转秒级时间戳，避免本地时区差异
+        start_ts = int(start_time.replace(tzinfo=tz).timestamp())
+        end_ts = int(end_time.replace(tzinfo=tz).timestamp())
         messages: list[RawMessage] = []
+        seen: set[str] = set()
         offset = 0
         try:
             while True:
-                params = {"username": group_id, "limit": _MCP_PAGE_SIZE, "offset": offset}
+                params = {
+                    "username": group_id,
+                    "limit": _MCP_PAGE_SIZE,
+                    "offset": offset,
+                    "startTime": start_ts,
+                    "endTime": end_ts,
+                }
                 structured = self._mcp_client.call("wechat.chat.get_messages", params)
                 items = _extract_message_items(structured)
                 if not items:
                     break
+                page_count = 0
                 for item in items:
                     if not isinstance(item, dict):
                         continue
@@ -279,8 +300,14 @@ class WeChatDataAnalysisProvider(ChatHistoryProvider):
                     if ts is None:
                         continue
                     if start_time <= ts <= end_time:
-                        messages.append(_mcp_to_raw(item, group_id, ts))
-                if len(items) < _MCP_PAGE_SIZE:
+                        raw = _mcp_to_raw(item, group_id, ts)
+                        if raw.source_message_id and raw.source_message_id in seen:
+                            continue  # 上游翻页偶尔重复返回同一条，去重
+                        if raw.source_message_id:
+                            seen.add(raw.source_message_id)
+                        messages.append(raw)
+                        page_count += 1
+                if len(items) < _MCP_PAGE_SIZE or page_count == 0:
                     break
                 offset += _MCP_PAGE_SIZE
                 if offset >= _MCP_PAGE_SIZE * _MCP_MAX_PAGES:

@@ -17,6 +17,9 @@ from urllib.parse import urlsplit
 
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 
+# 本机回环连接必须绕过系统/环境代理（代理会把本地请求转发出去导致 502）。
+_PROXY_FREE_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
 
 class MCPError(Exception):
     """MCP 调用失败（错误信息不包含令牌）。"""
@@ -63,7 +66,9 @@ class MCPClient:
         }
         request = urllib.request.Request(
             self.url,
-            data=json.dumps(payload).encode("utf-8"),
+            # ensure_ascii=False：中文原样发送。WeChatDataAnalysis 服务端
+            # 不解析 \uXXXX 转义，转义后的中文查询词会匹配不到任何会话。
+            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
             headers={
                 "Content-Type": "application/json",
                 "Accept": "application/json, text/event-stream",
@@ -72,7 +77,7 @@ class MCPClient:
             method="POST",
         )
         try:
-            with urllib.request.urlopen(request, timeout=float(self.timeout)) as resp:
+            with _PROXY_FREE_OPENER.open(request, timeout=float(self.timeout)) as resp:
                 body = resp.read().decode("utf-8", errors="replace")
         except urllib.error.HTTPError as e:
             if e.code == 401:
