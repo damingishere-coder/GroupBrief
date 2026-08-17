@@ -60,6 +60,25 @@
 
 ---
 
+## P5 — 本地文件输出 + V2 Handoff（2026-08-17）
+
+### 状态：P5 PASS
+
+### 做了什么
+- `HandoffService`：按 `output/YYYY-MM-DD/{群}/` 输出 5 个文件（ranking.txt / image_prompt.txt / meta.json / normalized_messages.json / handoff.json）
+- Windows 非法字符安全目录名（/ \ : * ? " < > | 空格 → -）
+- handoff.json 按文档 §18 结构（version=1、poster_file=null、status=prompt_ready，V2 预留）
+- 文件管理 API：/api/files/dates、/{date}、/{date}/{group}/raw/{file}
+- Report 表记录 ranking_file/prompt_file 路径
+
+### 测试结果
+- pytest 26 passed（安全目录名、5 文件生成、handoff 结构、meta 数据、双群隔离不串文件、日期规则联动）
+
+### Commit
+- `feat: add V2 handoff protocol`（待 push）
+
+---
+
 ## P4 — DeepSeek V4 Flash Prompt Generator（2026-08-17）
 
 ### 状态：P4 PASS

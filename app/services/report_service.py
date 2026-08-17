@@ -14,6 +14,7 @@ from app.core.logging import get_logger
 from app.db import repository as repo
 from app.db.models import Group, GroupRun, Report, Run
 from app.scheduler.calendar_rules import ReportWindow, get_report_window
+from app.services.handoff_service import HandoffService
 from app.services.history_service import HistoryService
 from app.services.message_normalizer import normalize_messages
 from app.services.ranking_service import RankingEngine
@@ -27,6 +28,7 @@ class ReportService:
         self.history = history or HistoryService()
         self.prompt = prompt or PromptService()
         self.ranking = RankingEngine()
+        self.handoff = HandoffService()
 
     def generate(
         self,
@@ -196,9 +198,24 @@ class ReportService:
             report = Report(group_run_id=group_run.id)
         report.ranking_text = ranking.render()
         report.prompt_text = prompt_result.prompt
-        if prompt_result.success:
-            report.prompt_status = "ready"
         repo.save_report(session, report)
+
+        # 6. 本地文件输出 + V2 Handoff
+        try:
+            output_dir = self.handoff.save_outputs(
+                group=group,
+                window=window,
+                ranking=ranking,
+                prompt_text=prompt_result.prompt,
+                normalized=normalized,
+                provider=outcome.provider,
+            )
+            report.ranking_file = str(output_dir / "ranking.txt")
+            report.prompt_file = str(output_dir / "image_prompt.txt")
+            repo.save_report(session, report)
+        except Exception as e:
+            logger.exception("文件输出失败 group=%s", group.display_name)
+            group_run.error_message = f"文件输出失败：{str(e)[:200]}"
 
         session.add(group_run)
         session.commit()
