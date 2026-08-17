@@ -33,13 +33,17 @@ class PromptService:
         self.settings = settings or get_settings()
         self._provider: PromptGeneratorProvider | None = None
 
-    def _get_provider(self) -> PromptGeneratorProvider | None:
+    def _get_provider(self) -> PromptGeneratorProvider:
         if self._provider is not None:
             return self._provider
-        if self.settings.ai_api_key:
+        if self.settings.ai_api_key and self.settings.ai_provider == "deepseek":
             self._provider = DeepSeekV4FlashProvider(self.settings)
-            return self._provider
-        return None
+        else:
+            # 未配置 API Key 时使用本地模板，保证全链路可交付
+            from app.providers.ai.template import TemplatePromptProvider
+
+            self._provider = TemplatePromptProvider()
+        return self._provider
 
     def generate(
         self,
@@ -49,9 +53,6 @@ class PromptService:
         normalized: list[NormalizedMessage],
     ) -> PromptOutcome:
         provider = self._get_provider()
-        if provider is None:
-            logger.info("未配置 AI_API_KEY，Prompt 生成跳过（skipped）")
-            return PromptOutcome(False, "", "未配置 AI_API_KEY")
 
         context_text = self._build_context_text(normalized, ranking)
         context = provider.build_context(

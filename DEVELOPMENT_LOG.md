@@ -60,6 +60,27 @@
 
 ---
 
+## P4 — DeepSeek V4 Flash Prompt Generator（2026-08-17）
+
+### 状态：P4 PASS
+
+### 做了什么
+- `DeepSeekV4FlashProvider`：OpenAI 兼容 API 调用、按 CHUNK_MESSAGE_COUNT 分块分析事件 → 合并生成最终海报 Prompt、重试（指数退避）、超时、明确错误信息
+- Prompt 规则内置：不编造事件/人物/金额/时间/地点；海报人物依据聊天事件人物而非排行榜；周一标题倾向"群里热闹这两天！"
+- `TemplatePromptProvider`：未配置 API Key 时用本地模板生成（完全基于真实统计与消息摘录，不调用 LLM），保证邮件/UI/文件全链路可交付
+- `PromptContext.build_context` 上移到基类
+
+### 测试结果
+- pytest 23 passed（模板结构、真实发言者、DeepSeek chunk 逻辑、无 Key 降级模板、PromptService 集成）
+
+### 已知问题
+- 真实 DeepSeek API 调用需用户提供 API Key（REAL_ENV_PENDING）
+
+### Commit
+- `feat: add DeepSeek image prompt generator`（待 push）
+
+---
+
 ## P2 — 消息标准化 + 精确排行榜（2026-08-17）
 
 ### 状态：P2 PASS

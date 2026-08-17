@@ -92,30 +92,6 @@ class DeepSeekV4FlashProvider(PromptGeneratorProvider):
         self.settings = settings
         self.model = settings.ai_model or self.model
 
-    def build_context(
-        self,
-        group_id: str,
-        group_name: str,
-        report_date: str,
-        range_start: str,
-        range_end: str,
-        total_messages: int,
-        speaker_count: int,
-        messages_text: str,
-        weekdays_text: str = "",
-    ) -> PromptContext:
-        return PromptContext(
-            group_id=group_id,
-            group_name=group_name,
-            report_date=report_date,
-            range_start=range_start,
-            range_end=range_end,
-            total_messages=total_messages,
-            speaker_count=speaker_count,
-            messages_text=messages_text,
-            weekdays_text=weekdays_text,
-        )
-
     def health_check(self) -> tuple[bool, str]:
         if not self.settings.ai_api_key:
             return False, "未配置 AI_API_KEY"
