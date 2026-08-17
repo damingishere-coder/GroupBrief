@@ -41,6 +41,9 @@ class Settings(BaseSettings):
     wechat_mcp_token: str = ""
     wechat_mcp_account: str = ""
     wechat_mcp_timeout_seconds: int = 60
+    # 微信联系人数据库（contact.db）路径，用于把微信号解析成真实显示名。
+    # 留空时自动探测 WeChatDataAnalysis 的解密数据库。
+    wechat_contact_db_path: str = ""
 
     # DeepSeek
     ai_provider: str = "deepseek"

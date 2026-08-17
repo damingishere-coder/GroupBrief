@@ -12,6 +12,8 @@ import os
 
 os.environ["DATABASE_URL"] = "sqlite:///data/test_groupbrief.db"
 os.environ["GROUPBRIEF_NO_SCHEDULER"] = "1"
+# 测试不读取真实微信联系人库（避免本机 APPDATA 下的 contact.db 影响断言）
+os.environ["GROUPBRIEF_NO_CONTACT_DB"] = "1"
 # 屏蔽 .env / 用户环境中的真实外部配置，防止测试触发真实 MCP / AI / 邮件调用
 os.environ["WECHAT_MCP_URL"] = ""
 os.environ["WECHAT_MCP_TOKEN"] = ""

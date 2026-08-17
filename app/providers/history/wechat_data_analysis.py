@@ -22,6 +22,7 @@ from pathlib import Path
 
 from app.config.settings import Settings, get_settings
 from app.core.logging import get_logger
+from app.providers.history.contact_resolver import ContactResolver
 from app.providers.history.base import (
     ChatHistoryProvider,
     FetchResult,
@@ -91,6 +92,10 @@ class WeChatDataAnalysisProvider(ChatHistoryProvider):
         self._groups_cache: list[GroupInfo] | None = None
         self.wechat_mcp_account = settings.wechat_mcp_account
         self._mcp_config_error: str | None = None
+        # 联系人解析：把微信号映射成真实显示名（备注优先、其次昵称）。
+        # 上游 senderDisplayName 不可靠（可能把微信号/错误昵称当显示名）。
+        self._contacts = ContactResolver(settings.wechat_contact_db_path or None)
+        self._contacts.load()
         if mcp_client is not None:
             # 测试注入的假客户端直接使用；真实路径通过 build_mcp_client 构造。
             self._mcp_client = mcp_client
@@ -295,6 +300,11 @@ class WeChatDataAnalysisProvider(ChatHistoryProvider):
                         continue  # 翻页重叠，跳过重复
                     if raw.source_message_id:
                         seen.add(raw.source_message_id)
+                    # 用联系人表修正发送者名字（上游 displayName 不可靠）
+                    if raw.sender_id:
+                        resolved = self._contacts.resolve_name(raw.sender_id)
+                        if resolved:
+                            raw.sender_name = resolved
                     messages.append(raw)
 
         try:

@@ -32,6 +32,7 @@ EDITABLE_KEYS = {
     "wechat_mcp_token",
     "wechat_mcp_account",
     "wechat_mcp_timeout_seconds",
+    "wechat_contact_db_path",
     "ai_provider",
     "ai_base_url",
     "ai_api_key",
