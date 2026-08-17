@@ -104,7 +104,15 @@ export default function SettingsPage() {
           </div>
         </div>
         {field("wechat_data_dir", "微信数据目录（WeChatDataAnalysis）", "留空自动探测")}
+        {field("wechat_export_dir", "导出 JSON 目录（WECHAT_EXPORT_DIR）", "留空用 data/wechat_export")}
         {field("wechat_cli_path", "wechat-cli 路径", "留空则使用 PATH")}
+        <div className="card-title" style={{ marginTop: 10 }}>
+          WeChatDataAnalysis 本地 MCP（可选）
+        </div>
+        {field("wechat_mcp_url", "MCP 地址（仅本机回环）", "http://127.0.0.1:10392/mcp")}
+        {field("wechat_mcp_token", "MCP 令牌", "", "password")}
+        {field("wechat_mcp_account", "微信账号标识（多账号可选）")}
+        {field("wechat_mcp_timeout_seconds", "MCP 超时（秒）", "10")}
       </div>
 
       <div className="card">

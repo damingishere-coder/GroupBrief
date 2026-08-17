@@ -21,13 +21,57 @@ def health():
 
 
 @router.get("/providers")
-def providers(settings: Settings = Depends(get_settings)):
+def providers(
+    session: Session = Depends(repo.get_session),
+    settings: Settings = Depends(get_settings),
+):
+    from datetime import datetime
+
+    from app.db.models import ProviderHealth
     from app.providers.history.registry import check_all_health
 
     health = check_all_health(settings)
+    now = datetime.now()
+    for name, h in health.items():
+        session.add(
+            ProviderHealth(
+                provider=name,
+                status=h.status.value,
+                detail=h.detail[:500],
+                checked_at=now,
+            )
+        )
+    session.commit()
     return {
         name: {"status": h.status.value, "detail": h.detail, "ok": h.ok}
         for name, h in health.items()
+    }
+
+
+@router.get("/stats")
+def stats(session: Session = Depends(repo.get_session)):
+    """仪表盘统计卡数据：最近一次成功 run 的消息总数 / 发言人数。"""
+    from sqlmodel import select
+
+    from app.db.models import GroupRun
+
+    runs = repo.find_runs(session, 10)
+    latest = next((r for r in runs if r.status in ("success", "partial")), None)
+    if latest is None:
+        return {
+            "total_messages": 0,
+            "total_speakers": 0,
+            "last_report_date": "",
+            "run_id": None,
+        }
+    rows = session.exec(
+        select(GroupRun).where(GroupRun.run_id == latest.id)
+    ).all()
+    return {
+        "total_messages": sum(r.message_count for r in rows),
+        "total_speakers": sum(r.speaker_count for r in rows),
+        "last_report_date": latest.report_date,
+        "run_id": latest.id,
     }
 
 

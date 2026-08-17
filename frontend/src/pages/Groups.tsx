@@ -24,6 +24,13 @@ export default function Groups() {
   const [editingPrompt, setEditingPrompt] = useState(false);
   const [promptDraft, setPromptDraft] = useState("");
   const [newWxId, setNewWxId] = useState("");
+  const [reportDate, setReportDate] = useState(() => {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(
+      d.getDate()
+    ).padStart(2, "0")}`;
+  });
+  const [testResult, setTestResult] = useState<string>("");
 
   const refresh = async () => {
     const [g, r] = await Promise.all([
@@ -54,6 +61,7 @@ export default function Groups() {
     setBusy(true);
     try {
       const res = await post<{ run_id: number }>("/reports/generate", {
+        report_date: reportDate,
         group_id: groupId ?? undefined,
         force,
       });
@@ -70,6 +78,7 @@ export default function Groups() {
     setBusy(true);
     try {
       const res = await post<{ run_id: number }>("/reports/generate", {
+        report_date: reportDate,
         force: false,
       });
       toast(`全部生成完成（run ${res.run_id}）`);
@@ -78,6 +87,45 @@ export default function Groups() {
       toast(`生成失败：${e}`);
     } finally {
       setBusy(false);
+    }
+  };
+
+  const testRead = async () => {
+    if (!active) return;
+    setTestResult("测试中…");
+    try {
+      const res = await post<{
+        provider: string;
+        status: string;
+        detail: string;
+        message_count: number;
+      }>(`/groups/${active.id}/test-read`);
+      setTestResult(
+        `Provider: ${res.provider} · 状态: ${res.status} · 消息数: ${res.message_count}\n${res.detail}`
+      );
+    } catch (e) {
+      setTestResult(`测试失败：${e}`);
+    }
+  };
+
+  const resolveAndBind = async () => {
+    const name = prompt("输入真实微信群名称（将从本地微信数据解析并绑定）：");
+    if (!name || !name.trim()) return;
+    try {
+      const res = await post<{ id: number; bound: boolean; already_existed: boolean }>(
+        "/groups/from-name",
+        { name: name.trim() }
+      );
+      toast(
+        res.bound
+          ? res.already_existed
+            ? "已绑定到已有群"
+            : "群名解析并绑定成功"
+          : "解析失败"
+      );
+      await refresh();
+    } catch (e) {
+      toast(`绑定失败：${e}`);
     }
   };
 
@@ -287,6 +335,12 @@ export default function Groups() {
               </button>
             </div>
             <div className="toolbar" style={{ marginTop: 16 }}>
+              <input
+                type="date"
+                value={reportDate}
+                onChange={(e) => setReportDate(e.target.value)}
+                style={{ width: 170 }}
+              />
               <button className="btn btn-sm" disabled={busy} onClick={() => generate(false)}>
                 生成群报
               </button>
@@ -309,6 +363,12 @@ export default function Groups() {
                 onClick={sendEmail}
               >
                 手动发邮件
+              </button>
+              <button className="btn btn-sm btn-ghost" onClick={testRead}>
+                测试读取
+              </button>
+              <button className="btn btn-sm btn-ghost" onClick={resolveAndBind}>
+                按群名绑定
               </button>
               <button
                 className="btn btn-sm btn-ghost"
@@ -361,6 +421,11 @@ export default function Groups() {
                 预览邮件
               </button>
             </div>
+            {testResult && (
+              <pre className="panel" style={{ marginTop: 12 }}>
+                {testResult}
+              </pre>
+            )}
           </div>
 
           <div className="card">

@@ -89,6 +89,35 @@ GroupBrief V1：PARTIAL
 10 个阶段全部 PASS（代码+自动化测试）；真实微信读取 / DeepSeek 调用 / 邮件发送三项
 需真实外部环境（微信数据、API Key、SMTP）联调，补齐后即转完整 PASS。
 
+---
+
+## V1 完善轮（2026-08-17 第二轮）
+
+### 状态：PASS（测试 98 passed）
+
+### 做了什么
+1. **采纳并验证了 WeChatDataAnalysis 本地 MCP 支持**（上一会话 Codex 留下的未提交工作）：
+   - `wechat_mcp.py`：JSON-RPC/MCP 客户端，仅允许本机回环地址，token 不泄露
+   - `wechat_data_analysis.py` 增加 MCP 直连（健康检查 / 群名解析 resolve_session / 消息分页读取 / 时间戳毫秒处理），未配置时回退 JSON 导出
+   - 群名归一化匹配（NFKC + emoji 变体处理）与 `/api/groups/resolve`、`/api/groups/from-name`（按真实群名绑定）
+   - 设置热更新（apply_runtime_values）+ 数据库设置优先于 .env
+   - 修复 3 个测试自身错误（fake 缺 handler、时区换算错误、时间戳期望错误）
+   - 清理 Codex 临时脚手架文件（.codex-*.md、tmp、patch 脚本）
+2. **UI/API 完善**：
+   - 仪表盘统计卡：最近生成的总消息数 / 总发言人数（/api/system/stats）
+   - 执行记录：点击行展开每个群的 group_runs 详情（/api/runs/{id}）
+   - 群聊页：生成支持选择日期；新增「测试读取」「按群名绑定」按钮
+   - 设置页：新增 MCP 地址/令牌/账号/超时与导出目录配置项
+   - Provider 健康状态写入 provider_health 表
+3. 清理了 8766 端口的残留旧服务进程（系统 Python 运行的旧版本 GroupBrief）
+
+### Commit
+- `feat: add WeChatDataAnalysis MCP provider and group name resolution`（02e2651，已 push）
+- `feat: enhance dashboard stats, run details and group binding UI`（本轮，待 push）
+
+### 下一步（用户侧）
+- 在设置页填写 WeChatDataAnalysis MCP 令牌（若本地服务已启动）→ 即可「按群名绑定」真实群并测试读取
+
 ## P8 — Apple 风格本地 Web UI（2026-08-17）
 
 ### 状态：P8 PASS

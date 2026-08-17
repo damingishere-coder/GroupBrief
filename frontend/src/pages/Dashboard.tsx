@@ -9,6 +9,14 @@ export default function Dashboard({ onNav }: { onNav: (p: string) => void }) {
       "/system/providers"
     )
   );
+  const { data: stats } = useFetch(() =>
+    get<{
+      total_messages: number;
+      total_speakers: number;
+      last_report_date: string;
+      run_id: number | null;
+    }>("/system/stats")
+  );
 
   const providerLabel: Record<string, string> = {
     wechat_data_analysis: "WeChatDataAnalysis",
@@ -47,6 +55,14 @@ export default function Dashboard({ onNav }: { onNav: (p: string) => void }) {
           <div className="stat-value">{status?.total_groups ?? 0}</div>
           <div className="muted" style={{ fontSize: 12 }}>
             {status?.enabled_groups ?? 0} 个已启用
+          </div>
+        </div>
+        <div className="stat">
+          <div className="stat-label">最近生成统计</div>
+          <div className="stat-value">{stats?.total_messages ?? 0}</div>
+          <div className="muted" style={{ fontSize: 12 }}>
+            总消息 · {stats?.total_speakers ?? 0} 人发言
+            {stats?.last_report_date ? ` · ${stats.last_report_date}` : ""}
           </div>
         </div>
         <div className="stat">

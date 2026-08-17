@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlmodel import Session, select
 
+from app.config.settings import Settings, get_settings
 from app.db import repository as repo
 from app.db.models import Group
 
@@ -151,9 +152,11 @@ def bind_group_from_name(
 
 
 @router.post("/{group_id}/test-read")
-def test_read(group_id: int, session: Session = Depends(repo.get_session)):
-    from datetime import timedelta
-
+def test_read(
+    group_id: int,
+    session: Session = Depends(repo.get_session),
+    settings: Settings = Depends(get_settings),
+):
     from app.scheduler.calendar_rules import get_report_window
     from app.services.history_service import HistoryService
 
@@ -163,7 +166,7 @@ def test_read(group_id: int, session: Session = Depends(repo.get_session)):
     if not group.wechat_group_id:
         raise HTTPException(400, "该群未绑定微信群 ID，请先填写 wechat_group_id")
 
-    window = get_report_window(timezone="Asia/Shanghai")
+    window = get_report_window(timezone=settings.app_timezone)
     service = HistoryService()
     outcome = service.fetch(
         group.wechat_group_id,
