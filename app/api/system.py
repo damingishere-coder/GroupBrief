@@ -20,6 +20,17 @@ def health():
     return {"status": "ok"}
 
 
+@router.get("/providers")
+def providers(settings: Settings = Depends(get_settings)):
+    from app.providers.history.registry import check_all_health
+
+    health = check_all_health(settings)
+    return {
+        name: {"status": h.status.value, "detail": h.detail, "ok": h.ok}
+        for name, h in health.items()
+    }
+
+
 @router.get("/status")
 def status(session: Session = Depends(repo.get_session), settings: Settings = Depends(get_settings)):
     try:

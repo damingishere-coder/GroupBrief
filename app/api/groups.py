@@ -66,6 +66,51 @@ def update_group(
     return {"id": group.id}
 
 
+@router.get("/discover")
+def discover_groups():
+    from app.services.history_service import HistoryService
+
+    service = HistoryService()
+    groups = service.discover_groups()
+    return [
+        {
+            "group_id": g.group_id,
+            "group_name": g.group_name,
+            "member_count": g.member_count,
+        }
+        for g in groups
+    ]
+
+
+@router.post("/{group_id}/test-read")
+def test_read(group_id: int, session: Session = Depends(repo.get_session)):
+    from datetime import timedelta
+
+    from app.scheduler.calendar_rules import get_report_window
+    from app.services.history_service import HistoryService
+
+    group = repo.get_group(session, group_id)
+    if not group:
+        raise HTTPException(404, "群不存在")
+    if not group.wechat_group_id:
+        raise HTTPException(400, "该群未绑定微信群 ID，请先填写 wechat_group_id")
+
+    window = get_report_window(timezone="Asia/Shanghai")
+    service = HistoryService()
+    outcome = service.fetch(
+        group.wechat_group_id,
+        group.wechat_group_name or group.display_name,
+        window.range_start,
+        window.range_end,
+    )
+    return {
+        "provider": outcome.provider,
+        "status": outcome.status.value,
+        "detail": outcome.detail,
+        "message_count": len(outcome.messages),
+    }
+
+
 @router.delete("/{group_id}")
 def delete_group(group_id: int, session: Session = Depends(repo.get_session)):
     repo.delete_group(session, group_id)

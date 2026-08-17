@@ -30,6 +30,32 @@
 - 待提交：`chore: initialize GroupBrief project`
 
 ### Push 状态
+- 已 push（master 分支）
+
+---
+
+## P1 — 微信历史读取 Provider（2026-08-17）
+
+### 状态：P1 PASS（真实微信环境：REAL_ENV_PENDING）
+
+### 做了什么
+- 实现 `ChatHistoryProvider` 统一接口 + `ProviderStatus` 状态机（OK/UNAVAILABLE/UNSUPPORTED_WECHAT_VERSION/GROUP_NOT_FOUND/READ_FAILED/EMPTY_RESULT/INVALID_RESULT）
+- `WeChatDataAnalysisProvider`：探测微信数据目录（WeChat Files / xwechat_files），支持读取 WeChatDataAnalysis 导出的 JSON（data/wechat_export）；真实环境未配置时返回明确状态
+- `WechatCliProvider`：契约式调用 wechat-cli（export/list-groups），命令不可用时返回 UNAVAILABLE
+- `MockProvider` + fixtures 生成器（scripts/generate_fixtures.py）：生成两个群的 8 天中文模拟聊天（856+ 条/天，覆盖 text/image/emoji/link/quote/red_packet/voice/system/file/video）
+- `HistoryService`：自动降级链 主→备→Mock，不静默失败
+- `/api/system/providers`（状态）、`/api/groups/discover`（发现群）、`/api/groups/{id}/test-read`（测试读取）
+
+### 测试结果
+- pytest 7 passed：mock health、list_groups、范围读取（消息量/发言人/消息类型）、不存在的群、fallback、health 状态、provider 顺序
+
+### 已知问题
+- 本机未安装微信/WeChatDataAnalysis/wechat-cli，真实读取状态为 UNAVAILABLE，已自动降级 Mock 继续开发；最终联调需用户提供真实环境
+
+### Commit
+- `feat: add WeChat history providers`
+
+### Push 状态
 - 待 push
 
 ---
