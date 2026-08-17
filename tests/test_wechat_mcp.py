@@ -355,25 +355,42 @@ def test_list_groups_mcp_uses_list_sessions():
     assert "query" not in fake.calls[0][1]
 
 
-# ---------- 消息读取：分页、时间窗、转换 ----------
+# ---------- 消息读取：锚点、时间窗、转换 ----------
+
+# 注意：_fetch_messages_mcp 现在用 get_message_anchor（定位某天第一条）
+# + get_message_around（从锚点向两端翻页），不再用 get_messages。
+# 测试里 around 返回的消息列表含窗口外首尾（保证两个方向各一轮即停）。
+
+
+def _anchor_around_fake(messages: list[dict]) -> FakeMCPClient:
+    """构造模拟锚点接口的假客户端：任意日期都返回同一锚点与同一批消息。"""
+    fake = FakeMCPClient()
+    fake.on(
+        "wechat.chat.get_message_anchor",
+        lambda params: {"anchorId": "anchor-0", "createTime": messages[0]["createTime"]},
+    )
+    fake.on(
+        "wechat.chat.get_message_around",
+        lambda params: {"messages": messages},
+    )
+    return fake
 
 
 def test_fetch_messages_paging_and_conversion():
-    page0 = {"messages": [_msg(f"m{i}", 1786410000 + i, f"u{i}", f"n{i}", f"c{i}", 1) for i in range(100)]}
-
-    def handler(params: dict) -> dict:
-        if params["offset"] == 0:
-            return page0
-        return {"messages": []}
-
-    fake = FakeMCPClient().on("wechat.chat.get_messages", handler)
+    # 窗口 2026-08-10 ~ 2026-08-17；首尾各放一条窗口外消息保证翻页一轮即停
+    msgs = (
+        [_msg("head", 1786000000, "u", "n", "窗口外旧消息", 1)]  # 早于窗口起点
+        + [_msg(f"m{i}", 1786410000 + i, f"u{i}", f"n{i}", f"c{i}", 1) for i in range(100)]
+        + [_msg("tail", 1787200000, "u", "n", "窗口外新消息", 1)]  # 晚于窗口终点
+    )
+    fake = _anchor_around_fake(msgs)
     result = _provider(fake).fetch_messages("group@chatroom", WINDOW_START, WINDOW_END)
     assert result.status == ProviderStatus.OK
     assert len(result.messages) == 100
-    offsets = [p["offset"] for m, p in fake.calls if m == "wechat.chat.get_messages"]
-    assert offsets == [0, 100]
-    limits = [p["limit"] for m, p in fake.calls if m == "wechat.chat.get_messages"]
-    assert limits and all(l <= 100 for l in limits)
+    calls = [m for m, _ in fake.calls]
+    assert "wechat.chat.get_message_anchor" in calls
+    assert "wechat.chat.get_message_around" in calls
+    assert "wechat.chat.get_messages" not in calls
     first = result.messages[0]
     assert first.group_id == "group@chatroom"
     assert first.source == "wechat_data_analysis"
@@ -381,32 +398,42 @@ def test_fetch_messages_paging_and_conversion():
     assert first.sender_id == "u0"
 
 
-def test_fetch_paging_stops_after_short_page():
-    page0 = {"messages": [_msg(f"m{i}", 1786420000 + i, f"u{i}", f"n{i}", f"c{i}", 1) for i in range(100)]}
-    page1 = {"messages": [_msg(f"p{i}", 1786430000 + i, "u", "n", "c", 1) for i in range(50)]}
+def test_fetch_messages_multiple_days_dedup():
+    """多天窗口（如周一汇总周六+周日）取多个锚点，重复消息去重。"""
+    anchor_params: list[dict] = []
 
-    def handler(params: dict) -> dict:
-        return page0 if params["offset"] == 0 else page1
+    def anchor_handler(params: dict) -> dict:
+        anchor_params.append(params)
+        return {"anchorId": "anchor-0", "createTime": 1786410000}
 
-    fake = FakeMCPClient().on("wechat.chat.get_messages", handler)
+    fake = FakeMCPClient()
+    fake.on("wechat.chat.get_message_anchor", anchor_handler)
+    fake.on(
+        "wechat.chat.get_message_around",
+        lambda params: {
+            "messages": [
+                _msg("head", 1786000000, "u", "n", "窗口外旧消息", 1),
+                _msg("dup", 1786420000, "u", "n", "同一消息", 1),
+                _msg("tail", 1787200000, "u", "n", "窗口外", 1),
+            ]
+        },
+    )
     result = _provider(fake).fetch_messages("g@chatroom", WINDOW_START, WINDOW_END)
     assert result.status == ProviderStatus.OK
-    assert len(result.messages) == 150
-    offsets = [p["offset"] for m, p in fake.calls if m == "wechat.chat.get_messages"]
-    assert offsets == [0, 100]
+    assert len(result.messages) == 1
+    assert result.messages[0].source_message_id == "dup"
+    # 窗口内每天都会请求锚点
+    assert len(anchor_params) >= 2
 
 
 def test_fetch_messages_date_filtering_and_conversion():
-    fake = FakeMCPClient().on(
-        "wechat.chat.get_messages",
-        lambda params: {
-            "messages": [
-                _msg("old", 1786280000, "wxid_a", "张三", "窗口外旧消息", 1),  # 2026-08-09T13:53+08
-                _msg("in", 1786420000, "wxid_b", "李四", "窗口内消息", 1),
-                _msg("future", 1787200000, "wxid_c", "王五", "窗口外新消息", 1),
-                _msg("image", 1786421000, "wxid_d", "赵六", "", 2),
-            ]
-        },
+    fake = _anchor_around_fake(
+        [
+            _msg("old", 1786280000, "wxid_a", "张三", "窗口外旧消息", 1),  # 2026-08-09T13:53+08
+            _msg("in", 1786420000, "wxid_b", "李四", "窗口内消息", 1),
+            _msg("future", 1787200000, "wxid_c", "王五", "窗口外新消息", 1),
+            _msg("image", 1786421000, "wxid_d", "赵六", "", 2),
+        ]
     )
     result = _provider(fake).fetch_messages("g@chatroom", WINDOW_START, WINDOW_END)
     assert result.status == ProviderStatus.OK
@@ -422,14 +449,18 @@ def test_fetch_messages_date_filtering_and_conversion():
     assert text.content == "窗口内消息"
 
 
-def test_fetch_messages_empty_result():
-    fake = FakeMCPClient().on("wechat.chat.get_messages", lambda params: {"messages": []})
+def test_fetch_messages_anchor_missing_empty_result():
+    """锚点不存在（当天无消息）→ 空结果。"""
+    fake = FakeMCPClient().on(
+        "wechat.chat.get_message_anchor",
+        lambda params: {"status": "success", "anchorId": None},
+    )
     result = _provider(fake).fetch_messages("g@chatroom", WINDOW_START, WINDOW_END)
     assert result.status == ProviderStatus.EMPTY_RESULT
 
 
 def test_fetch_messages_read_failed():
-    fake = FakeMCPClient().on("wechat.chat.get_messages", raise_mcp("本地服务 HTTP 错误 500"))
+    fake = FakeMCPClient().on("wechat.chat.get_message_anchor", raise_mcp("本地服务 HTTP 错误 500"))
     result = _provider(fake).fetch_messages("g@chatroom", WINDOW_START, WINDOW_END)
     assert result.status == ProviderStatus.READ_FAILED
     assert "500" in result.detail

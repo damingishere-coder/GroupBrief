@@ -264,55 +264,48 @@ class WeChatDataAnalysisProvider(ChatHistoryProvider):
         start_time: datetime,
         end_time: datetime,
     ) -> FetchResult:
-        """通过 MCP 读取群消息。
+        """通过 MCP 读取群消息（锚点双向读取）。
 
-        上游 get_messages 支持 startTime/endTime（秒级时间戳）过滤，
-        按 offset 数字翻页。上游每次调用较慢（数秒），超时由
-        wechat_mcp_timeout_seconds 控制（默认 60 秒）。
+        上游 get_messages 没有时间过滤参数、总是从最新消息返回，
+        无法读取历史日期；改用锚点工具：
+        - get_message_anchor(kind=day) 定位某天第一条消息；
+        - get_message_around 以锚点为中心返回上下文（每轮约 50 条），
+          用「上一条/下一条」作为新锚点向前后翻页；
+        - 客户端按时间窗过滤，跨天消息靠去重避免重复。
+
+        上游每次调用较慢（数秒），超时由 wechat_mcp_timeout_seconds
+        控制（默认 60 秒）。
         """
         from zoneinfo import ZoneInfo
 
         tz = ZoneInfo("Asia/Shanghai")
-        # naive 时间按上海时区解释后转秒级时间戳，避免本地时区差异
-        start_ts = int(start_time.replace(tzinfo=tz).timestamp())
-        end_ts = int(end_time.replace(tzinfo=tz).timestamp())
         messages: list[RawMessage] = []
         seen: set[str] = set()
-        offset = 0
+
+        def collect(items: list) -> None:
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                ts = _mcp_timestamp(item.get("createTime"))
+                if ts is None:
+                    continue
+                if start_time <= ts <= end_time:
+                    raw = _mcp_to_raw(item, group_id, ts)
+                    if raw.source_message_id and raw.source_message_id in seen:
+                        continue  # 翻页重叠，跳过重复
+                    if raw.source_message_id:
+                        seen.add(raw.source_message_id)
+                    messages.append(raw)
+
         try:
-            while True:
-                params = {
-                    "username": group_id,
-                    "limit": _MCP_PAGE_SIZE,
-                    "offset": offset,
-                    "startTime": start_ts,
-                    "endTime": end_ts,
-                }
-                structured = self._mcp_client.call("wechat.chat.get_messages", params)
-                items = _extract_message_items(structured)
-                if not items:
-                    break
-                page_count = 0
-                for item in items:
-                    if not isinstance(item, dict):
-                        continue
-                    ts = _mcp_timestamp(item.get("createTime"))
-                    if ts is None:
-                        continue
-                    if start_time <= ts <= end_time:
-                        raw = _mcp_to_raw(item, group_id, ts)
-                        if raw.source_message_id and raw.source_message_id in seen:
-                            continue  # 上游翻页偶尔重复返回同一条，去重
-                        if raw.source_message_id:
-                            seen.add(raw.source_message_id)
-                        messages.append(raw)
-                        page_count += 1
-                if len(items) < _MCP_PAGE_SIZE or page_count == 0:
-                    break
-                offset += _MCP_PAGE_SIZE
-                if offset >= _MCP_PAGE_SIZE * _MCP_MAX_PAGES:
-                    logger.warning("MCP 分页读取达到上限 %d 页", _MCP_MAX_PAGES)
-                    break
+            # 窗口内的每一天都取锚点（多天窗口 = 周一汇总周六+周日）
+            day = start_time.date()
+            last_day = end_time.date()
+            while day <= last_day:
+                anchor = self._anchor_for_day(group_id, day, tz)
+                if anchor:
+                    self._drain_around(group_id, anchor, start_time, end_time, collect)
+                day = day.fromordinal(day.toordinal() + 1)
         except MCPError as e:
             return FetchResult(self.name, group_id, [], ProviderStatus.READ_FAILED, f"MCP 读取失败：{e}")
         except Exception as e:  # 防御上游异常数据
@@ -321,6 +314,87 @@ class WeChatDataAnalysisProvider(ChatHistoryProvider):
         if not messages:
             return FetchResult(self.name, group_id, [], ProviderStatus.EMPTY_RESULT, "该时间段无消息")
         return FetchResult(self.name, group_id, messages, ProviderStatus.OK)
+
+    def _anchor_for_day(self, group_id: str, day: object, tz) -> str | None:
+        """获取某天第一条消息的锚点 ID；当天无消息返回 None。"""
+        structured = self._mcp_client.call(
+            "wechat.chat.get_message_anchor",
+            {
+                "username": group_id,
+                "kind": "day",
+                "date": day.isoformat(),
+                "source": "auto",
+            },
+        )
+        return structured.get("anchorId") or None
+
+    def _drain_around(
+        self,
+        group_id: str,
+        anchor: str,
+        start_time: datetime,
+        end_time: datetime,
+        collect,
+    ) -> None:
+        """从锚点向前后翻页读取，直到完全越过时间窗。
+
+        每次调用返回锚点附近约 50 条（含锚点自身），把锚点推进到
+        窗口内最前/最后一条后继续；越界或翻页重叠时停止。
+        """
+        # 向后（更早）方向：锚点 = 当前窗口内最早一条
+        cur = anchor
+        rounds = 0
+        while cur and rounds < _MCP_MAX_PAGES:
+            rounds += 1
+            structured = self._mcp_client.call(
+                "wechat.chat.get_message_around",
+                {
+                    "username": group_id,
+                    "anchor_id": cur,
+                    "before": _MCP_PAGE_SIZE,
+                    "after": 0,
+                    "source": "auto",
+                },
+            )
+            items = structured.get("messages") or []
+            if not items:
+                break
+            collect(items)
+            earliest = items[0]
+            ts = _mcp_timestamp(earliest.get("createTime"))
+            if ts is None or ts < start_time:
+                break  # 已越过窗口起点
+            nxt = earliest.get("id")
+            if not nxt or nxt == cur:
+                break  # 锚点不再前进，防止死循环
+            cur = nxt
+        # 向前（更晚）方向：锚点 = 当前窗口内最晚一条
+        cur = anchor
+        rounds = 0
+        while cur and rounds < _MCP_MAX_PAGES:
+            rounds += 1
+            structured = self._mcp_client.call(
+                "wechat.chat.get_message_around",
+                {
+                    "username": group_id,
+                    "anchor_id": cur,
+                    "before": 0,
+                    "after": _MCP_PAGE_SIZE,
+                    "source": "auto",
+                },
+            )
+            items = structured.get("messages") or []
+            if not items:
+                break
+            collect(items)
+            latest = items[-1]
+            ts = _mcp_timestamp(latest.get("createTime"))
+            if ts is None or ts > end_time:
+                break  # 已越过窗口终点
+            nxt = latest.get("id")
+            if not nxt or nxt == cur:
+                break  # 锚点不再前进，防止死循环
+            cur = nxt
 
 
 # ---------- 导出数据工具 ----------
