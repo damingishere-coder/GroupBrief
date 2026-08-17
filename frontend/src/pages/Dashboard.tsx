@@ -4,6 +4,17 @@ import { useFetch } from "../components/ui";
 export default function Dashboard({ onNav }: { onNav: (p: string) => void }) {
   const { data: status } = useFetch(() => get<SystemStatus>("/system/status"));
   const { data: groups } = useFetch(() => get<Group[]>("/groups"));
+  const { data: providers } = useFetch(() =>
+    get<Record<string, { status: string; detail: string; ok: boolean }>>(
+      "/system/providers"
+    )
+  );
+
+  const providerLabel: Record<string, string> = {
+    wechat_data_analysis: "WeChatDataAnalysis",
+    wechat_cli: "wechat-cli",
+    mock: "Mock（测试数据）",
+  };
 
   return (
     <div>
@@ -60,6 +71,32 @@ export default function Dashboard({ onNav }: { onNav: (p: string) => void }) {
       </div>
 
       <div className="card" style={{ marginTop: 16 }}>
+        <div className="card-title">系统状态</div>
+        {!providers ? (
+          <div className="muted">加载中…</div>
+        ) : (
+          Object.entries(providers).map(([key, p]) => (
+            <div className="status-row" key={key}>
+              <div>
+                <span
+                  className={`dot ${p.ok ? "dot-ok" : p.status === "UNSUPPORTED_WECHAT_VERSION" || p.status === "EMPTY_RESULT" ? "dot-warn" : "dot-bad"}`}
+                />
+                <strong>{providerLabel[key] ?? key}</strong>
+                <div className="muted" style={{ fontSize: 12, marginLeft: 16, display: "inline" }}>
+                  {p.detail}
+                </div>
+              </div>
+              <span
+                className={`badge ${p.ok ? "badge-ok" : "badge-bad"}`}
+              >
+                {p.ok ? "可用" : p.status}
+              </span>
+            </div>
+          ))
+        )}
+      </div>
+
+      <div className="card">
         <div className="card-title">已配置群聊</div>
         {!groups || groups.length === 0 ? (
           <div className="empty-state">

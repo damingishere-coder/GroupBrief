@@ -17,9 +17,13 @@ export default function Groups() {
   const [adding, setAdding] = useState(false);
   const [newName, setNewName] = useState("");
   const [newWxName, setNewWxName] = useState("");
+  const [discovered, setDiscovered] = useState<
+    { group_id: string; group_name: string; member_count: number }[]
+  >([]);
   const [busy, setBusy] = useState(false);
   const [editingPrompt, setEditingPrompt] = useState(false);
   const [promptDraft, setPromptDraft] = useState("");
+  const [newWxId, setNewWxId] = useState("");
 
   const refresh = async () => {
     const [g, r] = await Promise.all([
@@ -46,12 +50,11 @@ export default function Groups() {
     ? reports.find((r) => r.group_run_id === activeId) ?? null
     : null;
 
-  const generate = async (force: boolean) => {
-    if (!active) return;
+  const generate = async (force: boolean, groupId?: number) => {
     setBusy(true);
     try {
       const res = await post<{ run_id: number }>("/reports/generate", {
-        group_id: active.id,
+        group_id: groupId ?? undefined,
         force,
       });
       toast(res.run_id ? "生成完成" : "生成任务已提交");
@@ -60,6 +63,30 @@ export default function Groups() {
       toast(`生成失败：${e}`);
     } finally {
       setBusy(false);
+    }
+  };
+
+  const generateAll = async () => {
+    setBusy(true);
+    try {
+      const res = await post<{ run_id: number }>("/reports/generate", {
+        force: false,
+      });
+      toast(`全部生成完成（run ${res.run_id}）`);
+      await refresh();
+    } catch (e) {
+      toast(`生成失败：${e}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const sendEmail = async () => {
+    try {
+      const res = await post<{ ok: boolean; detail: string }>("/email/send");
+      toast(res.ok ? "邮件已发送" : `发送失败：${res.detail}`);
+    } catch (e) {
+      toast(String(e));
     }
   };
 
@@ -104,16 +131,36 @@ export default function Groups() {
     try {
       await post("/groups", {
         display_name: newName.trim(),
-        wechat_group_name: newWxName.trim(),
+        wechat_group_id: newWxId,
+        wechat_group_name: newWxName.trim() || newWxId,
       });
       setAdding(false);
       setNewName("");
       setNewWxName("");
+      setNewWxId("");
       toast("群已添加");
       await refresh();
     } catch (e) {
       toast(String(e));
     }
+  };
+
+  const openAdd = async () => {
+    setAdding(true);
+    try {
+      const list = await get<
+        { group_id: string; group_name: string; member_count: number }[]
+      >("/groups/discover");
+      setDiscovered(list);
+    } catch {
+      setDiscovered([]);
+    }
+  };
+
+  const pickDiscovered = (item: { group_id: string; group_name: string }) => {
+    setNewWxId(item.group_id);
+    setNewWxName(item.group_name);
+    setNewName(item.group_name);
   };
 
   return (
@@ -136,9 +183,7 @@ export default function Groups() {
         ))}
         <button
           className="tab-add"
-          onClick={() => {
-            setAdding(true);
-          }}
+          onClick={openAdd}
         >
           + 添加群聊
         </button>
@@ -147,6 +192,25 @@ export default function Groups() {
       {adding && (
         <div className="card">
           <div className="card-title">添加群聊</div>
+          {discovered.length > 0 && (
+            <div style={{ marginBottom: 16 }}>
+              <div className="muted" style={{ fontSize: 13, marginBottom: 8 }}>
+                从 Provider 发现的群聊（点击选择，避免输入错误）：
+              </div>
+              <div className="row" style={{ gap: 8 }}>
+                {discovered.map((item) => (
+                  <button
+                    key={item.group_id}
+                    className="btn btn-sm btn-ghost"
+                    onClick={() => pickDiscovered(item)}
+                  >
+                    {item.group_name || item.group_id}
+                    {item.member_count ? `（${item.member_count}人）` : ""}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
           <div className="row" style={{ gap: 10 }}>
             <div className="field" style={{ margin: 0 }}>
               <label>显示名称</label>
@@ -155,6 +219,15 @@ export default function Groups() {
                 placeholder="例如：Eason张UED-4群"
                 value={newName}
                 onChange={(e) => setNewName(e.target.value)}
+              />
+            </div>
+            <div className="field" style={{ margin: 0 }}>
+              <label>微信真实群 ID</label>
+              <input
+                type="text"
+                placeholder="Provider 返回的稳定 ID"
+                value={newWxId}
+                onChange={(e) => setNewWxId(e.target.value)}
               />
             </div>
             <div className="field" style={{ margin: 0 }}>
@@ -225,6 +298,19 @@ export default function Groups() {
                 重新生成
               </button>
               <button
+                className="btn btn-sm"
+                disabled={busy}
+                onClick={generateAll}
+              >
+                全部生成
+              </button>
+              <button
+                className="btn btn-sm btn-secondary"
+                onClick={sendEmail}
+              >
+                手动发邮件
+              </button>
+              <button
                 className="btn btn-sm btn-ghost"
                 disabled={!report}
                 onClick={() => report && copyText(report.ranking_text, toast)}
@@ -261,7 +347,16 @@ export default function Groups() {
               <button
                 className="btn btn-sm btn-ghost"
                 disabled={!report}
-                onClick={() => toast("邮件预览将在 P6 提供")}
+                onClick={async () => {
+                  try {
+                    const p = await get<{ subject: string; body: string }>(
+                      "/email/preview"
+                    );
+                    window.alert(`邮件预览\n\n主题：${p.subject}\n\n${p.body}`);
+                  } catch (e) {
+                    toast(String(e));
+                  }
+                }}
               >
                 预览邮件
               </button>

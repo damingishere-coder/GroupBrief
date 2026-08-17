@@ -2,15 +2,19 @@ import { useState } from "react";
 import Dashboard from "./pages/Dashboard";
 import Groups from "./pages/Groups";
 import Runs from "./pages/Runs";
+import Files from "./pages/Files";
+import Logs from "./pages/Logs";
 import SettingsPage from "./pages/Settings";
 import About from "./pages/About";
 
-type Page = "dashboard" | "groups" | "runs" | "settings" | "about";
+type Page = "dashboard" | "groups" | "runs" | "files" | "logs" | "settings" | "about";
 
 const NAV: { key: Page; label: string }[] = [
   { key: "dashboard", label: "仪表盘" },
   { key: "groups", label: "群聊管理" },
   { key: "runs", label: "执行记录" },
+  { key: "files", label: "文件管理" },
+  { key: "logs", label: "日志" },
   { key: "settings", label: "配置设置" },
   { key: "about", label: "关于" },
 ];
@@ -42,6 +46,8 @@ export default function App() {
         {page === "dashboard" && <Dashboard onNav={(p) => setPage(p as Page)} />}
         {page === "groups" && <Groups />}
         {page === "runs" && <Runs />}
+        {page === "files" && <Files />}
+        {page === "logs" && <Logs />}
         {page === "settings" && <SettingsPage />}
         {page === "about" && <About />}
       </main>

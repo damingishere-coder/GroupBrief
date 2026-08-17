@@ -60,6 +60,26 @@
 
 ---
 
+## P8 — Apple 风格本地 Web UI（2026-08-17）
+
+### 状态：P8 PASS
+
+### 做了什么
+- 仪表盘：状态卡（统计日期/群数/下次执行/服务状态）+ Provider 状态区（WeChatDataAnalysis / wechat-cli / Mock 可用性）+ 群列表
+- 群聊管理：多群 Tab + 添加群聊（支持从 Provider 发现的群列表一键选择）、删除/启停、生成/重新生成/全部生成、复制/导出排行榜与 Prompt、Prompt 编辑保存、手动发邮件、邮件预览
+- 执行记录、文件管理（按日期查看 handoff 文件并下载）、日志（5 类日志 tail 查看）、配置设置（Key 掩码）、关于
+- 海报预览 V2 占位（poster_file/poster_status 预留）
+- 新增 /api/logs 日志接口
+
+### 测试结果
+- 前端 `npm run build` 通过（tsc 严格模式）
+- 端到端冒烟：12 个 API + 首页全部 200，手动生成 run 成功
+
+### Commit
+- `feat: add GroupBrief local web interface`（待 push）
+
+---
+
 ## P6 — 邮件（2026-08-17）
 
 ### 状态：P6 PASS（真实发信：REAL_ENV_PENDING）
