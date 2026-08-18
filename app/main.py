@@ -11,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from app.api import email, files, groups, logs, reports, runs, settings, system
+from app.api import v2_templates
 from app.config.settings import PROJECT_ROOT, get_settings
 from app.core.logging import setup_logging
 from app.db import repository
@@ -53,6 +54,7 @@ app.include_router(settings.router)
 app.include_router(files.router)
 app.include_router(email.router)
 app.include_router(logs.router)
+app.include_router(v2_templates.router)
 
 
 @app.get("/api/version")

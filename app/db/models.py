@@ -19,6 +19,16 @@ class Group(SQLModel, table=True):
     created_at: datetime = Field(default_factory=datetime.now)
     updated_at: datetime = Field(default_factory=datetime.now)
 
+    # ---------- V2 扩展字段（P3 起使用，P7 pipeline 落地） ----------
+    schedule_rule: str = "weekday_default"  # 统计周期规则
+    send_time: str = "08:30"  # 本群独立发送时间 HH:MM
+    summary_model: str = "deepseek-v4-flash"  # 总结模型
+    prompt_model: str = "deepseek-v4-flash"  # Prompt 模型
+    image_enabled: bool = True  # 是否生图
+    send_target: str = ""  # 微信发送目标（群名）
+    ranking_template: str = "default"  # 排行榜模板名
+    image_prompt_template: str = "default"  # 生图 Prompt 模板名
+
 
 class Run(SQLModel, table=True):
     __tablename__ = "runs"

@@ -13,6 +13,29 @@ from app.db.models import Group, Report, Run, Setting
 engine: Any = None
 
 
+# V2 群配置扩展列（幂等迁移：仅在列不存在时 ALTER TABLE ADD COLUMN）
+_V2_GROUP_COLUMNS: dict[str, str] = {
+    "schedule_rule": "VARCHAR(64) NOT NULL DEFAULT 'weekday_default'",
+    "send_time": "VARCHAR(8) NOT NULL DEFAULT '08:30'",
+    "summary_model": "VARCHAR(64) NOT NULL DEFAULT 'deepseek-v4-flash'",
+    "prompt_model": "VARCHAR(64) NOT NULL DEFAULT 'deepseek-v4-flash'",
+    "image_enabled": "BOOLEAN NOT NULL DEFAULT 1",
+    "send_target": "VARCHAR(256) NOT NULL DEFAULT ''",
+    "ranking_template": "VARCHAR(64) NOT NULL DEFAULT 'default'",
+    "image_prompt_template": "VARCHAR(64) NOT NULL DEFAULT 'default'",
+}
+
+
+def _migrate_group_v2_columns() -> None:
+    """为已存在的 groups 表补 V2 列（幂等）。"""
+    with engine.connect() as conn:
+        existing = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(groups)")}
+        for col, ddl in _V2_GROUP_COLUMNS.items():
+            if col not in existing:
+                conn.exec_driver_sql(f"ALTER TABLE groups ADD COLUMN {col} {ddl}")
+        conn.commit()
+
+
 def init_db(settings: Settings) -> Any:
     """初始化 SQLite 引擎并建表。"""
     global engine
@@ -23,6 +46,7 @@ def init_db(settings: Settings) -> Any:
         connect_args={"check_same_thread": False},
     )
     SQLModel.metadata.create_all(engine)
+    _migrate_group_v2_columns()
     _seed_defaults(settings)
     apply_db_settings(settings)
     return engine

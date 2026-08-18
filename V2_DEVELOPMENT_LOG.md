@@ -135,4 +135,54 @@ ranking.json / ranking.txt 保存于 `output/test-data/`。
 
 ---
 
-> 下一轮：P3 排行榜模板系统
+## P3 — 排行榜模板系统（2026-08-18）
+
+### 状态：P3 PASS
+
+### 做了什么
+- `templates/ranking/` 模板目录 + `default.txt` 默认模板（群名原样渲染，不硬编码 emoji，
+  避免真实群名自带 emoji 导致「🐮🐴🐮🐴」重复；装饰可在模板中心自行编辑）
+- `app/ranking/template_service.py`：`RankingTemplateService`
+  - 模板 CRUD（list/read/save/delete）、恢复默认、默认模板不可删除、安全文件名校验
+  - 默认模板内容固化为 `DEFAULT_RANKING_TEMPLATE` 常量，`validate_template` 校验未支持变量
+- `app/ranking/renderer.py` 重构为模板驱动：`RankingRenderer.render(result, template_name)`
+  支持变量：group_name / period_start / period_end / speaker_count / message_count / top10_lines
+- Group 模型扩展 V2 字段（schedule_rule / send_time / summary_model / prompt_model /
+  image_enabled / send_target / ranking_template / image_prompt_template）+ 幂等数据库迁移
+  （`ALTER TABLE groups ADD COLUMN`，列不存在才加）
+- 模板 CRUD API：`/api/v2/templates/ranking`（列表/读取/保存/恢复默认/删除/预览）
+- 新增单测 `tests/test_v2_ranking_template.py`（14 项）
+
+### 模板变量
+| 变量 | 说明 |
+| --- | --- |
+| `{{group_name}}` | 群名称 |
+| `{{period_start}}` / `{{period_end}}` | 统计起止时间 |
+| `{{speaker_count}}` | 发言人数 |
+| `{{message_count}}` | 总消息数 |
+| `{{top10_lines}}` | Top10 多行（`1.名称【数量】`） |
+
+### 示例渲染结果（真实茶馆数据）
+`===== 茶馆V3.0（三周年纪念）🐮🐴 =====`（emoji 单次，与路线文档 §三 一致）
+
+### 测试结果
+- pytest 145 passed（新增 14）
+- API 冒烟：GET 列表 / GET 内容 / POST 预览 均 200
+
+### 验收标准
+- ✅ templates/ranking/ 已创建
+- ✅ RankingRenderer 模板渲染
+- ✅ 模板变量支持
+- ✅ UTF-8 与 Emoji 正常
+- ✅ 模板格式错误明确报错（TemplateError，不崩溃）
+- ✅ 支持恢复默认模板
+- ✅ 每个群可选择 ranking_template（Group 模型字段）
+- ✅ 后端模板 CRUD 接口已提供
+- ✅ 独立 commit
+
+### Commit
+- `(待提交)` P3
+
+---
+
+> 下一轮：P4 DeepSeek V4 Flash 生图 Prompt 流水线

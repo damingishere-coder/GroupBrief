@@ -1,37 +1,67 @@
-"""V2 排行榜文本渲染器。
+"""V2 排行榜文本渲染器（模板驱动）。
 
-P2：最简实现（内嵌格式），保证 ranking.txt 可交付；
-P3：改为模板系统（templates/ranking/，前端可编辑），本模块重构为
-RankingRenderer，渲染逻辑由模板控制。
+从模板（templates/ranking/）渲染 ranking.txt，模板变量见
+SUPPORTED_VARS。模板格式错误抛出 TemplateError，不导致服务崩溃。
 """
 
 from __future__ import annotations
 
+import re
+
 from app.ranking.engine_types import RankingResult
+from app.ranking.template_service import (
+    SUPPORTED_VARS,
+    TemplateError,
+    RankingTemplateService,
+    validate_template,
+)
+
+_PLACEHOLDER_RE = re.compile(r"\{\{\s*(\w+)\s*\}\}")
+
+
+def render_ranking(result: RankingResult, template_text: str) -> str:
+    """把模板与统计结果渲染成最终排行榜文本。"""
+    validate_template(template_text)
+
+    top10_lines = "\n".join(
+        f"{s.rank}.{s.name}【{s.count}】" for s in result.top_speakers
+    )
+    values = {
+        "group_name": result.group_name,
+        "period_start": result.period_start,
+        "period_end": result.period_end,
+        "speaker_count": str(result.speaker_count),
+        "message_count": str(result.message_count),
+        "top10_lines": top10_lines,
+    }
+
+    def _replace(match: re.Match) -> str:
+        var = match.group(1)
+        return values.get(var, match.group(0))
+
+    return _PLACEHOLDER_RE.sub(_replace, template_text)
 
 
 class RankingRenderer:
-    """把 RankingResult 渲染成可发送的文本。"""
+    """按模板渲染 RankingResult。"""
 
+    def __init__(self, service: RankingTemplateService | None = None):
+        self.service = service or RankingTemplateService()
+
+    def render(
+        self,
+        result: RankingResult,
+        template_name: str = "default",
+        template_text: str | None = None,
+    ) -> str:
+        """渲染 ranking.txt。template_text 优先（便于预览），否则读取模板文件。"""
+        text = template_text
+        if text is None:
+            text = self.service.read(template_name)
+        return render_ranking(result, text)
+
+    # 兼容 P2 调用点：无模板场景的最简渲染（内容与 default 模板一致）
     def render_simple(self, result: RankingResult) -> str:
-        """最简格式（P2 临时，P3 替换为模板）。"""
-        lines = [
-            result.group_name,
-            "消息统计",
-            "------------",
-            "",
-            f"时间起：{result.period_start}",
-            f"时间止：{result.period_end}",
-            "",
-            "------------",
-            "",
-            f"发言人数：{result.speaker_count}",
-            f"总消息：{result.message_count}",
-            "",
-            "------------",
-            "",
-            "发言 Top10",
-        ]
-        for s in result.top_speakers:
-            lines.append(f"{s.rank}.{s.name}【{s.count}】")
-        return "\n".join(lines)
+        from app.ranking.template_service import DEFAULT_RANKING_TEMPLATE
+
+        return render_ranking(result, DEFAULT_RANKING_TEMPLATE)
