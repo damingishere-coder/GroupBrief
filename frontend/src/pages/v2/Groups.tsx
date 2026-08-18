@@ -1,5 +1,17 @@
 import { useEffect, useState } from "react";
-import { GroupV2, del, get, post, put } from "../../api";
+import {
+  DiscoveredGroup,
+  GroupMatch,
+  GroupV2,
+  bindGroupFromName,
+  del,
+  discoverGroups,
+  get,
+  post,
+  put,
+  resolveGroups,
+  testReadGroup,
+} from "../../api";
 import { useToast } from "../../components/ui";
 
 const EMPTY_GROUP: Partial<GroupV2> = {
@@ -25,12 +37,61 @@ function GroupForm({
   onSave: (g: Partial<GroupV2>) => void;
   onCancel: () => void;
 }) {
+  const { msg, toast } = useToast();
   const [form, setForm] = useState<Partial<GroupV2>>({ ...EMPTY_GROUP, ...initial });
+  const [discovered, setDiscovered] = useState<DiscoveredGroup[]>([]);
+  const [showDiscover, setShowDiscover] = useState(false);
   const set = (k: keyof GroupV2, v: unknown) => setForm((f) => ({ ...f, [k]: v }));
+
+  const loadDiscover = () => {
+    discoverGroups()
+      .then((list) => {
+        setDiscovered(list);
+        setShowDiscover(true);
+        toast(`从微信发现 ${list.length} 个群`);
+      })
+      .catch((e) => toast(String(e)));
+  };
+
+  const pick = (item: DiscoveredGroup) => {
+    setForm((f) => ({
+      ...f,
+      display_name: item.group_name,
+      wechat_group_id: item.group_id,
+      wechat_group_name: item.group_name,
+      send_target: item.group_name,
+    }));
+    toast(`已选择「${item.group_name}」`);
+  };
 
   return (
     <div className="card form-card">
       <div className="card-title">{initial.id ? "编辑群" : "新增群"}</div>
+
+      {!initial.id && (
+        <div className="discover-bar">
+          <button type="button" className="btn btn-sm btn-secondary" onClick={loadDiscover}>
+            从微信发现群（避免手输群 ID）
+          </button>
+          {showDiscover && (
+            <div className="discover-list">
+              {discovered.length === 0 && <span className="muted">未发现群（请确认 WeChatDataAnalysis 已运行）</span>}
+              {discovered.map((item) => (
+                <button
+                  key={item.group_id}
+                  type="button"
+                  className="discover-item"
+                  onClick={() => pick(item)}
+                  title={item.group_id}
+                >
+                  {item.group_name}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
       <div className="form-grid">
         <label className="field">
           群名称
@@ -86,6 +147,7 @@ function GroupForm({
           取消
         </button>
       </div>
+      {msg && <div className="toast">{msg}</div>}
     </div>
   );
 }
@@ -95,6 +157,12 @@ export default function Groups() {
   const [groups, setGroups] = useState<GroupV2[]>([]);
   const [editing, setEditing] = useState<Partial<GroupV2> | null>(null);
   const [loading, setLoading] = useState(true);
+  // 按群名搜索绑定
+  const [searchName, setSearchName] = useState("");
+  const [searching, setSearching] = useState(false);
+  const [searchResult, setSearchResult] = useState<GroupMatch[]>([]);
+  // 测试读取结果
+  const [testReadingId, setTestReadingId] = useState<number | null>(null);
 
   const load = () => {
     setLoading(true);
@@ -124,6 +192,52 @@ export default function Groups() {
       .catch((e) => toast(String(e)));
   };
 
+  // 按群名搜索真实群
+  const doSearch = () => {
+    if (!searchName.trim()) {
+      toast("请输入群名关键词");
+      return;
+    }
+    setSearching(true);
+    resolveGroups(searchName.trim())
+      .then((list) => {
+        setSearchResult(list);
+        if (list.length === 0) toast("未找到匹配的群");
+        setSearching(false);
+      })
+      .catch((e) => {
+        toast(String(e));
+        setSearching(false);
+      });
+  };
+
+  const doBind = (m: GroupMatch) => {
+    bindGroupFromName({ name: searchName.trim(), group_id: m.id })
+      .then((res) => {
+        toast(res.already_existed ? `已绑定到已有群（id=${res.id}）` : `绑定成功（id=${res.id}）`);
+        setSearchResult([]);
+        setSearchName("");
+        load();
+      })
+      .catch((e) => {
+        const text = String(e);
+        toast(text.length > 120 ? text.slice(0, 120) + "…" : text);
+      });
+  };
+
+  // 测试读取（显示该群最近周期的消息数）
+  const testRead = (g: GroupV2) => {
+    setTestReadingId(g.id);
+    testReadGroup(g.id)
+      .then((res) => {
+        toast(
+          `群「${g.display_name}」\n${res.provider} · ${res.status}\n消息数：${res.message_count}\n${res.detail}`
+        );
+      })
+      .catch((e) => toast(String(e)))
+      .finally(() => setTestReadingId(null));
+  };
+
   return (
     <div>
       <div className="page-header">
@@ -136,11 +250,41 @@ export default function Groups() {
         </button>
       </div>
 
+      {/* 按群名搜索绑定（复用 V1 能力） */}
+      <div className="card search-bind">
+        <div className="search-bind-row">
+          <input
+            placeholder="按真实微信群名称搜索并绑定（如：茶馆）"
+            value={searchName}
+            onChange={(e) => setSearchName(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && doSearch()}
+          />
+          <button className="btn btn-secondary btn-sm" onClick={doSearch} disabled={searching}>
+            {searching ? "搜索中…" : "搜索群"}
+          </button>
+        </div>
+        {searchResult.length > 0 && (
+          <div className="search-result">
+            {searchResult.map((m) => (
+              <div key={m.id} className="search-result-row">
+                <span>
+                  {m.name}
+                  <span className="muted">（{m.match_type === "exact" ? "精确匹配" : "模糊匹配"} · {m.provider}）</span>
+                </span>
+                <button className="btn btn-sm" onClick={() => doBind(m)}>
+                  绑定
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
       {editing && <GroupForm initial={editing} onSave={save} onCancel={() => setEditing(null)} />}
 
       <div className="group-list">
         {loading && <div className="empty-state">加载中…</div>}
-        {!loading && groups.length === 0 && <div className="empty-state">暂无群，点击「新增群」添加。</div>}
+        {!loading && groups.length === 0 && <div className="empty-state">暂无群，可点击「新增群」或在上方「搜索群」绑定。</div>}
         {groups.map((g) => (
           <div className="card group-row" key={g.id}>
             <div className="group-row-main">
@@ -155,6 +299,9 @@ export default function Groups() {
               </div>
             </div>
             <div className="row-actions">
+              <button className="btn btn-sm btn-secondary" onClick={() => testRead(g)} disabled={testReadingId === g.id}>
+                {testReadingId === g.id ? "读取中…" : "测试读取"}
+              </button>
               <button className="btn btn-sm btn-secondary" onClick={() => setEditing({ ...g })}>
                 编辑
               </button>

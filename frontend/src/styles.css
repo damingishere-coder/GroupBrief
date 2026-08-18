@@ -560,3 +560,14 @@ select:focus {
 .sys-warning .muted { margin-top: 4px; }
 .sys-startup-item { display: flex; align-items: center; gap: 8px; padding: 6px 0; font-size: 13px; color: #3a3a3c; }
 .sys-startup-item b { min-width: 180px; color: #1d1d1f; }
+
+/* 群管理：发现群 / 搜索绑定 */
+.discover-bar { margin-bottom: 14px; display: flex; flex-direction: column; gap: 8px; }
+.discover-list { display: flex; flex-wrap: wrap; gap: 6px; max-height: 160px; overflow-y: auto; padding: 8px; background: #f5f5f7; border-radius: 10px; }
+.discover-item { border: 1px solid #e5e5ea; background: #fff; border-radius: 8px; padding: 5px 10px; font-size: 12.5px; cursor: pointer; color: #1d1d1f; }
+.discover-item:hover { border-color: #0071e3; color: #0071e3; }
+.search-bind { padding: 14px 16px; margin-bottom: 16px; }
+.search-bind-row { display: flex; gap: 8px; }
+.search-bind-row input { flex: 1; }
+.search-result { margin-top: 10px; display: flex; flex-direction: column; gap: 6px; }
+.search-result-row { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 8px 12px; background: #f5f5f7; border-radius: 8px; font-size: 13px; }

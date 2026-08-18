@@ -142,6 +142,33 @@ export interface TemplateItem {
   content: string;
 }
 
+// 群发现 / 解析绑定 / 测试读取（V1 保留能力）
+export interface DiscoveredGroup {
+  group_id: string;
+  group_name: string;
+  member_count: number;
+}
+export interface GroupMatch {
+  id: string;
+  name: string;
+  member_count: number;
+  provider: string;
+  match_type: string;
+}
+export interface TestReadResult {
+  provider: string;
+  status: string;
+  detail: string;
+  message_count: number;
+}
+export const discoverGroups = () => get<DiscoveredGroup[]>("/groups/discover");
+export const resolveGroups = (name: string) =>
+  get<GroupMatch[]>(`/groups/resolve?name=${encodeURIComponent(name)}`);
+export const bindGroupFromName = (body: { name: string; group_id?: string }) =>
+  post<{ id: number; bound: boolean; already_existed: boolean }>("/groups/from-name", body);
+export const testReadGroup = (groupId: number) =>
+  post<TestReadResult>(`/groups/${groupId}/test-read`);
+
 export const getDashboard = () => get<Dashboard>("/v2/dashboard");
 export const getRuns = (runDate?: string) =>
   get<{ runs: V2Run[]; total: number }>(`/v2/runs${runDate ? `?run_date=${runDate}` : ""}`);
