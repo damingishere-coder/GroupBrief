@@ -1,0 +1,30 @@
+# GroupBrief V2 群配置示例
+#
+# 实际配置由 V2 前端编辑后写入 SQLite（groups 表扩展字段），
+# 本文件仅作为文档说明每个字段的含义与合法取值。
+
+groups:
+  - id: tea_house
+    name: "茶馆V3.0（三周年纪念）🐮🐴"
+
+    enabled: true
+
+    # 统计周期规则：weekday_default（默认：周一=周五~周日，周六日不生成）
+    schedule_rule: "weekday_default"
+
+    # 本群发送时间（每群独立）
+    send_time: "08:30"
+
+    # 总结模型 / Prompt 模型（当前均为 DeepSeek V4 Flash）
+    summary_model: "deepseek-v4-flash"
+    prompt_model: "deepseek-v4-flash"
+
+    # 是否生图（false 时跳过生图，PROMPT_READY 后直接 READY_TO_SEND）
+    image_enabled: true
+
+    # 发送目标（微信中显示的群名，用于自动发送定位）
+    send_target: "茶馆V3.0（三周年纪念）🐮🐴"
+
+    # 使用的排行榜模板 / 生图 Prompt 模板（templates/ 下）
+    ranking_template: "default"
+    image_prompt_template: "default"

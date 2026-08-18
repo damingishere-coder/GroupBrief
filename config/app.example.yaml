@@ -1,0 +1,28 @@
+# GroupBrief V2 应用级配置示例（文档用）。
+#
+# 运行时配置仍由 .env + SQLite settings 表管理（V1 既有机制），
+# 本文件说明 V2 关键应用参数。
+
+app:
+  # 默认每天开始生成的时间（每群发送时间独立配置于群配置）
+  default_generate_time: "08:00"
+
+  # 时区
+  timezone: "Asia/Shanghai"
+
+  # 默认统计周期规则
+  default_schedule_rule: "weekday_default"
+
+data_source:
+  # WeChatDataAnalysis 本地 MCP 服务（本机回环地址）
+  wechat_data_analysis_url: "http://127.0.0.1:10392/mcp"
+
+image:
+  # 每个群每天最多生成的图片数
+  max_images_per_group_per_day: 1
+  # 图片文件名（固定）
+  filename: "daily_image.png"
+
+sender:
+  # 发送顺序固定：先排行榜文字，后图片
+  order: ["ranking.txt", "daily_image.png"]
