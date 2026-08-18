@@ -85,6 +85,7 @@ class FetchResult:
     messages: list[V2Message]
     status: DataSourceStatus = DataSourceStatus.OK
     detail: str = ""
+    error_type: str = ""  # V2 错误类型（见 app.v2.constants）
 
 
 class WeChatDataSource:
