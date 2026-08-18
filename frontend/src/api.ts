@@ -70,3 +70,97 @@ export interface LatestReport {
   email_status: string;
   created_at: string | null;
 }
+
+// ================= V2 =================
+
+export interface GroupV2 extends Group {
+  schedule_rule: string;
+  send_time: string;
+  summary_model: string;
+  prompt_model: string;
+  image_enabled: boolean;
+  send_target: string;
+  ranking_template: string;
+  image_prompt_template: string;
+}
+
+export interface DashboardCard {
+  group_id: number;
+  group_name: string;
+  send_time: string;
+  schedule_rule: string;
+  image_enabled: boolean;
+  ranking_template: string;
+  image_prompt_template: string;
+  status: string;
+  period_start: string;
+  period_end: string;
+  message_count: number;
+  speaker_count: number;
+  image_url: string;
+  error: string;
+  sent_at: string;
+  updated_at: string;
+}
+
+export interface Dashboard {
+  today: string;
+  should_run: boolean;
+  period_start: string;
+  period_end: string;
+  enabled_groups: number;
+  counts: { pending: number; generated: number; sent: number; failed: number };
+  next_send: string;
+  cards: DashboardCard[];
+}
+
+export interface V2Run {
+  group_name: string;
+  run_date: string;
+  status: string;
+  period_start?: string;
+  period_end?: string;
+  [key: string]: unknown;
+}
+
+export interface SystemHealth {
+  checks: Record<string, { ok: boolean; status: string; detail: string }>;
+}
+
+export interface TemplateItem {
+  name: string;
+  content: string;
+}
+
+export const getDashboard = () => get<Dashboard>("/v2/dashboard");
+export const getRuns = (runDate?: string) =>
+  get<{ runs: V2Run[]; total: number }>(`/v2/runs${runDate ? `?run_date=${runDate}` : ""}`);
+export const getRunDetail = (group: string, date: string) =>
+  get<{ run: V2Run; files: string[] }>(`/v2/runs/${encodeURIComponent(group)}/${date}`);
+export const getSystemHealth = () => get<SystemHealth>("/v2/system/health");
+export const pipelineGenerate = (body: { group_id?: number; run_date?: string; force?: boolean }) =>
+  post<{ results: { status: string; group_name?: string; error_type?: string }[] }>("/v2/pipeline/generate", body);
+export const pipelineSendDue = () => post<{ results: { status: string; group_name?: string }[] }>("/v2/pipeline/send-due");
+export const pipelineSend = (body: { group_id: number; run_date?: string }) =>
+  post<{ result: { status: string; group_name?: string; error_type?: string } }>("/v2/pipeline/send", body);
+export const getV2File = (group: string, date: string, file: string) =>
+  `/api/v2/files/${encodeURIComponent(group)}/${date}/${file}`;
+
+// 模板中心
+export const listRankingTemplates = () => get<{ templates: string[]; previews: Record<string, string> }>("/v2/templates/ranking");
+export const getRankingTemplate = (name: string) => get<TemplateItem>(`/v2/templates/ranking/${name}`);
+export const saveRankingTemplate = (name: string, content: string) =>
+  put<{ ok: boolean }>(`/v2/templates/ranking/${name}`, { content });
+export const resetRankingTemplate = (name: string) =>
+  post<{ ok: boolean; content: string }>(`/v2/templates/ranking/${name}/reset`);
+export const deleteRankingTemplate = (name: string) => del<{ ok: boolean }>(`/v2/templates/ranking/${name}`);
+export const previewRankingTemplate = (name: string, content: string) =>
+  post<{ ok: boolean; rendered: string }>(`/v2/templates/ranking/${name}/preview`, { content });
+
+export const listImagePromptTemplates = () => get<{ templates: string[] }>("/v2/templates/image_prompt");
+export const getImagePromptTemplate = (name: string) => get<TemplateItem>(`/v2/templates/image_prompt/${name}`);
+export const saveImagePromptTemplate = (name: string, content: string) =>
+  put<{ ok: boolean }>(`/v2/templates/image_prompt/${name}`, { content });
+export const resetImagePromptTemplate = (name: string) =>
+  post<{ ok: boolean; content: string }>(`/v2/templates/image_prompt/${name}/reset`);
+export const deleteImagePromptTemplate = (name: string) => del<{ ok: boolean }>(`/v2/templates/image_prompt/${name}`);

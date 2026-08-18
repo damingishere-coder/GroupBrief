@@ -82,14 +82,21 @@ class RunStore:
         return self.save_run(group_name, run_date, data)
 
     def list_runs(self, run_date: str | None = None) -> list[dict]:
-        """列出全部已存在的 run（可按日期过滤）。"""
+        """列出全部已存在的 run（可按日期过滤）。
+
+        run.json 位于 group_dir/<日期>/run.json；未指定日期时遍历每个群的
+        所有日期子目录。
+        """
         runs: list[dict] = []
         if not self.root.exists():
             return runs
         for group_dir in self.root.iterdir():
             if not group_dir.is_dir():
                 continue
-            candidates = [group_dir] if run_date is None else [group_dir / run_date]
+            if run_date:
+                candidates = [group_dir / run_date]
+            else:
+                candidates = [d for d in group_dir.iterdir() if d.is_dir()]
             for d in candidates:
                 run_path = d / FILE_RUN
                 if run_path.exists():

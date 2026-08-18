@@ -1,22 +1,18 @@
 import { useState } from "react";
-import Dashboard from "./pages/Dashboard";
-import Groups from "./pages/Groups";
-import Runs from "./pages/Runs";
-import Files from "./pages/Files";
-import Logs from "./pages/Logs";
-import SettingsPage from "./pages/Settings";
-import About from "./pages/About";
+import Dashboard from "./pages/v2/Dashboard";
+import Groups from "./pages/v2/Groups";
+import Templates from "./pages/v2/Templates";
+import History from "./pages/v2/History";
+import System from "./pages/v2/System";
 
-type Page = "dashboard" | "groups" | "runs" | "files" | "logs" | "settings" | "about";
+type Page = "dashboard" | "groups" | "templates" | "history" | "system";
 
-const NAV: { key: Page; label: string }[] = [
-  { key: "dashboard", label: "仪表盘" },
-  { key: "groups", label: "群聊管理" },
-  { key: "runs", label: "执行记录" },
-  { key: "files", label: "文件管理" },
-  { key: "logs", label: "日志" },
-  { key: "settings", label: "配置设置" },
-  { key: "about", label: "关于" },
+const NAV: { key: Page; label: string; icon: string }[] = [
+  { key: "dashboard", label: "今日概览", icon: "◐" },
+  { key: "groups", label: "群管理", icon: "▤" },
+  { key: "templates", label: "模板中心", icon: "❐" },
+  { key: "history", label: "历史日报", icon: "▦" },
+  { key: "system", label: "系统状态", icon: "✦" },
 ];
 
 export default function App() {
@@ -29,7 +25,7 @@ export default function App() {
           <div className="brand-logo">报</div>
           <div>
             <div className="brand-name">群报 GroupBrief</div>
-            <div className="brand-sub">v1.0.0</div>
+            <div className="brand-sub">V2 全自动日报</div>
           </div>
         </div>
         {NAV.map((item) => (
@@ -38,18 +34,17 @@ export default function App() {
             className={`nav-item ${page === item.key ? "active" : ""}`}
             onClick={() => setPage(item.key)}
           >
+            <span className="nav-icon">{item.icon}</span>
             {item.label}
           </button>
         ))}
       </aside>
       <main className="main">
-        {page === "dashboard" && <Dashboard onNav={(p) => setPage(p as Page)} />}
+        {page === "dashboard" && <Dashboard />}
         {page === "groups" && <Groups />}
-        {page === "runs" && <Runs />}
-        {page === "files" && <Files />}
-        {page === "logs" && <Logs />}
-        {page === "settings" && <SettingsPage />}
-        {page === "about" && <About />}
+        {page === "templates" && <Templates />}
+        {page === "history" && <History />}
+        {page === "system" && <System />}
       </main>
     </div>
   );

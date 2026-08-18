@@ -390,4 +390,59 @@ run.json 记录错误类型与 image_error。
 
 ---
 
-> 下一轮：P8 V2 前端重构（不依赖 P5/P6 外部能力，可继续）
+## P8 — V2 前端重构（2026-08-18）
+
+### 状态：P8 PASS（后端 API + 前端构建 + 端到端验证通过）
+
+### 做了什么（前端）
+- 全新导航：今日概览 / 群管理 / 模板中心 / 历史日报 / 系统状态（移除 V1 的执行记录/
+  文件管理/实时监听等，V2 不展示实时监听）
+- `pages/v2/Dashboard.tsx`：今日日期、统计周期、启用群数、待生成/已生成/已发送/失败
+  统计卡、下次发送时间、每群卡片（群名/状态徽标/周期/发送时间/消息数/发言数/图片
+  缩略图/错误提示/立即生成/立即发送/危险操作确认）
+- `pages/v2/Groups.tsx`：群管理——新增/编辑/停用/删除，V2 全字段配置
+  （发送时间/周期规则/发送目标/是否生图/排行模板/Prompt 模板/Prompt 模型/启用），
+  删除需确认
+- `pages/v2/Templates.tsx`：模板中心——排行榜模板 + 生图 Prompt 模板，在线编辑/
+  保存/预览（排行榜支持示例数据渲染预览）/恢复默认/删除（默认不可删）
+- `pages/v2/History.tsx`：历史日报——按 群→日期 列表，详情展示状态/周期/图片/
+  排行榜文本/Prompt 文本
+- `pages/v2/System.tsx`：系统状态——WeChatDataAnalysis/DeepSeek/Codex/微信发送/
+  输出目录/模板资产健康检查 + 运行环境提示
+- Apple 蓝白风格：复用现有设计语言 + 追加 V2 组件样式（群卡片/模板编辑器/历史/系统）
+- 删除未引用的 V1 旧页面文件
+
+### 做了什么（后端 API 支撑）
+- `app/api/v2_ui.py`：GET /api/v2/dashboard、/runs、/runs/{group}/{date}、
+  /system/health、POST /pipeline/generate、/send-due、/send、GET /files/...
+- `app/api/groups.py` 扩展 V2 字段（GroupCreate/GroupUpdate/列表返回）
+- `app/main.py` 注册 v2_ui router
+- 修复 RunStore.list_runs（run_date 缺省时遍历日期子目录）
+
+### 验证结果
+- 前端 `npm run build` 通过（tsc 严格 + vite）
+- 后端 pytest 188 passed 无回归
+- 端到端（真实环境启动 uvicorn）：首页 200、dashboard 返回真实状态
+  （茶馆 08-18 FAILED / Grok pending）、system/health 真实检测
+  （wechat_data OK / deepseek OK / codex UNAVAILABLE / wechat_sender UNAVAILABLE）
+- 端口 8766 占用清理：终止了残留的旧 V1 服务进程
+
+### 验收标准
+- ✅ Apple 蓝白风格、大面积留白、简洁大气
+- ✅ 不展示实时监听/消息流/机器人面板
+- ✅ 五大核心页面齐全（Dashboard/群管理/模板中心/历史日报/系统状态）
+- ✅ 每群卡片含状态/缩略图/立即生成/立即发送
+- ✅ 群配置含全部 V2 字段，支持新增/停用
+- ✅ 模板中心在线编辑/保存/预览/恢复默认/绑定
+- ✅ 历史日报按 群→日期 展示完整内容
+- ✅ 系统状态显示外部依赖健康 + 环境提示
+- ✅ 关键操作连接真实后端 API
+- ✅ 危险操作（删除/发送）有确认
+- ✅ 独立 commit
+
+### Commit
+- `(待提交)` P8
+
+---
+
+> 下一轮：P9 Windows 无人值守稳定性

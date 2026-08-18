@@ -19,6 +19,15 @@ class GroupCreate(BaseModel):
     wechat_group_name: str = ""
     enabled: bool = True
     provider_preference: str = ""
+    # V2 扩展
+    schedule_rule: str = "weekday_default"
+    send_time: str = "08:30"
+    summary_model: str = "deepseek-v4-flash"
+    prompt_model: str = "deepseek-v4-flash"
+    image_enabled: bool = True
+    send_target: str = ""
+    ranking_template: str = "default"
+    image_prompt_template: str = "default"
 
 
 class GroupUpdate(BaseModel):
@@ -27,6 +36,15 @@ class GroupUpdate(BaseModel):
     wechat_group_name: str | None = None
     enabled: bool | None = None
     provider_preference: str | None = None
+    # V2 扩展
+    schedule_rule: str | None = None
+    send_time: str | None = None
+    summary_model: str | None = None
+    prompt_model: str | None = None
+    image_enabled: bool | None = None
+    send_target: str | None = None
+    ranking_template: str | None = None
+    image_prompt_template: str | None = None
 
 
 class FromNameRequest(BaseModel):
@@ -45,6 +63,14 @@ def list_groups(session: Session = Depends(repo.get_session)):
             "wechat_group_name": g.wechat_group_name,
             "enabled": g.enabled,
             "provider_preference": g.provider_preference,
+            "schedule_rule": g.schedule_rule,
+            "send_time": g.send_time,
+            "summary_model": g.summary_model,
+            "prompt_model": g.prompt_model,
+            "image_enabled": g.image_enabled,
+            "send_target": g.send_target,
+            "ranking_template": g.ranking_template,
+            "image_prompt_template": g.image_prompt_template,
             "created_at": g.created_at.isoformat(),
             "updated_at": g.updated_at.isoformat(),
         }
