@@ -61,6 +61,14 @@ class Settings(BaseSettings):
     codex_timeout_seconds: int = 600
     codex_generated_images_dir: str = ""  # 留空时默认 ~/.codex/generated_images
 
+    # 微信发送（V2，wechat-automation-api CLI）
+    # scripts/skill_cli.py 的绝对路径；留空则 WechatAutomationSender 不可用
+    wechat_automation_cli_path: str = ""
+    # 运行 wechat-automation-api 的 Python（其独立 venv）
+    wechat_automation_python: str = ""
+    # 预留：微信窗口 UIA 类名适配（当前微信 4.1.12 自绘 UI 不兼容，留空自动探测）
+    wechat_window_class: str = ""
+
     # 邮件
     email_enabled: bool = False
     email_recipient: str = ""

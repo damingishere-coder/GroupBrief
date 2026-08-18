@@ -295,4 +295,53 @@ ranking.json / ranking.txt 保存于 `output/test-data/`。
 
 ---
 
-> 下一轮：P5 真实验证（等待 Codex CLI 可用）→ P6 微信发送 Adapter
+## P6 — 微信发送 Adapter + 自动发送测试（2026-08-18）
+
+### 状态：P6 代码完成，真实发送阻塞（BLOCKED_ON_WECHAT_UIA）
+
+> ⚠️ 代码实现、单元测试、dry-run 全部完成；但真实发送因
+> **微信 4.1.12.55 自绘 UI 与 wechat-automation-api（UIA）不兼容**无法验证。
+> 按 V2 执行规则第 8 条，P6 停在真实验收之前，不得宣布完成。
+
+### 阻塞原因（真实环境核查 + 实测）
+| 检查项 | 结果 |
+| --- | --- |
+| 微信 PC 客户端 | ✅ Weixin.exe 运行中，版本 **4.1.12.55** |
+| 微信窗口 UIA 识别 | ❌ 自绘 UI（`MMUIRenderSubWindowHW`），控件树仅 2 个 Pane |
+| wechat-automation-api skill_cli.py | ✅ 可启动（--help 正常） |
+| 真实发送（skill_cli sendtext） | ❌ `WECHAT_WINDOW_NOT_FOUND`（依赖 `mmui::MainWindow` 等控件，新版不存在） |
+| 键盘导航替代方案 | ❌ 流程执行但消息未送达（文件传输助手最新消息停在 08:28，无测试消息） |
+| 截图验证 | ⚠️ 权限系统拦截（真实微信操作需用户授权） |
+
+### 已完成的代码
+- `app/sender/wechat_automation.py`：WechatAutomationSender
+  - health_check（CLI 存在 + 微信进程 + CLI 探测）
+  - send_text / send_image（子进程调用 skill_cli.py，--json 结果解析含 code+message）
+  - dry_run 模式（不调用外部）
+  - 发送图片前验证路径存在，使用绝对路径
+  - 记录发送时间 sent_at
+- `app/sender/base.py`：WechatSender 抽象（P0）
+- Settings：wechat_automation_cli_path / wechat_automation_python / wechat_window_class
+- `scripts/test_wechat_send.py`：health / dry-run / send / send-image（默认目标文件传输助手）
+- `tests/test_v2_wechat_sender.py`（8 项）：dry_run 不调用外部 / 图片校验 /
+  CLI 不可用 / JSON 解析 / 绝对路径 / 微信进程检测
+
+### 测试结果
+- pytest 174 passed（新增 8）
+- dry-run：✅ `[dry_run] 发送文字到 文件传输助手` / `[dry_run] 发送图片…`
+- health：✅ CLI 可用
+- 真实发送：❌ WECHAT_WINDOW_NOT_FOUND（微信版本兼容问题）
+
+### 下一步（用户侧）解除阻塞
+1. 微信 4.1.x 新版自绘 UI 不暴露 UIA 控件树，wechat-automation-api 不可用；
+   需要：a) 降级/更换可 UIA 识别的微信版本，或 b) 寻找支持自绘 UI 的发送方案
+   （如基于窗口截图 + 图像识别的坐标点击，或微信协议库），或 c) 授权调试键盘
+   导航方案（需解除权限限制）。
+2. 解除后：`.venv\Scripts\python.exe scripts/test_wechat_send.py send --target "文件传输助手" --text "测试"`。
+
+### Commit
+- `(待提交)` P6（代码完成，标注 BLOCKED）
+
+---
+
+> 下一轮：P6 真实验证（等待微信发送方案可用）→ P7 全流程 Pipeline + 调度
