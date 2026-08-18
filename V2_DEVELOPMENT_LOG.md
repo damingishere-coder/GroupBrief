@@ -93,4 +93,46 @@
 
 ---
 
-> 下一轮：P2 统计周期引擎 + 排行榜统计
+## P2 — 统计周期引擎 + 排行榜统计（2026-08-18）
+
+### 状态：P2 PASS
+
+### 做了什么
+- 新建 `app/scheduler/period.py`：`PeriodResolver`（V2 规则）
+  - 周一：周五 00:00:00 ～ 周日 23:59:59（**三天**，V1 是两天）
+  - 周二~周五：前一天
+  - 周六 / 周日：不生成
+  - 支持 `schedule_rule` 参数（当前 weekday_default，预留扩展）
+  - 统计终点精确到秒（23:59:59，不含微秒）
+- 实现 `app/ranking/engine.py`：V2 `RankingEngine`
+  - 确定性统计：总消息数 / 发言人数 / Top10
+  - 排序：消息数降序，同数量按发送者名称稳定升序
+  - 系统消息过滤复用 V1 规则（message_type=system 或系统内容关键词）
+  - 输出结构化 `RankingResult.to_dict()`（即 ranking.json）
+- 新增 `app/ranking/engine_types.py`：RankingResult / TopSpeaker 数据结构（供 engine 与 renderer 共用）
+- 新增 `app/ranking/renderer.py`：最简 ranking.txt（P2 临时格式，P3 模板化）
+- 新增单测 `tests/test_v2_period.py`（8 项）与 `tests/test_v2_ranking.py`（8 项）
+
+### 真实测试输出（茶馆群 08-17，415 条真实消息）
+ranking.json / ranking.txt 保存于 `output/test-data/`。
+统计结果：发言人数 27、总消息 409、Top10 与路线文档示例**完全一致**
+（停用94 / 罗斯78 / 啊菌菌阿菌53 / 杯面大英雄39 / 一颗苹果35 /
+春夏秋冬18 / 梓木18 / 大明同学17 / 吉米多的围棋7 / 神奇小郭7）。
+
+### 测试结果
+- pytest 131 passed（新增 16）
+
+### 验收标准
+- ✅ 周一正确统计三天（周五+周六+周日）
+- ✅ 周六周日正确跳过
+- ✅ Top10 数量正确
+- ✅ 中文、Emoji 昵称正常
+- ✅ 同一次输入输出完全一致（确定性）
+- ✅ 不使用 AI 计算任何排行榜数字
+
+### Commit
+- `(待提交)` P2
+
+---
+
+> 下一轮：P3 排行榜模板系统
