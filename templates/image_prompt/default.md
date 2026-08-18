@@ -1,13 +1,18 @@
-# GroupBrief V2 生图 Prompt 默认模板
+<!--
+GroupBrief V2 生图 Prompt 默认模板（P4 ImagePromptBuilder 读取）。
 
-> 使用说明：本文件是「生图 Prompt 模板」。P4 ImagePromptBuilder 将
-> 模板 + 统计周期聊天内容交给 DeepSeek V4 Flash，DeepSeek 在模板结构内
-> 填入当天真实事件，输出最终 `image_prompt.txt` 交给 Codex `$imagegen`。
-> 每个群可选择不同的模板（群配置 `image_prompt_template`）。
+本模板描述「最终生图 Prompt 必须遵循的输出结构」。DeepSeek V4 Flash
+根据统计周期的聊天内容，在此结构内填入当天真实事件，输出 image_prompt.txt。
 
-## 最终输出结构（DeepSeek 必须遵循）
+模板变量（渲染时替换）：
+  {{group_name}}       群名称
+  {{period_start}}     统计起
+  {{period_end}}       统计止
+  {{message_count}}    消息数（代码统计）
+  {{speaker_count}}    发言人数（代码统计）
 
-```
+如需修改结构，直接编辑本文件；前端模板中心（P8）也可在线编辑。
+-->
 【任务】
 生成一张竖版微信群日报漫画信息图。
 
@@ -22,10 +27,10 @@
 {{speaker_count}} 人发言
 
 【主标题】
-（幽默有趣，结合当天梗，来自真实聊天）
+（幽默有趣，可结合当天梗；必须来自真实聊天）
 
 【副标题】
-（一句话，点出当天核心）
+（一句话点出当天核心）
 
 【整体视觉】
 竖版海报，蓝白主色调，漫画信息图风格，顶部大标题，中部按事件分区，
@@ -45,13 +50,3 @@
 4. 可以幽默化标题，但不能改变事实。
 5. 海报人物依据「聊天事件中提到的人物」，而不是发言排行榜 Top10。
 6. 数据（消息数、发言人数）必须使用给定数字，禁止自行计算。
-```
-
-## 模板变量
-
-| 变量 | 说明 |
-| --- | --- |
-| `{{group_name}}` | 群名称 |
-| `{{period_start}}` / `{{period_end}}` | 统计起止时间 |
-| `{{message_count}}` | 消息总数（代码统计） |
-| `{{speaker_count}}` | 发言人数（代码统计） |

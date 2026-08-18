@@ -8,6 +8,10 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from app.ai.prompt_templates import (
+    ImagePromptTemplateError,
+    ImagePromptTemplateService,
+)
 from app.ranking.engine_types import RankingResult, TopSpeaker
 from app.ranking.renderer import render_ranking
 from app.ranking.template_service import TemplateError, RankingTemplateService
@@ -15,6 +19,7 @@ from app.ranking.template_service import TemplateError, RankingTemplateService
 router = APIRouter(prefix="/api/v2/templates", tags=["v2-templates"])
 
 _service = RankingTemplateService()
+_prompt_service = ImagePromptTemplateService()
 
 
 class TemplateContent(BaseModel):
@@ -78,6 +83,49 @@ def preview_ranking_template(name: str, payload: TemplateContent):
     try:
         return {"ok": True, "rendered": render_ranking(_preview_result(), payload.content)}
     except TemplateError as e:
+        raise HTTPException(400, str(e))
+
+
+# ---------- 生图 Prompt 模板（P4） ----------
+
+
+@router.get("/image_prompt")
+def list_image_prompt_templates():
+    return {"templates": _prompt_service.list_templates()}
+
+
+@router.get("/image_prompt/{name}")
+def get_image_prompt_template(name: str):
+    try:
+        return {"name": name, "content": _prompt_service.read(name)}
+    except ImagePromptTemplateError as e:
+        raise HTTPException(404, str(e))
+
+
+@router.put("/image_prompt/{name}")
+def save_image_prompt_template(name: str, payload: TemplateContent):
+    try:
+        _prompt_service.save(name, payload.content)
+        return {"ok": True, "name": name}
+    except ImagePromptTemplateError as e:
+        raise HTTPException(400, str(e))
+
+
+@router.post("/image_prompt/{name}/reset")
+def reset_image_prompt_template(name: str):
+    try:
+        content = _prompt_service.reset(name)
+        return {"ok": True, "name": name, "content": content}
+    except ImagePromptTemplateError as e:
+        raise HTTPException(400, str(e))
+
+
+@router.delete("/image_prompt/{name}")
+def delete_image_prompt_template(name: str):
+    try:
+        _prompt_service.delete(name)
+        return {"ok": True}
+    except ImagePromptTemplateError as e:
         raise HTTPException(400, str(e))
 
 

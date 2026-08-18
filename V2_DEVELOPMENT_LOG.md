@@ -185,4 +185,63 @@ ranking.json / ranking.txt 保存于 `output/test-data/`。
 
 ---
 
-> 下一轮：P4 DeepSeek V4 Flash 生图 Prompt 流水线
+## P4 — DeepSeek V4 Flash 生图 Prompt 流水线（2026-08-18）
+
+### 状态：P4 PASS（真实 DeepSeek API 验证通过）
+
+### 做了什么
+- `templates/image_prompt/default.md`：生图 Prompt 模板（任务/群名称/统计时间/数据/
+  主标题/副标题/整体视觉/版面1~N/底部总结/硬性要求），支持变量
+  {{group_name}}/{{period_start}}/{{period_end}}/{{message_count}}/{{speaker_count}}
+- `app/ai/prompt_templates.py`：ImagePromptTemplateService（CRUD/恢复默认/校验）+
+  DEFAULT_IMAGE_PROMPT_TEMPLATE + render_image_prompt_template
+- `app/ai/prompt_builder_types.py`：PromptInput / PromptOutput（含 meta，不含 API Key）
+- `app/ai/prompt_builder.py`：DeepSeekImagePromptBuilder
+  - 复用 V1 DeepSeekV4FlashProvider 底层 `_chat`（重试/超时），固定 V4 Flash
+  - 模板控制输出结构，用户可编辑
+  - 超长聊天：分块 → 逐块提取事件(JSON) → 合并去重 → 按模板生成（非暴力截断）
+  - 剥离模板 HTML 注释（不进入最终 Prompt）
+  - 失败返回 PromptOutput(success=False)，由 pipeline 标记 PROMPT_FAILED
+  - meta 记录模板/模式/块数/API 模型/生成时间（不含 API Key）
+- 模板 API 增加 image_prompt 端点（/api/v2/templates/image_prompt CRUD）
+- 新增单测 `tests/test_v2_prompt_builder.py`（7 项）
+
+### DeepSeek 输入结构
+- system：固定硬性约束 + 模板渲染后的【输出结构】
+- user：群聊记录（`[HH:MM] 发送者: 内容`，媒体消息打 [图片]/[语音] 等前缀）
+- 数据：群名/统计周期/消息数/发言人数（来自代码，禁止 DeepSeek 计算）
+
+### 超长聊天处理方案
+`chunk_message_count`（默认 60 行/块）分块 → 每块独立调用 DeepSeek 提取事件 JSON →
+合并去重 → 按模板生成完整 Prompt。避免直接截断丢失重要内容。
+
+### 真实验证结果（DeepSeek V4 Flash 真实调用）
+- 单块（40 条）：✅ 成功，主标题提到真实事件《牛来》票房破500万
+- 分块（415 条 / 7 块）：✅ 成功，输出 2052 字完整结构 Prompt
+- 注释剥离：✅ 生成结果直接以【任务】开头
+- meta：`{"template":"default","api_model":"deepseek-chat","mode":"chunked","chunk_count":7,...}`
+
+### 测试结果
+- pytest 152 passed（新增 7）
+- 真实 image_prompt 样例：`output/test-data/image_prompt_full.txt`
+
+### 验收标准
+- ✅ 复用现有 V1 DeepSeek 调用能力
+- ✅ 固定默认模型 V4 Flash，不纳入 V4 Pro
+- ✅ ImagePromptBuilder 已创建
+- ✅ templates/image_prompt/ 已创建，保留 V1 结构
+- ✅ 模板可编辑（API + 文件）
+- ✅ 每个群可选择 image_prompt_template（Group 字段）
+- ✅ DeepSeek 输入含聊天/群名/周期/消息数/人数
+- ✅ 输出 image_prompt.txt
+- ✅ 保存结构化元数据，不含 API Key
+- ✅ 失败标记 PROMPT_FAILED（builder 返回失败态）
+- ✅ 超长聊天分块/压缩稳定策略
+- ✅ 独立 commit
+
+### Commit
+- `(待提交)` P4
+
+---
+
+> 下一轮：P5 Codex `$imagegen` 串行自动生图与落盘
