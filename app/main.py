@@ -26,6 +26,14 @@ async def lifespan(app: FastAPI):
     setup_logging(settings.logs_dir)
     repository.init_db(settings)
     app.state.settings = settings
+    # P9：启动检查（记录日志，不阻止启动）
+    try:
+        from app.core.startup_check import run_startup_checks
+
+        app.state.startup_checks = run_startup_checks(settings)
+    except Exception:
+        app.state.startup_checks = []
+    # P9：日志轮转清理已在 setup_logging 中执行
     if os.environ.get("GROUPBRIEF_NO_SCHEDULER", "") != "1":
         from app.scheduler.manager import start_scheduler
 

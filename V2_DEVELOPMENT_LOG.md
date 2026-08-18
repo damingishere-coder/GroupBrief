@@ -445,4 +445,77 @@ run.json 记录错误类型与 image_error。
 
 ---
 
-> 下一轮：P9 Windows 无人值守稳定性
+## P9 — Windows 无人值守稳定性（2026-08-18）
+
+### 状态：P9 PASS（代码 + 测试 + 真实环境冒烟通过）
+
+### 做了什么
+1. **启动检查** `app/core/startup_check.py`：WeChatDataAnalysis 数据源 / 微信进程 /
+   DeepSeek 配置 / output 可写 / templates 完整。任一失败仅记录日志不阻止启动
+   （避免单点失败导致服务退出）。main.py lifespan 启动时执行。
+2. **开机自启** `scripts/install_autostart.py`：注册表 Run 键（HKCU）注册/卸载/查询，
+   仅在用户登录后运行（不绕过锁屏安全机制）。
+3. **任务调度自动恢复 / 异常退出恢复** `app/v2/recovery.py`：
+   - scan_incomplete：找出未终态 run，按 recovery_type 区分「send」（生成已齐备
+     触发发送）与「generate」（生成中断重跑）；
+   - verify_output：输出文件完整性检查（messages/ranking/prompt/image 缺失检测）；
+   - recover_incomplete + API retry-failed：手动/启动时重跑。
+4. **防重复**：SENT 绝不重发（pipeline.send_due 检查 sent_at）；IMAGE_READY 跳过
+   重复生图（pipeline 防重复逻辑，P7 已实现并验证）。
+5. **日志轮转**：RotatingFileHandler（5MB×5）+ `clean_old_logs` 按 `LOG_RETENTION_DAYS`
+   （30 天）清理过期日志，启动时执行。
+6. **健康页与提示**：/api/v2/system/health 增加 recent_task（最近任务）、warnings
+   （休眠/锁屏风险提示）；/api/v2/system/startup（启动检查）、/system/recovery；
+   前端 System 页展示启动检查/恢复信息 + 「重跑未完成任务」按钮（危险操作确认）。
+
+### 真实验证（启动服务冒烟）
+- startup：WeChatDataAnalysis OK / 微信 OK / DeepSeek OK / 输出 OK / 模板 OK
+- recovery：incomplete 0、integrity 1（茶馆 FAILED 为终态，正确排除）
+- health：warnings 1（锁屏/休眠提示）、recent_task 显示最近茶馆 FAILED
+- 开机自启：status 查询正常（未安装）
+
+### 测试结果
+- pytest 193 passed（新增 5）
+- 前端构建通过（System 页含恢复/重跑）
+
+### 验收标准
+- ✅ 启动检查五项
+- ✅ 开机自启支持（脚本 install/uninstall/status）
+- ✅ 调度自动恢复（未完成任务分类恢复）
+- ✅ 异常退出后恢复未完成
+- ✅ SENT 绝不重复发送
+- ✅ IMAGE_READY 跳过重复生图
+- ✅ 日志轮转 + 最大保留天数（30 天）
+- ✅ output 文件完整性检查
+- ✅ 单群失败不导致服务退出
+- ✅ 运行健康页 + 最近任务
+- ✅ 手动重跑失败任务
+- ✅ 休眠/锁屏风险提示
+- ✅ 不绕过系统锁屏安全机制
+- ✅ 独立 commit
+
+### Commit
+- `(待提交)` P9
+
+---
+
+## P0~P9 汇总状态
+
+| 轮次 | 状态 | 说明 |
+| --- | --- | --- |
+| P0 基线固化 | ✅ PASS | commit 5b94840 |
+| P1 数据接入 | ✅ PASS | commit cf48d50，真实 MCP 取数验证 |
+| P2 周期+排行 | ✅ PASS | commit f2bbc3f，真实统计与文档一致 |
+| P3 排行模板 | ✅ PASS | commit 1639aa3 |
+| P4 DeepSeek Prompt | ✅ PASS | commit 2b189c0，真实 API 验证 |
+| P5 Codex 生图 | ⚠️ BLOCKED | commit e2a5cd7，代码完成待 Codex CLI |
+| P6 微信发送 | ⚠️ BLOCKED | commit 0751987，代码完成待微信 UIA 方案 |
+| P7 Pipeline | ✅ PASS(代码) | commit 13b33c6，真实 dry-run 到生图阶段 |
+| P8 前端重构 | ✅ PASS | commit 06ef795，构建+端到端通过 |
+| P9 稳定性 | ✅ PASS | 本轮 commit |
+
+**真实外部阻塞（待用户处理）**：
+1. P5：Codex CLI 未安装 → `npm install -g @openai/codex` 后跑
+   `scripts/test_image_generation.py generate --test-data`；
+2. P6：微信 4.1.12 自绘 UI 与 wechat-automation-api（UIA）不兼容 →
+   需降级/更换可 UIA 识别的微信版本或授权替代方案。

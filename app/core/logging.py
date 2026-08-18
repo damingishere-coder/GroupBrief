@@ -13,12 +13,16 @@
 from __future__ import annotations
 
 import logging
+import time
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 _FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 
 _configured: set[str] = set()
+
+# P9：日志保留天数（超出即删除）
+LOG_RETENTION_DAYS = 30
 
 
 def _ensure_file(path: Path) -> None:
@@ -27,8 +31,39 @@ def _ensure_file(path: Path) -> None:
         path.touch()
 
 
+def clean_old_logs(logs_dir: Path, max_days: int = LOG_RETENTION_DAYS) -> int:
+    """删除超过 max_days 的日志文件（主日志与轮转备份），防止日志无限增长。
+
+    返回删除的文件数。
+    """
+    if not logs_dir.exists():
+        return 0
+    cutoff = time.time() - max_days * 86400
+    removed = 0
+    for path in logs_dir.iterdir():
+        if not path.is_file():
+            continue
+        if path.suffix.lower() not in (".log",):
+            if ".log." not in path.name:
+                continue
+        try:
+            if path.stat().st_mtime < cutoff:
+                path.unlink()
+                removed += 1
+        except OSError:
+            continue
+    return removed
+
+
 def setup_logging(logs_dir: Path, level: int = logging.INFO) -> None:
     logs_dir.mkdir(parents=True, exist_ok=True)
+    # P9：启动时清理过期日志
+    try:
+        removed = clean_old_logs(logs_dir)
+        if removed:
+            logging.getLogger("app").info("清理过期日志文件 %d 个（保留 %d 天）", removed, LOG_RETENTION_DAYS)
+    except Exception:
+        pass
 
     root = logging.getLogger()
     if root.handlers:

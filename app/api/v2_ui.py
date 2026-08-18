@@ -201,7 +201,89 @@ def system_health(settings: Settings = Depends(get_settings)):
     except Exception as e:
         checks["templates"] = {"ok": False, "status": "UNAVAILABLE", "detail": str(e)[:200]}
 
-    return {"checks": checks}
+    # 最近一次完整任务 + 未完成任务
+    store = _store(settings)
+    runs = store.list_runs()
+    last_run = runs[0] if runs else {}
+    incomplete = sum(1 for r in runs if r.get("status") not in ("SENT", "FAILED"))
+    checks["recent_task"] = {
+        "ok": True,
+        "status": "OK",
+        "detail": (
+            f"最近：{last_run.get('group_name', '—')} {last_run.get('run_date', '—')} "
+            f"{last_run.get('status', '—')}；未完成任务 {incomplete} 个"
+        ),
+    }
+
+    return {"checks": checks, "warnings": _environment_warnings()}
+
+
+# ---------- 启动检查 / 恢复（P9） ----------
+
+
+@router.get("/system/startup")
+def startup_checks(settings: Settings = Depends(get_settings)):
+    from app.core.startup_check import run_startup_checks
+
+    return {"checks": run_startup_checks(settings)}
+
+
+@router.get("/system/recovery")
+def recovery_info(settings: Settings = Depends(get_settings)):
+    from app.v2.recovery import scan_incomplete, verify_output
+
+    store = _store(settings)
+    return {
+        "incomplete": scan_incomplete(store),
+        "integrity": verify_output(store),
+    }
+
+
+class RetryBody(BaseModel):
+    group_id: int | None = None
+    run_date: str | None = None
+
+
+@router.post("/pipeline/retry-failed")
+def retry_failed(body: RetryBody | None = None, settings: Settings = Depends(get_settings)):
+    from app.pipeline.daily_pipeline import DailyPipeline
+    from app.v2.recovery import scan_incomplete
+
+    body = body or RetryBody()
+    pipeline = DailyPipeline()
+    if body.group_id:
+        r = pipeline.force_generate(body.group_id, body.run_date)
+        return {"results": [{"group_id": body.group_id, "status": r.get("status"), "detail": r.get("error") or ""}]}
+    incomplete = scan_incomplete(_store(settings), body.run_date)
+    results: list[dict] = []
+    for run in incomplete:
+        group_name = run["group_name"]
+        from sqlmodel import Session, select
+
+        from app.db import repository as repo
+        from app.db.models import Group
+
+        with Session(repo.engine) as session:
+            group = session.exec(select(Group).where(Group.display_name == group_name)).first()
+        if group is None:
+            results.append({"group_name": group_name, "status": "skipped", "detail": "群不存在/已停用"})
+            continue
+        if run.get("recovery_type") == "send":
+            r = pipeline.force_send(group.id, run["run_date"])
+        else:
+            r = pipeline.force_generate(group.id, run["run_date"])
+        results.append({"group_name": group_name, "status": r.get("status"), "detail": r.get("error") or ""})
+    return {"results": results}
+
+
+def _environment_warnings() -> list[str]:
+    """P9：休眠/锁屏等无人值守风险提示。"""
+    warnings: list[str] = []
+    warnings.append(
+        "休眠/锁屏风险：GroupBrief 自动发送依赖桌面会话。请保持电脑开机、不休眠、不锁屏；"
+        "Windows 电源设置请关闭自动休眠与自动锁屏。"
+    )
+    return warnings
 
 
 # ---------- Pipeline 手动操作 ----------

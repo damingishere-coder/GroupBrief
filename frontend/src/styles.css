@@ -554,3 +554,9 @@ select:focus {
 .sys-head b { flex: 1; color: #1d1d1f; }
 .sys-tips { margin-top: 18px; padding: 18px; }
 .sys-tips li { margin: 6px 0; font-size: 13.5px; color: #3a3a3c; line-height: 1.6; }
+
+/* P9 System 页补充 */
+.sys-warning { border-left: 4px solid #ff9f0a; padding: 16px; margin-bottom: 14px; }
+.sys-warning .muted { margin-top: 4px; }
+.sys-startup-item { display: flex; align-items: center; gap: 8px; padding: 6px 0; font-size: 13px; color: #3a3a3c; }
+.sys-startup-item b { min-width: 180px; color: #1d1d1f; }

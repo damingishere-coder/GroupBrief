@@ -125,6 +125,16 @@ export interface V2Run {
 
 export interface SystemHealth {
   checks: Record<string, { ok: boolean; status: string; detail: string }>;
+  warnings?: string[];
+}
+
+export interface StartupCheck {
+  checks: { name: string; ok: boolean; status: string; detail: string }[];
+}
+
+export interface RecoveryInfo {
+  incomplete: V2Run[];
+  integrity: { group_name: string; run_date: string; status: string; missing: string[]; ok: boolean }[];
 }
 
 export interface TemplateItem {
@@ -138,6 +148,10 @@ export const getRuns = (runDate?: string) =>
 export const getRunDetail = (group: string, date: string) =>
   get<{ run: V2Run; files: string[] }>(`/v2/runs/${encodeURIComponent(group)}/${date}`);
 export const getSystemHealth = () => get<SystemHealth>("/v2/system/health");
+export const getStartupChecks = () => get<StartupCheck>("/v2/system/startup");
+export const getRecoveryInfo = () => get<RecoveryInfo>("/v2/system/recovery");
+export const retryFailed = (body: { group_id?: number; run_date?: string }) =>
+  post<{ results: { group_name?: string; status: string; detail?: string }[] }>("/v2/pipeline/retry-failed", body);
 export const pipelineGenerate = (body: { group_id?: number; run_date?: string; force?: boolean }) =>
   post<{ results: { status: string; group_name?: string; error_type?: string }[] }>("/v2/pipeline/generate", body);
 export const pipelineSendDue = () => post<{ results: { status: string; group_name?: string }[] }>("/v2/pipeline/send-due");

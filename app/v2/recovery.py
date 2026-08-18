@@ -1,0 +1,129 @@
+"""P9 恢复与完整性检查。
+
+- scan_incomplete：找出未到终态（未 SENT/FAILED）的 run，供启动时重跑；
+- verify_output：检查每个 run 的输出文件完整性；
+- SENT 绝不重发（见 DailyPipeline.send_due 的 sent_at 检查）；
+- IMAGE_READY 跳过重复生图（见 DailyPipeline 防重复逻辑）。
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from app.core.logging import get_logger
+from app.v2.constants import (
+    FILE_IMAGE,
+    FILE_PROMPT,
+    FILE_RANKING_TXT,
+    FAILED,
+    IMAGE_READY,
+    READY_TO_SEND,
+    SENT,
+)
+from app.v2.run_store import RunStore
+
+logger = get_logger("groupbrief.pipeline")
+
+# 需要核心输出文件完整的状态
+_REQUIRED_FILES = {
+    "DATA_READY": ["messages.json"],
+    "RANKING_READY": ["messages.json", "ranking.json", "ranking.txt"],
+    "PROMPT_READY": ["messages.json", "ranking.json", "ranking.txt", "image_prompt.txt"],
+    IMAGE_READY: ["messages.json", "ranking.json", "ranking.txt", "image_prompt.txt", "daily_image.png"],
+    READY_TO_SEND: ["messages.json", "ranking.json", "ranking.txt", "image_prompt.txt", "daily_image.png"],
+    SENT: ["messages.json", "ranking.json", "ranking.txt", "image_prompt.txt", "daily_image.png"],
+}
+
+
+def scan_incomplete(store: RunStore, run_date: str | None = None) -> list[dict]:
+    """找出未到终态的 run（需要恢复/重跑的）。
+
+    排除 SENT（绝不重发）与 FAILED（保留错误，手动重跑）。
+    每个结果附 recovery_type：
+      - "send"    生成已齐备（IMAGE_READY/READY_TO_SEND），应触发发送；
+      - "generate"生成中断（PENDING~PROMPT_READY），应重新生成。
+    返回按更新时间排序的列表。
+    """
+    incomplete: list[dict] = []
+    for run in store.list_runs(run_date):
+        status = run.get("status", "")
+        if status in (SENT, FAILED):
+            continue
+        item = dict(run)
+        item["recovery_type"] = (
+            "send" if status in (IMAGE_READY, READY_TO_SEND) else "generate"
+        )
+        incomplete.append(item)
+    incomplete.sort(key=lambda r: r.get("updated_at", ""))
+    return incomplete
+
+
+def verify_output(store: RunStore, run_date: str | None = None) -> list[dict]:
+    """检查所有 run 的输出文件完整性，返回 [{group_name, run_date, status, missing, ok}]。"""
+    results: list[dict] = []
+    for run in store.list_runs(run_date):
+        status = run.get("status", "")
+        required = _REQUIRED_FILES.get(status, [])
+        missing = []
+        for f in required:
+            path = store.group_dir(run["group_name"], run["run_date"]) / f
+            if not path.exists() or path.stat().st_size == 0:
+                missing.append(f)
+        results.append(
+            {
+                "group_name": run["group_name"],
+                "run_date": run["run_date"],
+                "status": status,
+                "missing": missing,
+                "ok": len(missing) == 0,
+            }
+        )
+    return results
+
+
+def count_unsent_runs(store: RunStore) -> int:
+    """统计非 SENT 的 run 数量（状态提示用）。"""
+    return sum(1 for r in store.list_runs() if r.get("status") != SENT)
+
+
+def recover_incomplete(
+    store: RunStore,
+    group_ids: list[int] | None = None,
+    run_date: str | None = None,
+) -> list[dict]:
+    """重跑未完成群（异常退出后恢复）。调用方传入可用的 DailyPipeline。
+
+    返回恢复操作结果列表。此函数只收集任务，实际重跑交给 DailyPipeline
+    的 generate（防重复保证已到终态的跳过）。
+    """
+    from app.pipeline.daily_pipeline import DailyPipeline
+
+    pipeline = DailyPipeline()
+    incomplete = scan_incomplete(store, run_date)
+    if not incomplete:
+        return [{"status": "ok", "detail": "无未完成任务"}]
+    results: list[dict] = []
+    for run in incomplete:
+        group_name = run["group_name"]
+        # 找到群 id（按显示名）
+        gid = _find_group_id_by_name(group_name)
+        if gid is None:
+            results.append({"group_name": group_name, "status": "skipped", "detail": "群已停用/不存在"})
+            continue
+        if run.get("recovery_type") == "send":
+            r = pipeline.force_send(gid, run["run_date"])
+        else:
+            r = pipeline.force_generate(gid, run["run_date"])
+        results.append({"group_name": group_name, "status": r.get("status"), "detail": r.get("error") or ""})
+    return results
+
+
+def _find_group_id_by_name(group_name: str) -> int | None:
+    from sqlmodel import Session, select
+
+    from app.db import repository as repo
+    from app.db.models import Group
+
+    with Session(repo.engine) as session:
+        group = session.exec(select(Group).where(Group.display_name == group_name)).first()
+        return group.id if group else None
