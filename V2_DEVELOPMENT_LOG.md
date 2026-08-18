@@ -244,4 +244,55 @@ ranking.json / ranking.txt 保存于 `output/test-data/`。
 
 ---
 
-> 下一轮：P5 Codex `$imagegen` 串行自动生图与落盘
+## P5 — Codex `$imagegen` 串行自动生图与落盘（2026-08-18）
+
+### 状态：P5 代码完成，真实调用阻塞（BLOCKED_ON_CODEX）
+
+> ⚠️ 本轮代码实现、单元测试、手动测试入口全部完成；
+> 但真实 `$imagegen` 调用因环境缺失 **Codex CLI** 无法验证，
+> 按 V2 执行规则第 8 条，**P5 停在真实验收之前**，不得宣布完成。
+
+### 阻塞原因（真实环境核查）
+| 依赖 | 现状 |
+| --- | --- |
+| Codex CLI（`codex` 命令） | ❌ 未安装 / 不在 PATH（`which codex` 无结果；npm 全局无 codex 包） |
+| ChatGPT Desktop | ❌ 未安装（`AppData/Local/Programs` 下无） |
+| OPENAI_API_KEY | ❌ 未配置（环境变量与 .env 均无；数据库仅有 DeepSeek key） |
+| `~/.codex/` 目录 | ✅ 存在（含 auth.json、generated_images 历史图片），但无法调用 CLI |
+
+真实尝试 `scripts/test_image_generation.py health` / `generate` 均返回：
+`❌ codex CLI 不可用（未找到命令：codex）`。
+
+### 已完成的代码
+- `app/image/image_task.py`：GeneratedImage / ImageTaskResult / detect_image_format /
+  verify_image（存在 + 大小>0 + 签名识别）/ copy_generated_image / ImageJob /
+  SerialImageQueue（严格串行，单群失败不阻塞其他群，已存在图片跳过，force 重生成）
+- `app/image/codex_generator.py`：CodexImageGenerator
+  - 调用方式：`codex exec -C . -s workspace-write --skip-git-repo-check "\$imagegen <prompt>"`
+  - 落盘策略：调用前快照 `~/.codex/generated_images/`，调用后轮询扫描新图片并复制到目标路径
+  - health_check：codex 不可用时返回明确状态
+  - 失败绝不把「未落盘」当成功（IMAGE_GENERATION_FAILED / IMAGE_FILE_MISSING）
+- `app/config/settings.py` + `.env.example`：codex_path / codex_timeout_seconds /
+  codex_generated_images_dir
+- `scripts/test_image_generation.py`：health / generate / --test-data 手动入口
+- `tests/test_v2_image_task.py`（14 项）：签名识别 / verify_image / 串行顺序 /
+  单群失败隔离 / 已存在跳过 / force / codex 不可用判定
+
+### 测试结果
+- pytest 166 passed（新增 14），代码链路全部通过单测
+- 真实调用：health 与 generate 均正确返回「codex 不可用」，符合预期（阻塞是环境，不是代码）
+
+### 下一步（用户侧）任选其一解除阻塞
+1. 安装 Codex CLI（`npm install -g @openai/codex` 或官方安装器），确保 `codex` 在 PATH；
+2. 或配置 `OPENAI_API_KEY` 后改用 image_gen 回退脚本；
+3. 或提供其他可用的 `$imagegen` 调用途径。
+
+解除阻塞后：`.venv\Scripts\python.exe scripts/test_image_generation.py generate --test-data`
+应生成 `output/test-data/test_generated.png` 并通过 verify_image。
+
+### Commit
+- `(待提交)` P5（代码完成，标注 BLOCKED）
+
+---
+
+> 下一轮：P5 真实验证（等待 Codex CLI 可用）→ P6 微信发送 Adapter

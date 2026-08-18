@@ -55,6 +55,12 @@ class Settings(BaseSettings):
     chunk_message_count: int = 60
     max_context_chars: int = 12000
 
+    # Codex $imagegen（V2 图片生成）
+    # codex 可执行文件路径（留空则尝试 PATH 中的 codex）
+    codex_path: str = ""
+    codex_timeout_seconds: int = 600
+    codex_generated_images_dir: str = ""  # 留空时默认 ~/.codex/generated_images
+
     # 邮件
     email_enabled: bool = False
     email_recipient: str = ""
