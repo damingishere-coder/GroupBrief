@@ -1,0 +1,38 @@
+# GroupBrief V2 — Docker 一键启动
+#
+# 架构：容器只跑 GroupBrief 服务本体（后端 + 前端 + 调度）。
+# 微信发送（UI 自动化）与 WeChatDataAnalysis 桌面服务留在 Windows 宿主机，
+# 容器通过 host.docker.internal 访问宿主机 127.0.0.1 端口。
+#
+# 启动：docker compose up -d --build
+# 访问：http://127.0.0.1:8766
+
+services:
+  groupbrief:
+    build: .
+    image: groupbrief-v2:latest
+    container_name: groupbrief-v2
+    ports:
+      - "8766:8766"
+    volumes:
+      # 数据持久化（SQLite / 日报输出 / 日志）挂载到宿主机当前目录
+      - ./data:/app/data
+      - ./output:/app/output
+      - ./logs:/app/logs
+    env_file:
+      # 读取宿主机 .env（含 WECHAT_MCP_TOKEN、AI_API_KEY 等敏感配置）
+      - .env
+    environment:
+      - APP_HOST=0.0.0.0
+      - APP_PORT=8766
+      - APP_TIMEZONE=Asia/Shanghai
+      - DATABASE_URL=sqlite:///data/groupbrief.db
+      - TZ=Asia/Shanghai
+      # 宿主机 WeChatDataAnalysis 本地 MCP 服务（Windows 桌面应用，留在宿主机）
+      - WECHAT_MCP_URL=http://host.docker.internal:10392/mcp
+      - WECHAT_MCP_ALLOWED_HOSTS=host.docker.internal
+      # 微信发送（WechatAutomationSender）：宿主机运行 wechat-automation-api
+      # 的 HTTP 服务（127.0.0.1:8808）后，容器通过此地址调用。
+      # 若尚未启用发送，可留空（保持 BLOCKED 状态）。
+      - WECHAT_AUTOMATION_API_URL=http://host.docker.internal:8808/
+    restart: unless-stopped

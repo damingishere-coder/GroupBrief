@@ -41,6 +41,9 @@ class Settings(BaseSettings):
     wechat_mcp_token: str = ""
     wechat_mcp_account: str = ""
     wechat_mcp_timeout_seconds: int = 60
+    # 额外允许的 MCP 主机（逗号分隔，仅 Docker 容器访问宿主机场景使用，
+    # 如 host.docker.internal）。默认空：仍只允许本机回环地址。
+    wechat_mcp_allowed_hosts: str = ""
     # 微信联系人数据库（contact.db）路径，用于把微信号解析成真实显示名。
     # 留空时自动探测 WeChatDataAnalysis 的解密数据库。
     wechat_contact_db_path: str = ""

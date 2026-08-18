@@ -72,6 +72,14 @@ def _load_export_file(path: Path) -> list[dict]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def _parse_allowed_hosts(raw: str | None) -> frozenset | None:
+    """解析逗号分隔的额外允许 MCP 主机；空则返回 None（保持仅回环）。"""
+    if not raw:
+        return None
+    hosts = {h.strip().lower() for h in raw.split(",") if h.strip()}
+    return frozenset(hosts) if hosts else None
+
+
 class WeChatDataAnalysisProvider(ChatHistoryProvider):
     name = "wechat_data_analysis"
 
@@ -105,6 +113,7 @@ class WeChatDataAnalysisProvider(ChatHistoryProvider):
                     settings.wechat_mcp_url,
                     settings.wechat_mcp_token,
                     settings.wechat_mcp_timeout_seconds,
+                    allowed_hosts=_parse_allowed_hosts(settings.wechat_mcp_allowed_hosts),
                 )
             except MCPConfigError as e:
                 self._mcp_client = None

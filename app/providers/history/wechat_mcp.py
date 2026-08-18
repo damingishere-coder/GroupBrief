@@ -17,6 +17,9 @@ from urllib.parse import urlsplit
 
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 
+# 默认回环主机集合（可传入额外允许主机，如 Docker 的 host.docker.internal）
+DEFAULT_ALLOWED_HOSTS = frozenset()
+
 # 本机回环连接必须绕过系统/环境代理（代理会把本地请求转发出去导致 502）。
 _PROXY_FREE_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
@@ -32,10 +35,18 @@ class MCPConfigError(MCPError):
 class MCPClient:
     """JSON-RPC 2.0 + MCP `tools/call` 调用器。"""
 
-    def __init__(self, url: str, token: str, timeout: float = 10.0) -> None:
+    def __init__(
+        self,
+        url: str,
+        token: str,
+        timeout: float = 10.0,
+        allowed_hosts: frozenset | None = None,
+    ) -> None:
         self.url = url
         self.token = token
         self.timeout = timeout
+        # 额外允许的主机（如 Docker 的 host.docker.internal）；默认仅回环
+        self._allowed_hosts = frozenset(allowed_hosts or DEFAULT_ALLOWED_HOSTS)
         self._validate()
 
     def _validate(self) -> None:
@@ -44,10 +55,12 @@ class MCPClient:
         if scheme not in ("http", "https"):
             raise MCPConfigError("wechat_mcp_url 仅支持 http/https 协议")
         host = (parts.hostname or "").lower()
-        if host not in LOOPBACK_HOSTS:
+        allowed = LOOPBACK_HOSTS | self._allowed_hosts
+        if host not in allowed:
             raise MCPConfigError(
-                "wechat_mcp_url 仅允许本机回环地址（127.0.0.1 / localhost / ::1），"
-                "已拒绝远程连接"
+                "wechat_mcp_url 仅允许本机回环地址（127.0.0.1 / localhost / ::1）"
+                + (f" 或配置的额外主机（{sorted(self._allowed_hosts)}）" if self._allowed_hosts else "")
+                + "，已拒绝远程连接"
             )
         if not self.token.strip():
             raise MCPConfigError(
@@ -125,14 +138,20 @@ def _result_error_message(result: dict) -> str:
     return "未知错误"
 
 
-def build_mcp_client(url: str, token: str, timeout: float) -> MCPClient | None:
+def build_mcp_client(
+    url: str,
+    token: str,
+    timeout: float,
+    allowed_hosts: frozenset | None = None,
+) -> MCPClient | None:
     """按配置构造 MCP 客户端。
 
     URL 与令牌都为空时返回 None（回退 JSON 导出模式）。只有 URL 或只有令牌
-    同样视为未配置。非回环地址 / 非法超时抛出 MCPConfigError（Provider 会标记不可用）。
+    同样视为未配置。非允许地址 / 非法超时抛出 MCPConfigError（Provider 会标记不可用）。
+    allowed_hosts 供 Docker 容器访问宿主机场景（如 host.docker.internal）使用。
     """
     url = (url or "").strip()
     token = (token or "").strip()
     if not url or not token:
         return None
-    return MCPClient(url=url, token=token, timeout=timeout)
+    return MCPClient(url=url, token=token, timeout=timeout, allowed_hosts=allowed_hosts)

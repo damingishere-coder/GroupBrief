@@ -75,16 +75,32 @@ def _seed_defaults(settings: Settings) -> None:
         session.commit()
 
 
+# 环境相关字段：若对应环境变量被显式设置，则环境变量优先于数据库。
+# 用于 Docker 容器（MCP 需指向 host.docker.internal）与宿主机直跑共存。
+_ENV_PRIORITY_FIELDS = {
+    "wechat_mcp_url": "WECHAT_MCP_URL",
+    "wechat_mcp_allowed_hosts": "WECHAT_MCP_ALLOWED_HOSTS",
+}
+
+
 def apply_db_settings(settings: Settings) -> list[str]:
     """把数据库中已保存的设置应用到 Settings 运行实例。
 
     数据库只在用户通过设置 API 显式保存时写入（见 app/api/settings.py），
     因此未来启动时数据库值优先于 .env；掩码敏感值（"******"）与凭据
     不会被写入数据库，也不会覆盖运行时非空值。
+
+    例外：_ENV_PRIORITY_FIELDS（如 WECHAT_MCP_URL）若环境变量显式设置，
+    则跳过数据库值（Docker 容器环境与宿主机直跑共用同一数据库）。
     """
+    import os
+
     with Session(engine) as session:
         rows = session.exec(select(Setting)).all()
         values = {s.key: s.value for s in rows}
+    for field, env_name in _ENV_PRIORITY_FIELDS.items():
+        if env_name in os.environ:
+            values.pop(field, None)
     return settings.apply_runtime_values(values)
 
 

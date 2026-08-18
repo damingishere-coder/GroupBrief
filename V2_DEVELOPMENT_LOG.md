@@ -519,3 +519,40 @@ run.json 记录错误类型与 image_error。
    `scripts/test_image_generation.py generate --test-data`；
 2. P6：微信 4.1.12 自绘 UI 与 wechat-automation-api（UIA）不兼容 →
    需降级/更换可 UIA 识别的微信版本或授权替代方案。
+
+---
+
+## Docker 化（2026-08-18）
+
+### 状态：PASS（构建 + 启动 + 真实归档验证通过）
+
+### 做了什么
+- `Dockerfile` 多阶段构建：node:20-alpine 构建前端 → python:3.12-slim 运行后端
+- `docker-compose.yml`：端口 8766、数据卷（./data ./output ./logs）、
+  env_file .env（token/Key）+ 环境变量（WECHAT_MCP_URL=host.docker.internal 等）
+- `.dockerignore`：排除 .venv/node_modules/data/output/logs/.env 等
+- `docs/DOCKER.md`：保姆级启动/使用/常见问题文档
+- 代码改动：
+  - settings 新增 `wechat_mcp_allowed_hosts`（额外允许的 MCP 主机）
+  - wechat_mcp.py：MCPClient / build_mcp_client 支持 allowed_hosts（默认仍仅回环）
+  - wechat_data_analysis.py：透传 allowed_hosts + `_parse_allowed_hosts`
+  - repository.apply_db_settings：环境相关字段（WECHAT_MCP_URL / ALLOWED_HOSTS）
+    在环境变量显式设置时优先于数据库（容器与宿主机直跑共用数据库的关键）
+- `tests/test_mcp_allowed_hosts.py`（7 项）
+
+### 验证结果（真实环境）
+- ✅ 镜像构建成功（groupbrief-v2:latest）
+- ✅ 容器启动，前端 http://127.0.0.1:8766 返回 200
+- ✅ 容器通过 host.docker.internal 访问宿主机 WeChatDataAnalysis MCP
+  （system/health wechat_data_analysis=OK、deepseek=OK）
+- ✅ 容器内真实生成：文案按「群名/日期」归档到宿主机 output 卷
+  （茶馆V3.0（三周年纪念）🐮🐴/2026-08-18/ 含 image_prompt.txt 等）
+- ✅ image_prompt.txt 为真实 DeepSeek 生成（409 条 / 7 块 chunked）
+- ✅ pytest 200 passed（新增 7）
+
+### 架构说明
+容器只跑服务本体；微信发送（UI 自动化）与 WeChatDataAnalysis 桌面服务
+留在 Windows 宿主机（UIA 依赖桌面会话），容器经 host.docker.internal 访问。
+
+### Commit
+- `(待提交)` Docker 化

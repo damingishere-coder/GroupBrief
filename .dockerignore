@@ -1,0 +1,47 @@
+# 版本控制
+.git
+.gitignore
+
+# 本地数据（容器用卷挂载，不进入镜像）
+data
+output
+logs
+*.db
+*.sqlite
+*.sqlite3
+
+# 密钥与本地配置
+.env
+.env.*
+.env.local
+
+# Python
+.venv
+venv
+__pycache__
+*.pyc
+.pytest_cache
+.mypy_cache
+.ruff_cache
+
+# Node / 前端（镜像内重新构建）
+frontend/node_modules
+frontend/dist
+frontend/.vite
+*.tsbuildinfo
+
+# 文档与日志（不进镜像）
+*.log
+DEVELOPMENT_LOG.md
+V2_DEVELOPMENT_LOG.md
+GroupBrief_V1_开发流程文档.md
+GroupBrief_V2_Development_Roadmap.md
+README.md
+LICENSE
+V1_ACCEPTANCE_REPORT.md
+fixtures
+
+# Docker 自身
+Dockerfile
+docker-compose.yml
+.dockerignore
