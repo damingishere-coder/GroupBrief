@@ -555,4 +555,31 @@ run.json 记录错误类型与 image_error。
 留在 Windows 宿主机（UIA 依赖桌面会话），容器经 host.docker.internal 访问。
 
 ### Commit
-- `(待提交)` Docker 化
+- `bcc0233` Docker 化
+
+---
+
+## 微信发送方案验证（2026-08-18，P6 结论更新）
+
+### 状态：P6 确认暂缓（用户决定"自动发送先不做"）
+
+### 做了什么
+1. **调研 GitHub 开源项目**（应用户要求）：
+   - LAVARONG/wechat-automation-api（Flask + uiautomation，支持微信 4.0+）
+   - cluic/wxauto、Hello-Mr-Crab/pyweixin、xieyumc/YuYuWechat、hanggezhuai/qclaw_Weixin
+   - 关键技巧发现：微信 4.x 默认隐藏 UIA 元素，需先开启 Windows「讲述人」再登录微信
+2. **验证讲述人技巧**（用户手动激活 + 重启微信）：
+   - 讲述人已运行、微信已重启，但微信窗口 UIA 控件树**仍只有 2 层空白 Pane**
+     （Qt51514QWindowIcon → MMUIRenderSubWindowHW）
+   - 输入框 `mmui::ChatInputField`、会话列表、搜索框均无法定位
+   - 结论：**讲述人技巧在微信 4.1.12.55 上无效**，所有依赖 UIA 控件树的开源项目均不可用
+3. **用户决定**：微信自动发送先不做（P6 保持暂缓）
+
+### 系统现状（半自动模式）
+- ✅ 自动生成排行榜（ranking.txt）+ 生图文案（image_prompt.txt）→ 按 群名/日期 归档
+- ✅ 前端"今日概览"发送按钮在微信发送未启用时禁用并提示（避免误操作）
+- ⚠️ 发送环节：用户手动复制文案到微信（或未来降级微信版本/换方案后再接）
+
+### 后续解锁方式（备忘）
+1. 降级微信到 3.9.x / 4.0 早期（UIA 控件树开放）→ wechat-automation-api 可用；
+2. 或接受截图+OCR 坐标方案（需配合测量窗口，较脆弱）。

@@ -1,4 +1,4 @@
-import { DashboardCard, getDashboard, pipelineGenerate, pipelineSend } from "../../api";
+import { DashboardCard, getDashboard, getSystemHealth, pipelineGenerate, pipelineSend } from "../../api";
 import { useFetch, useToast } from "../../components/ui";
 
 const STATUS_META: Record<string, { label: string; cls: string }> = {
@@ -17,7 +17,15 @@ function StatusBadge({ status }: { status: string }) {
   return <span className={`badge ${meta.cls}`}>{meta.label}</span>;
 }
 
-function CardActions({ card, toast }: { card: DashboardCard; toast: (s: string) => void }) {
+function CardActions({
+  card,
+  toast,
+  senderOk,
+}: {
+  card: DashboardCard;
+  toast: (s: string) => void;
+  senderOk: boolean;
+}) {
   const canGenerate = card.status !== "SENT";
   const canSend = ["IMAGE_READY", "READY_TO_SEND"].includes(card.status) && !card.sent_at;
 
@@ -40,9 +48,14 @@ function CardActions({ card, toast }: { card: DashboardCard; toast: (s: string) 
           立即生成
         </button>
       )}
-      {canSend && (
+      {canSend && senderOk && (
         <button className="btn btn-sm" onClick={handleSend}>
           立即发送
+        </button>
+      )}
+      {canSend && !senderOk && (
+        <button className="btn btn-sm" disabled title="微信自动发送尚未启用，可到 output/群名/日期/ 手动发送">
+          微信发送未启用
         </button>
       )}
     </div>
@@ -51,12 +64,14 @@ function CardActions({ card, toast }: { card: DashboardCard; toast: (s: string) 
 
 export default function Dashboard() {
   const { data, error, reload } = useFetch(getDashboard);
+  const health = useFetch(getSystemHealth);
   const { msg, toast } = useToast();
 
   if (error) return <div className="empty-state">加载失败：{error}</div>;
   if (!data) return <div className="empty-state">加载中…</div>;
 
   const c = data.counts;
+  const senderOk = health.data?.checks?.wechat_sender?.ok ?? false;
 
   return (
     <div>
@@ -138,7 +153,7 @@ export default function Dashboard() {
                 </div>
               )}
             </div>
-            <CardActions card={card} toast={toast} />
+            <CardActions card={card} toast={toast} senderOk={senderOk} />
           </div>
         ))}
       </div>
