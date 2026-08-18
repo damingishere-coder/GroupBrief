@@ -344,4 +344,50 @@ ranking.json / ranking.txt 保存于 `output/test-data/`。
 
 ---
 
-> 下一轮：P6 真实验证（等待微信发送方案可用）→ P7 全流程 Pipeline + 调度
+## P7 — 全流程 Pipeline + 调度（2026-08-18）
+
+### 状态：P7 代码 PASS；真实发送/生图验收受 P5/P6 阻塞
+
+### 做了什么
+- `app/v2/run_store.py`：RunStore —— output/<群>/<日期>/run.json 状态存储
+  （PENDING→DATA_READY→RANKING_READY→PROMPT_READY→IMAGE_READY→READY_TO_SEND→SENT/FAILED）
+- `app/pipeline/daily_pipeline.py`：DailyPipeline
+  - 生成阶段：取数(messages.json)→排行(ranking.json/txt)→DeepSeek(image_prompt.txt)
+    →生图(daily_image.png)→READY_TO_SEND
+  - 发送阶段：到点群 send_text(ranking.txt)→send_image(daily_image.png)→SENT
+  - 每群独立状态；某群失败不阻塞其他群；生图全局单队列串行
+  - 防重复：同群同周期已到终态跳过；SENT 绝不重复发送
+  - 周六周日跳过；周一统计周五~周日；force_generate / force_send
+  - 失败标记 FAILED + failed_stage + 错误类型
+- `scripts/run_daily_pipeline.py`：统一入口
+  （generate/send/force-generate/force-send/status）
+- `tests/test_v2_pipeline.py`（14 项集成测试，注入 Fake 依赖隔离外部）
+
+### 状态流（真实 dry-run 茶馆群验证）
+```
+PENDING → DATA_READY(409条) → RANKING_READY(27人/409) → PROMPT_READY(DeepSeek 7块)
+→ 生图阶段：codex 不可用 → FAILED(IMAGE_GENERATION_FAILED)   # 诚实失败，不假装成功
+```
+输出文件：messages.json / ranking.json / ranking.txt / image_prompt.txt / run.json 全部生成；
+run.json 记录错误类型与 image_error。
+
+### 各阶段耗时（真实茶馆群）
+- MCP 取数 + 排行 + DeepSeek 7 块分块生成：约 48 秒（19:31:27 完成 prompt，
+  run.json 19:32:15 落盘）
+
+### 测试结果
+- pytest 188 passed（新增 14）；全量无回归
+
+### 验收标准
+- ✅ 完整状态流（PENDING→…→FAILED 全程可追踪）
+- ✅ 一次 dry_run 全流程（真实数据到 PROMPT_READY，生图阶段诚实失败）
+- ⚠️ 一次真实测试群全流程：生图/发送受 P5/P6 阻塞（codex 未安装、微信 UIA 不兼容）
+- ✅ 各阶段独立状态、失败隔离、全局串行、防重复、force、周六日跳过、周一三天
+- ✅ 独立 commit
+
+### Commit
+- `(待提交)` P7
+
+---
+
+> 下一轮：P8 V2 前端重构（不依赖 P5/P6 外部能力，可继续）
