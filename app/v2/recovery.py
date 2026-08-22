@@ -30,9 +30,33 @@ _REQUIRED_FILES = {
     "RANKING_READY": ["messages.json", "ranking.json", "ranking.txt"],
     "PROMPT_READY": ["messages.json", "ranking.json", "ranking.txt", "image_prompt.txt"],
     IMAGE_READY: ["messages.json", "ranking.json", "ranking.txt", "image_prompt.txt", "daily_image.png"],
-    READY_TO_SEND: ["messages.json", "ranking.json", "ranking.txt", "image_prompt.txt", "daily_image.png"],
-    SENT: ["messages.json", "ranking.json", "ranking.txt", "image_prompt.txt", "daily_image.png"],
+    READY_TO_SEND: ["messages.json", "ranking.json", "ranking.txt", "image_prompt.txt"],
+    SENT: ["messages.json", "ranking.json", "ranking.txt", "image_prompt.txt"],
 }
+
+
+def _image_enabled(run: dict) -> bool:
+    """读取运行时图片开关；旧 run 缺字段时保守要求图片。"""
+    value = run.get("image_enabled")
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"false", "0", "no", "off"}:
+            return False
+        if normalized in {"true", "1", "yes", "on"}:
+            return True
+    # 旧版 run 没有 image_enabled，不能假定图片关闭，避免误报完整。
+    return True
+
+
+def _required_files(status: str, run: dict) -> list[str]:
+    required = list(_REQUIRED_FILES.get(status, []))
+    if status in (READY_TO_SEND, SENT) and _image_enabled(run):
+        required.append(FILE_IMAGE)
+    return required
 
 
 def scan_incomplete(store: RunStore, run_date: str | None = None) -> list[dict]:
@@ -63,7 +87,7 @@ def verify_output(store: RunStore, run_date: str | None = None) -> list[dict]:
     results: list[dict] = []
     for run in store.list_runs(run_date):
         status = run.get("status", "")
-        required = _REQUIRED_FILES.get(status, [])
+        required = _required_files(status, run)
         missing = []
         for f in required:
             path = store.group_dir(run["group_name"], run["run_date"]) / f

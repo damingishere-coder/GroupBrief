@@ -62,6 +62,7 @@ class FetchResult:
     messages: list[RawMessage]
     status: ProviderStatus = ProviderStatus.OK
     detail: str = ""
+    meta: dict = field(default_factory=dict)
 
 
 class ChatHistoryProvider:

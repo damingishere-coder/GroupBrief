@@ -99,6 +99,9 @@ class MessageNormalizer:
             "red_packet": "[红包]",
             "transfer": "[转账]",
         }.get(message.message_type, "")
+        # 图片/文件内容可能是本地路径、XML、base64 或导出器内部载荷；AI 只看占位符。
+        if message.message_type in {"image", "file"}:
+            return prefix
         text = content if content else prefix
         if prefix and not text.startswith("["):
             text = f"{prefix} {text}"

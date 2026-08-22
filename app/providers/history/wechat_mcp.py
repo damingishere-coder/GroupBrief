@@ -69,8 +69,11 @@ class MCPClient:
         if not (0 < float(self.timeout) <= 120):
             raise MCPConfigError("wechat_mcp_timeout_seconds 必须是 1~120 之间的数字")
 
-    def call(self, method: str, params: dict) -> dict:
+    def call(self, method: str, params: dict, *, timeout: float | None = None) -> dict:
         """调用指定 MCP 工具，返回 structuredContent（dict）。"""
+        request_timeout = float(self.timeout if timeout is None else timeout)
+        if not (0 < request_timeout <= 120):
+            raise MCPConfigError("MCP 单次请求超时必须是 1~120 之间的数字")
         payload = {
             "jsonrpc": "2.0",
             "id": 1,
@@ -90,7 +93,7 @@ class MCPClient:
             method="POST",
         )
         try:
-            with _PROXY_FREE_OPENER.open(request, timeout=float(self.timeout)) as resp:
+            with _PROXY_FREE_OPENER.open(request, timeout=request_timeout) as resp:
                 body = resp.read().decode("utf-8", errors="replace")
         except urllib.error.HTTPError as e:
             if e.code == 401:

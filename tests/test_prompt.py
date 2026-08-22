@@ -66,33 +66,76 @@ def test_template_uses_real_speakers():
 
 
 def test_deepseek_chunking():
-    """验证 chunk 逻辑：消息数 > chunk_size 时分成多块。"""
+    """固定消息条数不再切块；超过字符预算后按自然会话分块。"""
     from app.providers.ai.deepseek import DeepSeekV4FlashProvider
     from app.config.settings import Settings
 
-    settings = Settings(ai_api_key="test-key", chunk_message_count=20)
+    settings = Settings(ai_api_key="test-key", chunk_message_count=20, max_context_chars=1_000)
     provider = DeepSeekV4FlashProvider(settings)
-    lines = [f"[10:0{i}] 广州: 消息{i}" for i in range(45)]
+    lines = [f"[10:00] 广州: 消息{i}-" + ("内容" * 30) for i in range(45)]
     chunks = provider._chunk_messages(lines)
-    assert len(chunks) == 3
-    assert len(chunks[0].text.split("\n")) == 20
-    assert len(chunks[-1].text.split("\n")) == 5
+    assert len(chunks) > 1
+    assert all(chunk.context_chars <= 50_000 for chunk in chunks)
+    assert "消息44" in chunks[-1].text
 
 
-def test_deepseek_no_key_skips_to_template():
-    """未配置 API Key 时 PromptService 使用模板 Provider。"""
+def test_explicit_deepseek_without_key_skips_to_template():
+    """显式选择 DeepSeek 但未配置 Key 时，PromptService 使用模板 Provider。"""
     from app.config.settings import Settings
 
-    settings = Settings(ai_api_key="")
+    settings = Settings(_env_file=None, summary_provider_primary="deepseek", ai_api_key="")
     service = PromptService(settings)
     provider = service._get_provider()
     assert provider.name == "template"
 
 
+def test_default_summary_provider_is_codex_gpt():
+    from app.config.settings import Settings
+
+    settings = Settings(_env_file=None, summary_provider_primary="codex", ai_api_key="")
+    provider = PromptService(settings)._get_provider()
+    assert provider.name == "codex_gpt"
+    assert provider.model == "gpt-5.6-sol"
+
+
+def test_v1_model_failure_degrades_to_local_template():
+    from app.config.settings import Settings
+    from app.db.models import Group
+    from app.providers.ai.base import ImagePromptResult, PromptGeneratorProvider
+
+    class FailingProvider(PromptGeneratorProvider):
+        name = "codex_gpt"
+
+        def health_check(self):
+            return False, "failed"
+
+        def generate_image_prompt(self, context):
+            return ImagePromptResult(False, error="主备都失败", provider=self.name, model="gpt-5.6-sol")
+
+    service = PromptService(Settings(_env_file=None, summary_provider_primary="codex"))
+    service._provider = FailingProvider()
+    window = get_report_window(datetime.fromisoformat("2026-08-14").date())
+    normalized = _fetch_norm("group-b")
+    rank = RankingEngine().compute(normalized, "产品经理交流群", "s", "e")
+
+    outcome = service.generate(
+        Group(display_name="产品经理交流群", wechat_group_id="group-b"),
+        window,
+        rank,
+        normalized,
+    )
+
+    assert outcome.success
+    assert "【任务】" in outcome.prompt
+    assert outcome.meta["fallback"] == "template"
+
+
 def test_prompt_service_generates_via_template():
     from app.db.models import Group
 
-    service = PromptService()
+    from app.config.settings import Settings
+
+    service = PromptService(Settings(_env_file=None, summary_provider_primary="deepseek", ai_api_key=""))
     window = get_report_window(datetime.fromisoformat("2026-08-14").date())
     normalized = _fetch_norm("group-b")
     rank = RankingEngine().compute(normalized, "产品经理交流群", "s", "e")

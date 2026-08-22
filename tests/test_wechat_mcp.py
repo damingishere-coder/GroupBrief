@@ -21,7 +21,11 @@ from app.config.settings import Settings, get_settings
 from app.db import repository as repo
 from app.providers.history.base import ProviderStatus
 from app.providers.history.mock import MockProvider
-from app.providers.history.wechat_data_analysis import WeChatDataAnalysisProvider, _mcp_timestamp
+from app.providers.history.wechat_data_analysis import (
+    WeChatDataAnalysisProvider,
+    _mcp_timestamp,
+    _sanitize_sender_name,
+)
 from app.providers.history.wechat_mcp import (
     MCPClient,
     MCPConfigError,
@@ -356,6 +360,67 @@ def test_list_groups_mcp_uses_list_sessions():
 
 
 # ---------- 消息读取：锚点、时间窗、转换 ----------
+
+
+def test_range_read_one_call_and_preserves_group_display_name():
+    fake = FakeMCPClient().on(
+        "wechat.chat.get_messages_range",
+        lambda params: {
+            "messages": [
+                _msg("m1", 1786420000, "lxh327625169com", "🌸林诗雅小仙女", "内容", 1),
+                _msg("m2", 1786420100, "HIPHOPLZG", "请下载“生气”App", "内容", 1),
+            ],
+            "hasMore": False,
+            "nextOffset": None,
+            "readStrategy": "realtime_keyset",
+            "serverElapsedMs": 321,
+        },
+    )
+    result = _provider(fake).fetch_messages("group@chatroom", WINDOW_START, WINDOW_END)
+    assert result.status == ProviderStatus.OK
+    assert [item.sender_name for item in result.messages] == ["🌸林诗雅小仙女", "请下载“生气”App"]
+    assert [method for method, _ in fake.calls] == ["wechat.chat.get_messages_range"]
+    assert fake.calls[0][1]["limit"] == 2000
+    assert result.meta["mcp_call_count"] == 1
+    assert result.meta["read_strategy"] == "realtime_keyset"
+    assert result.meta["server_elapsed_ms"] == 321
+
+
+def test_range_read_pages_until_has_more_false_and_deduplicates():
+    def handler(params: dict) -> dict:
+        if params["offset"] == 0:
+            return {
+                "messages": [_msg("m1", 1786420000), _msg("dup", 1786420001)],
+                "hasMore": True,
+                "nextOffset": 2,
+            }
+        return {
+            "messages": [_msg("dup", 1786420001), _msg("m2", 1786420002)],
+            "hasMore": False,
+            "nextOffset": None,
+        }
+
+    fake = FakeMCPClient().on("wechat.chat.get_messages_range", handler)
+    result = _provider(fake).fetch_messages("group@chatroom", WINDOW_START, WINDOW_END)
+    assert result.status == ProviderStatus.OK
+    assert [item.source_message_id for item in result.messages] == ["m1", "dup", "m2"]
+    assert [params["offset"] for _, params in fake.calls] == [0, 2]
+    assert result.meta["range_page_count"] == 2
+
+
+def test_range_read_failure_does_not_silently_fallback():
+    fake = FakeMCPClient().on(
+        "wechat.chat.get_messages_range",
+        raise_mcp("本地服务请求超时"),
+    ).on("wechat.chat.get_message_anchor", lambda params: {"anchorId": None})
+    result = _provider(fake).fetch_messages("group@chatroom", WINDOW_START, WINDOW_END)
+    assert result.status == ProviderStatus.READ_FAILED
+    assert [method for method, _ in fake.calls] == ["wechat.chat.get_messages_range"]
+
+
+def test_invisible_nickname_sanitizer_preserves_chinese_and_emoji():
+    assert _sanitize_sender_name("\u3164\u3164笑我\u200b") == "笑我"
+    assert _sanitize_sender_name("🌸林诗雅小仙女") == "🌸林诗雅小仙女"
 
 # 注意：_fetch_messages_mcp 现在用 get_message_anchor（定位某天第一条）
 # + get_message_around（从锚点向两端翻页），不再用 get_messages。

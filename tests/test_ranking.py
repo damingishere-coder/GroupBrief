@@ -51,6 +51,13 @@ def test_all_user_types_countable():
     assert countable == 10
 
 
+def test_image_and_file_payloads_are_not_sent_to_ai():
+    image = MessageNormalizer.normalize(_msg("A", "image", "binary-image-body"))
+    file = MessageNormalizer.normalize(_msg("A", "file", "binary-file-body"))
+    assert image.ai_text == "[图片]"
+    assert file.ai_text == "[文件]"
+
+
 def test_consecutive_messages_not_merged():
     msgs = [_msg("A", "text", "1"), _msg("A", "text", "2"), _msg("A", "text", "3")]
     normalized = normalize_messages(msgs)

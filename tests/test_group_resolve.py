@@ -302,3 +302,43 @@ def test_from_name_duplicate_protection(client, monkeypatch):
     with Session(engine) as session:
         rows = session.exec(select(Group).where(Group.wechat_group_id == "real-1")).all()
         assert len(rows) == 1
+
+
+def test_from_name_restores_soft_deleted_group_without_enabling(client, monkeypatch):
+    test_client, engine = client
+    monkeypatch.setattr(
+        HistoryService,
+        "resolve_group_names",
+        lambda self, name: [
+            GroupMatch("real-restored", "恢复后的微信群名", 10, "stub_export", "exact")
+        ],
+    )
+    with Session(engine) as session:
+        group = repo.save_group(
+            session,
+            Group(
+                display_name="原群配置名",
+                wechat_group_id="real-restored",
+                wechat_group_name="旧微信群名",
+                enabled=True,
+                wechat_send_enabled=True,
+            ),
+        )
+        original_id = group.id
+        repo.delete_group(session, original_id)
+
+    response = test_client.post("/api/groups/from-name", json={"name": "恢复后的微信群名"})
+    assert response.status_code == 200
+    assert response.json()["id"] == original_id
+    assert response.json()["restored"] is True
+    assert response.json()["enabled"] is False
+
+    with Session(engine) as session:
+        rows = session.exec(select(Group).where(Group.wechat_group_id == "real-restored")).all()
+        assert len(rows) == 1
+        assert rows[0].id == original_id
+        assert rows[0].deleted_at is None
+        assert rows[0].enabled is False
+        assert rows[0].wechat_send_enabled is False
+        assert rows[0].display_name == "原群配置名"
+        assert rows[0].wechat_group_name == "恢复后的微信群名"

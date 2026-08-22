@@ -3,7 +3,7 @@
 # Stage 2：Python 运行后端 + 静态资源
 
 # ---------- Stage 1: 前端构建 ----------
-FROM node:20-alpine AS frontend-build
+FROM node:20.20.2-bookworm-slim AS frontend-build
 WORKDIR /app/frontend
 # 利用缓存：仅复制依赖清单
 COPY frontend/package.json frontend/package-lock.json ./
@@ -13,7 +13,7 @@ COPY frontend/ ./
 RUN npm run build
 
 # ---------- Stage 2: 后端运行 ----------
-FROM python:3.12-slim
+FROM python:3.12-slim-bookworm
 WORKDIR /app
 
 # 时区（GroupBrief 使用 Asia/Shanghai；slim 镜像默认 UTC）

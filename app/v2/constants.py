@@ -50,7 +50,10 @@ FILE_MESSAGES = "messages.json"
 FILE_RANKING_JSON = "ranking.json"
 FILE_RANKING_TXT = "ranking.txt"
 FILE_PROMPT = "image_prompt.txt"
+FILE_PROMPT_ORIGINAL = "image_prompt.original.txt"
 FILE_IMAGE = "daily_image.png"
+FILE_IMAGE_PREVIOUS = "daily_image.previous.png"
+FILE_IMAGE_REGENERATING = "daily_image.regenerating.png"
 FILE_RUN = "run.json"
 
 

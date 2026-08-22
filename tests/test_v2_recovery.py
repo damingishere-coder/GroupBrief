@@ -16,8 +16,17 @@ from app.v2.recovery import scan_incomplete, verify_output
 from app.v2.run_store import RunStore
 
 
-def _mk_run(store: RunStore, group: str, date: str, status: str, files: list[str] | None = None) -> dict:
+def _mk_run(
+    store: RunStore,
+    group: str,
+    date: str,
+    status: str,
+    files: list[str] | None = None,
+    image_enabled: bool | None = None,
+) -> dict:
     data = {"group_name": group, "run_date": date, "status": status, "updated_at": "2026-08-18 08:00:00"}
+    if image_enabled is not None:
+        data["image_enabled"] = image_enabled
     store.save_run(group, date, data)
     if files:
         d = store.group_dir(group, date)
@@ -59,6 +68,68 @@ def test_verify_output_complete(tmp_path):
     assert results[0]["missing"] == []
 
 
+def test_verify_output_image_disabled_does_not_require_image(tmp_path):
+    store = RunStore(tmp_path / "output")
+    files = ["messages.json", "ranking.json", "ranking.txt", "image_prompt.txt"]
+    _mk_run(store, "群A", "2026-08-18", READY_TO_SEND, files, image_enabled=False)
+    results = verify_output(store)
+    assert results[0]["ok"] is True
+    assert results[0]["missing"] == []
+
+
+def test_verify_output_image_enabled_requires_image(tmp_path):
+    store = RunStore(tmp_path / "output")
+    files = ["messages.json", "ranking.json", "ranking.txt", "image_prompt.txt"]
+    _mk_run(store, "群A", "2026-08-18", SENT, files, image_enabled=True)
+    results = verify_output(store)
+    assert results[0]["ok"] is False
+    assert results[0]["missing"] == ["daily_image.png"]
+
+
+def test_verify_output_legacy_run_conservatively_requires_image(tmp_path):
+    store = RunStore(tmp_path / "output")
+    files = ["messages.json", "ranking.json", "ranking.txt", "image_prompt.txt"]
+    _mk_run(store, "群A", "2026-08-18", SENT, files)
+    results = verify_output(store)
+    assert results[0]["ok"] is False
+    assert results[0]["missing"] == ["daily_image.png"]
+
+
+@pytest.mark.parametrize("bad_date", ["..", "2026-02-30", "2026-8-18", "not-a-date"])
+def test_run_store_rejects_invalid_dates(tmp_path, bad_date):
+    store = RunStore(tmp_path / "output")
+    with pytest.raises(ValueError):
+        store.group_dir("群A", bad_date)
+    with pytest.raises(ValueError):
+        store.list_runs(bad_date)
+
+
+def test_recent_layout_history_skips_legacy_and_corrupt_runs_without_rewriting(tmp_path):
+    store = RunStore(tmp_path / "output")
+    store.save_run(
+        "群A",
+        "2026-08-19",
+        {"prompt_meta": {"layout_id": "hero_cover", "comedy_device": "字面化"}},
+    )
+    store.save_run("群A", "2026-08-20", {"status": "SENT"})  # 旧版没有 prompt_meta
+    corrupt_path = store.run_path("群A", "2026-08-21")
+    corrupt_path.parent.mkdir(parents=True, exist_ok=True)
+    corrupt_path.write_text("{broken", encoding="utf-8")
+    before = corrupt_path.read_text(encoding="utf-8")
+
+    history = store.recent_layout_history("群A", "2026-08-22", limit=3)
+
+    assert history == (
+        {
+            "run_date": "2026-08-19",
+            "layout_id": "hero_cover",
+            "comedy_device": "字面化",
+            "layout_signature": "",
+        },
+    )
+    assert corrupt_path.read_text(encoding="utf-8") == before
+
+
 def test_clean_old_logs_removes_expired(tmp_path):
     old = tmp_path / "old.log"
     old.write_text("x", encoding="utf-8")
@@ -86,9 +157,16 @@ class _FakeSource:
 def test_startup_checks_structure(tmp_path, monkeypatch):
     """外部调用（WeChatDataAnalysis / tasklist）注入替身，全本地不触网。"""
     from app.core import startup_check
+    from app.providers.ai import codex as codex_provider
 
     monkeypatch.setattr(startup_check, "WeChatDataAnalysisSource", lambda settings=None: _FakeSource())
     monkeypatch.setattr(startup_check, "_tasklist_wechat", lambda: False)
+
+    class FakeCodex:
+        def health_check(self):
+            return True, "主模型 gpt-5.6-sol 可用"
+
+    monkeypatch.setattr(codex_provider, "CodexGPTProvider", lambda settings: FakeCodex())
 
     # Settings 的 output_dir 为只读 property，用鸭子类型对象替代
     class FakeSettings:
@@ -104,12 +182,15 @@ def test_startup_checks_structure(tmp_path, monkeypatch):
     names = {c["name"] for c in checks}
     assert "WeChatDataAnalysis 数据源" in names
     assert "微信客户端" in names
-    assert "DeepSeek V4 Flash" in names
+    assert "Codex GPT 群聊总结" in names
+    assert "DeepSeek V4 Flash（备用）" in names
     assert "输出目录" in names
     assert "模板资产" in names
     for c in checks:
         assert "ok" in c and "status" in c and "detail" in c
     # DeepSeek 未配置 → ok False
-    ds = next(c for c in checks if c["name"] == "DeepSeek V4 Flash")
+    ds = next(c for c in checks if c["name"] == "DeepSeek V4 Flash（备用）")
     assert ds["ok"] is False
     assert "未配置" in ds["detail"]
+    codex = next(c for c in checks if c["name"] == "Codex GPT 群聊总结")
+    assert codex["ok"] is True

@@ -1,19 +1,22 @@
 """Prompt 生成服务。
 
-DeepSeek V4 Flash 只负责：群聊内容 → 理解事件 → 整理话题 → 生成 GPT 生图 Prompt。
+Codex GPT 主负责：群聊内容 → 理解事件 → 整理话题 → 生成 GPT 生图 Prompt；
+主调用失败时使用 DeepSeek 备用。
 不负责排行榜计算 / 微信读取 / 邮件 / 调度。
-无 API Key 时优雅降级（标记 skipped），不阻塞其余流程。
+主备都不可用时优雅降级到本地模板，不阻塞其余流程。
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
+from app.ai.conversation_segments import PromptMessage
 from app.config.settings import Settings, get_settings
 from app.core.logging import get_logger
 from app.db.models import Group
 from app.providers.ai.base import ImagePromptResult, PromptGeneratorProvider
-from app.providers.ai.deepseek import DeepSeekV4FlashProvider
+from app.providers.ai.codex import build_summary_provider
+from app.providers.ai.template import TemplatePromptProvider
 from app.scheduler.calendar_rules import ReportWindow
 from app.services.message_normalizer import NormalizedMessage
 from app.services.ranking_service import RankingResult
@@ -26,6 +29,7 @@ class PromptOutcome:
     success: bool
     prompt: str = ""
     error: str = ""
+    meta: dict | None = None
 
 
 class PromptService:
@@ -36,13 +40,11 @@ class PromptService:
     def _get_provider(self) -> PromptGeneratorProvider:
         if self._provider is not None:
             return self._provider
-        if self.settings.ai_api_key and self.settings.ai_provider == "deepseek":
-            self._provider = DeepSeekV4FlashProvider(self.settings)
-        else:
-            # 未配置 API Key 时使用本地模板，保证全链路可交付
-            from app.providers.ai.template import TemplatePromptProvider
-
+        primary = (self.settings.summary_provider_primary or "codex").strip().lower()
+        if primary == "deepseek" and not self.settings.ai_api_key:
             self._provider = TemplatePromptProvider()
+        else:
+            self._provider = build_summary_provider(self.settings)
         return self._provider
 
     def generate(
@@ -54,7 +56,11 @@ class PromptService:
     ) -> PromptOutcome:
         provider = self._get_provider()
 
-        context_text = self._build_context_text(normalized, ranking)
+        message_items = self._build_message_items(normalized)
+        context_text = "\n".join(
+            f"[{item.timestamp.strftime('%H:%M') if item.timestamp else ''}] {item.sender_name}: {item.text}"
+            for item in message_items
+        )
         context = provider.build_context(
             group_id=group.wechat_group_id or str(group.id),
             group_name=group.display_name or group.wechat_group_name,
@@ -64,25 +70,46 @@ class PromptService:
             total_messages=ranking.total_messages,
             speaker_count=ranking.speaker_count,
             messages_text=context_text,
-            weekdays_text="周一的周末两天汇总，标题倾向：群里热闹这两天！" if window.is_weekend_summary else "",
+            message_items=message_items,
+            weekdays_text="",
         )
         result: ImagePromptResult = provider.generate_image_prompt(context)
         if result.success:
-            return PromptOutcome(True, result.prompt)
+            return PromptOutcome(True, result.prompt, meta=result.meta)
+        if provider.name != "template":
+            template_result = TemplatePromptProvider().generate_image_prompt(context)
+            if template_result.success:
+                logger.warning("主备模型均未完成 Prompt，V1 已降级到本地模板")
+                meta = dict(template_result.meta or {})
+                meta.update({"fallback": "template", "degraded_from": provider.name})
+                return PromptOutcome(True, template_result.prompt, meta=meta)
         logger.error("Prompt 生成失败：%s", result.error)
-        return PromptOutcome(False, "", result.error)
+        return PromptOutcome(False, "", result.error, result.meta)
 
     def _build_context_text(
         self, normalized: list[NormalizedMessage], ranking: RankingResult
     ) -> str:
-        """整理消息文本：过滤系统消息、截断到 MAX_CONTEXT_CHARS。"""
-        lines: list[str] = []
-        for m in normalized:
-            if not m.countable:
+        """兼容旧调用：返回全部可统计文本，不再截断聊天尾部。"""
+        return "\n".join(
+            f"[{item.timestamp.strftime('%H:%M') if item.timestamp else ''}] {item.sender_name}: {item.text}"
+            for item in self._build_message_items(normalized)
+        )
+
+    @staticmethod
+    def _build_message_items(normalized: list[NormalizedMessage]) -> list[PromptMessage]:
+        result: list[PromptMessage] = []
+        for index, message in enumerate(normalized, start=1):
+            if not message.countable:
                 continue
-            ts = m.timestamp.strftime("%H:%M")
-            text = m.ai_text or m.content or ""
-            lines.append(f"[{ts}] {m.sender_name}: {text}")
-            if sum(len(l) for l in lines) > self.settings.max_context_chars:
-                break
-        return "\n".join(lines)
+            text = (message.ai_text or message.content or "").strip()
+            if not text:
+                continue
+            result.append(
+                PromptMessage(
+                    message_id=message.content_hash or f"v1-{index}",
+                    timestamp=message.timestamp,
+                    sender_name=message.sender_name or "(未知)",
+                    text=text,
+                )
+            )
+        return result

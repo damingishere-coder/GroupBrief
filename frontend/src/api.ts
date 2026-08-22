@@ -82,6 +82,30 @@ export interface GroupV2 extends Group {
   send_target: string;
   ranking_template: string;
   image_prompt_template: string;
+  image_theme: string;
+  image_theme_custom: string;
+  has_image_prompt_override: boolean;
+  wechat_send_enabled: boolean;
+}
+
+export interface GroupPayload {
+  display_name: string;
+  wechat_group_id: string;
+  wechat_group_name?: string;
+  enabled: boolean;
+  provider_preference: string;
+  schedule_rule: string;
+  send_time: string;
+  summary_model: string;
+  prompt_model: string;
+  image_enabled: boolean;
+  send_target: string;
+  ranking_template: string;
+  image_prompt_template: string;
+  image_theme?: string;
+  image_theme_custom?: string;
+  image_prompt_override?: string;
+  wechat_send_enabled?: boolean;
 }
 
 export interface DashboardCard {
@@ -123,6 +147,44 @@ export interface V2Run {
   [key: string]: unknown;
 }
 
+export interface V2RunDetail {
+  run: V2Run;
+  files: string[];
+}
+
+export type ArchiveGroupState = "active" | "deleted" | "orphaned";
+
+export interface ArchiveGroup {
+  archive_key: string;
+  group_id: number | null;
+  wechat_group_id: string;
+  display_name: string;
+  state: ArchiveGroupState;
+  enabled: boolean;
+  deleted_at: string | null;
+  created_at: string;
+  run_count: number;
+  run_dates: string[];
+  runs: V2Run[];
+}
+
+export interface ArchiveGroupsResponse {
+  groups: ArchiveGroup[];
+  active_count: number;
+  trash_count: number;
+}
+
+export interface ArchivedMessage {
+  message_id: string;
+  group_id: string;
+  group_name: string;
+  sender_id: string;
+  sender_name: string;
+  timestamp: string;
+  message_type: string;
+  content: string;
+}
+
 export interface SystemHealth {
   checks: Record<string, { ok: boolean; status: string; detail: string }>;
   warnings?: string[];
@@ -142,7 +204,77 @@ export interface TemplateItem {
   content: string;
 }
 
-// 群发现 / 解析绑定 / 测试读取（V1 保留能力）
+export interface ImageThemeOption {
+  key: string;
+  label: string;
+  description: string;
+}
+
+export interface ResolvedImageTheme {
+  requested_key: string;
+  actual_key: string;
+  display_name: string;
+  theme_text: string;
+  prompt: string;
+  style_signature: string;
+  style_seed: string;
+}
+
+export interface GroupImagePromptConfig {
+  group_id: number;
+  template_name: string;
+  source: "global" | "group_override";
+  content: string;
+  revision: string;
+  image_theme: string;
+  image_theme_custom: string;
+  resolved_theme: Record<string, string>;
+  preview: string;
+}
+
+export interface RunPromptConfig {
+  group_name: string;
+  run_date: string;
+  content: string;
+  revision: string;
+  has_original: boolean;
+  image_theme: string;
+  image_theme_custom: string;
+  prompt_edited_at: string;
+  topic_selection?: TopicSelection | null;
+}
+
+export interface TopicScores {
+  discussion: number;
+  participation: number;
+  interestingness: number;
+  visual: number;
+  continuity: number;
+  total: number;
+}
+
+export interface TopicCandidate {
+  topic_id: string;
+  rank: number;
+  title: string;
+  summary: string;
+  evidence_message_count: number;
+  participant_count: number;
+  duration_minutes: number;
+  score_reason: string;
+  selected: boolean;
+  scores: TopicScores;
+}
+
+export interface TopicSelection {
+  topic_selection_version: string;
+  candidate_count: number;
+  selected_count: number;
+  selected_topic_ids: string[];
+  candidates: TopicCandidate[];
+}
+
+// 群发现 / 解析绑定 / 测试读取（兼容保留能力）
 export interface DiscoveredGroup {
   group_id: string;
   group_name: string;
@@ -165,27 +297,81 @@ export const discoverGroups = () => get<DiscoveredGroup[]>("/groups/discover");
 export const resolveGroups = (name: string) =>
   get<GroupMatch[]>(`/groups/resolve?name=${encodeURIComponent(name)}`);
 export const bindGroupFromName = (body: { name: string; group_id?: string }) =>
-  post<{ id: number; bound: boolean; already_existed: boolean }>("/groups/from-name", body);
+  post<{ id: number; bound: boolean; already_existed: boolean; restored?: boolean; enabled?: boolean }>("/groups/from-name", body);
 export const testReadGroup = (groupId: number) =>
   post<TestReadResult>(`/groups/${groupId}/test-read`);
 
+export const listGroups = () => get<GroupV2[]>("/groups");
+export const createGroup = (body: GroupPayload) => post<{ id: number; restored?: boolean }>("/groups", body);
+export const updateGroup = (groupId: number, body: Partial<GroupPayload>) =>
+  put<{ id: number }>(`/groups/${groupId}`, body);
+export const verifyGroupSendTarget = (groupId: number) =>
+  post<{ ok: boolean; target: string; detail: string }>(`/groups/${groupId}/verify-send-target`);
+export const deleteGroup = (groupId: number) => del<{ ok: boolean; deleted_at: string | null }>(`/groups/${groupId}`);
+export const restoreGroup = (groupId: number) =>
+  post<{ ok: boolean; id: number; enabled: boolean; wechat_send_enabled: boolean }>(`/groups/${groupId}/restore`);
+
 export const getDashboard = () => get<Dashboard>("/v2/dashboard");
+export const getArchiveGroups = () => get<ArchiveGroupsResponse>("/v2/archive/groups");
 export const getRuns = (runDate?: string) =>
   get<{ runs: V2Run[]; total: number }>(`/v2/runs${runDate ? `?run_date=${runDate}` : ""}`);
 export const getRunDetail = (group: string, date: string) =>
-  get<{ run: V2Run; files: string[] }>(`/v2/runs/${encodeURIComponent(group)}/${date}`);
+  get<V2RunDetail>(`/v2/runs/${encodeURIComponent(group)}/${date}`);
+export type SettingsValues = Record<string, string>;
+export const getSettings = () => get<SettingsValues>("/settings");
+export const saveSettings = (values: SettingsValues) => put<{ ok: boolean }>("/settings", { values });
 export const getSystemHealth = () => get<SystemHealth>("/v2/system/health");
 export const getStartupChecks = () => get<StartupCheck>("/v2/system/startup");
 export const getRecoveryInfo = () => get<RecoveryInfo>("/v2/system/recovery");
 export const retryFailed = (body: { group_id?: number; run_date?: string }) =>
   post<{ results: { group_name?: string; status: string; detail?: string }[] }>("/v2/pipeline/retry-failed", body);
 export const pipelineGenerate = (body: { group_id?: number; run_date?: string; force?: boolean }) =>
-  post<{ results: { status: string; group_name?: string; error_type?: string }[] }>("/v2/pipeline/generate", body);
+  post<{ results: { status: string; group_name?: string; error_type?: string; detail?: string }[] }>("/v2/pipeline/generate", body);
 export const pipelineSendDue = () => post<{ results: { status: string; group_name?: string }[] }>("/v2/pipeline/send-due");
-export const pipelineSend = (body: { group_id: number; run_date?: string }) =>
-  post<{ result: { status: string; group_name?: string; error_type?: string } }>("/v2/pipeline/send", body);
+export const pipelineSend = (body: { group_id: number; run_date?: string; confirm_regenerated?: boolean; confirm_late_send?: boolean }) =>
+  post<{ result: { status: string; group_name?: string; error_type?: string; error?: string; detail?: string } }>("/v2/pipeline/send", body);
 export const getV2File = (group: string, date: string, file: string) =>
   `/api/v2/files/${encodeURIComponent(group)}/${date}/${file}`;
+
+export async function readV2TextFile(group: string, date: string, file: string): Promise<string> {
+  const response = await fetch(getV2File(group, date, file));
+  if (!response.ok) {
+    const detail = await response.text();
+    throw new Error(`读取 ${file} 失败：${detail || `HTTP ${response.status}`}`);
+  }
+  return response.text();
+}
+
+export async function readV2JsonFile<T>(group: string, date: string, file: string): Promise<T> {
+  const text = await readV2TextFile(group, date, file);
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    throw new Error(`${file} 不是有效的 JSON 文件`);
+  }
+}
+
+// AI 图片主题、群级默认 Prompt 与运行级 Prompt
+export const listImageThemes = () => get<{ themes: ImageThemeOption[] }>("/v2/image-themes");
+export const resolveImageTheme = (body: { image_theme: string; image_theme_custom?: string; prompt?: string; group_id?: number | string; run_date?: string }) =>
+  post<ResolvedImageTheme>("/v2/image-themes/resolve", body);
+export const getGroupImagePrompt = (groupId: number) =>
+  get<GroupImagePromptConfig>(`/groups/${groupId}/image-prompt`);
+export const saveGroupImagePrompt = (
+  groupId: number,
+  body: { content: string; inherit_global: boolean; image_theme: string; image_theme_custom?: string; expected_revision: string },
+) => put<GroupImagePromptConfig>(`/groups/${groupId}/image-prompt`, body);
+export const getRunPrompt = (group: string, date: string) =>
+  get<RunPromptConfig>(`/v2/runs/${encodeURIComponent(group)}/${date}/prompt`);
+export const saveRunPrompt = (
+  group: string,
+  date: string,
+  body: { content: string; expected_revision: string; image_theme: string; image_theme_custom?: string },
+) => put<RunPromptConfig>(`/v2/runs/${encodeURIComponent(group)}/${date}/prompt`, body);
+export const restoreRunPrompt = (group: string, date: string) =>
+  post<RunPromptConfig>(`/v2/runs/${encodeURIComponent(group)}/${date}/prompt/restore`);
+export const regenerateRunImage = (group: string, date: string) =>
+  post<{ accepted: boolean; run: V2Run }>(`/v2/runs/${encodeURIComponent(group)}/${date}/regenerate-image`);
 
 // 模板中心
 export const listRankingTemplates = () => get<{ templates: string[]; previews: Record<string, string> }>("/v2/templates/ranking");

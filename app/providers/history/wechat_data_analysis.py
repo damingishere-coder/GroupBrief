@@ -17,6 +17,9 @@ from __future__ import annotations
 
 import json
 import os
+import hashlib
+from time import perf_counter
+import unicodedata
 from datetime import datetime
 from pathlib import Path
 
@@ -47,6 +50,10 @@ DEFAULT_WECHAT_DIRS = [
 
 _MCP_PAGE_SIZE = 100
 _MCP_MAX_PAGES = 1000
+_MCP_RANGE_PAGE_SIZE = 2000
+_MCP_RANGE_MAX_PAGE_SIZE = 5000
+_MCP_RANGE_TOOL = "wechat.chat.get_messages_range"
+_RANGE_CAPABILITY_CACHE: dict[str, bool] = {}
 
 _CANDIDATE_LIST_KEYS = ("sessions", "candidates", "results", "items", "list")
 _ITEM_LIST_KEYS = ("messages", "items", "list", "results", "records")
@@ -99,9 +106,11 @@ class WeChatDataAnalysisProvider(ChatHistoryProvider):
             self.export_dir = settings.data_dir / "wechat_export"
         self._groups_cache: list[GroupInfo] | None = None
         self.wechat_mcp_account = settings.wechat_mcp_account
+        self.wechat_mcp_range_timeout_seconds = settings.wechat_mcp_range_timeout_seconds
+        self._range_cache_key = (settings.wechat_mcp_url or "local").strip()
+        self._range_supported: bool | None = _RANGE_CAPABILITY_CACHE.get(self._range_cache_key)
         self._mcp_config_error: str | None = None
-        # 联系人解析：把微信号映射成真实显示名（备注优先、其次昵称）。
-        # 上游 senderDisplayName 不可靠（可能把微信号/错误昵称当显示名）。
+        # 联系人解析只作为回退；群内 senderDisplayName 更接近微信界面当前显示名。
         self._contacts = ContactResolver(settings.wechat_contact_db_path or None)
         self._contacts.load()
         if mcp_client is not None:
@@ -167,10 +176,17 @@ class WeChatDataAnalysisProvider(ChatHistoryProvider):
                 detail = f"{message}。请启动本地 WeChatDataAnalysis 服务，或在设置中配置 JSON 导出目录。"
             return ProviderHealth(self.name, ProviderStatus.UNAVAILABLE, detail)
         state = _first_str(status, "status", "state", "message") or "running"
+        capability = (
+            "范围读取可用"
+            if self._range_supported is True
+            else "范围读取工具不可用，正在使用兼容分页"
+            if self._range_supported is False
+            else "范围读取能力将在首次取数时探测"
+        )
         return ProviderHealth(
             self.name,
             ProviderStatus.OK,
-            f"本地 WeChatDataAnalysis 服务可用（{state[:80]}）",
+            f"本地 WeChatDataAnalysis 服务可用（{state[:80]}；{capability}）",
         )
 
     def _find_wechat_dir(self) -> Path | None:
@@ -278,23 +294,19 @@ class WeChatDataAnalysisProvider(ChatHistoryProvider):
         start_time: datetime,
         end_time: datetime,
     ) -> FetchResult:
-        """通过 MCP 读取群消息（锚点双向读取）。
-
-        上游 get_messages 没有时间过滤参数、总是从最新消息返回，
-        无法读取历史日期；改用锚点工具：
-        - get_message_anchor(kind=day) 定位某天第一条消息；
-        - get_message_around 以锚点为中心返回上下文（每轮约 50 条），
-          用「上一条/下一条」作为新锚点向前后翻页；
-        - 客户端按时间窗过滤，跨天消息靠去重避免重复。
-
-        上游每次调用较慢（数秒），超时由 wechat_mcp_timeout_seconds
-        控制（默认 60 秒）。
-        """
+        """优先按时间范围读取；服务端不支持新工具时兼容锚点分页。"""
         from zoneinfo import ZoneInfo
 
+        started_at = perf_counter()
         tz = ZoneInfo("Asia/Shanghai")
         messages: list[RawMessage] = []
         seen: set[str] = set()
+        stats: dict = {
+            "read_strategy": "range" if self._range_supported is not False else "legacy_anchor",
+            "mcp_call_count": 0,
+            "mcp_client_ms": 0,
+            "server_elapsed_ms": 0,
+        }
 
         def collect(items: list) -> None:
             for item in items:
@@ -309,34 +321,133 @@ class WeChatDataAnalysisProvider(ChatHistoryProvider):
                         continue  # 翻页重叠，跳过重复
                     if raw.source_message_id:
                         seen.add(raw.source_message_id)
-                    # 用联系人表修正发送者名字（上游 displayName 不可靠）
-                    if raw.sender_id:
-                        resolved = self._contacts.resolve_name(raw.sender_id)
-                        if resolved:
-                            raw.sender_name = resolved
+                    upstream_name = _sanitize_sender_name(raw.sender_name)
+                    resolved_name = _sanitize_sender_name(
+                        self._contacts.resolve_name(raw.sender_id) if raw.sender_id else ""
+                    )
+                    if _usable_sender_name(upstream_name, raw.sender_id):
+                        raw.sender_name = upstream_name
+                    elif _usable_sender_name(resolved_name, raw.sender_id):
+                        raw.sender_name = resolved_name
+                    else:
+                        raw.sender_name = _anonymous_sender_name(raw.sender_id)
                     messages.append(raw)
 
         try:
-            # 窗口内的每一天都取锚点（多天窗口 = 周一汇总周六+周日）
-            day = start_time.date()
-            last_day = end_time.date()
-            while day <= last_day:
-                anchor = self._anchor_for_day(group_id, day, tz)
-                if anchor:
-                    self._drain_around(group_id, anchor, start_time, end_time, collect)
-                day = day.fromordinal(day.toordinal() + 1)
+            if self._range_supported is not False:
+                try:
+                    self._fetch_messages_range(group_id, start_time, end_time, tz, collect, stats)
+                    self._range_supported = True
+                    _RANGE_CAPABILITY_CACHE[self._range_cache_key] = True
+                except MCPError as exc:
+                    if not _is_unknown_range_tool(exc):
+                        raise
+                    self._range_supported = False
+                    _RANGE_CAPABILITY_CACHE[self._range_cache_key] = False
+                    stats["read_strategy"] = "legacy_anchor"
+                    stats["range_fallback_reason"] = "range_tool_unavailable"
+            if self._range_supported is False:
+                self._fetch_messages_legacy(group_id, start_time, end_time, tz, collect, stats)
         except MCPError as e:
-            return FetchResult(self.name, group_id, [], ProviderStatus.READ_FAILED, f"MCP 读取失败：{e}")
+            stats["fetch_elapsed_ms"] = round((perf_counter() - started_at) * 1000)
+            return FetchResult(
+                self.name, group_id, [], ProviderStatus.READ_FAILED, f"MCP 读取失败：{e}", stats
+            )
         except Exception as e:  # 防御上游异常数据
-            return FetchResult(self.name, group_id, [], ProviderStatus.READ_FAILED, f"消息解析失败：{e}")
+            stats["fetch_elapsed_ms"] = round((perf_counter() - started_at) * 1000)
+            return FetchResult(
+                self.name, group_id, [], ProviderStatus.READ_FAILED, f"消息解析失败：{e}", stats
+            )
 
+        messages.sort(key=lambda item: (item.timestamp, item.source_message_id))
+        stats["fetch_elapsed_ms"] = round((perf_counter() - started_at) * 1000)
+        stats["message_count"] = len(messages)
         if not messages:
-            return FetchResult(self.name, group_id, [], ProviderStatus.EMPTY_RESULT, "该时间段无消息")
-        return FetchResult(self.name, group_id, messages, ProviderStatus.OK)
+            return FetchResult(
+                self.name, group_id, [], ProviderStatus.EMPTY_RESULT, "该时间段无消息", stats
+            )
+        return FetchResult(self.name, group_id, messages, ProviderStatus.OK, meta=stats)
 
-    def _anchor_for_day(self, group_id: str, day: object, tz) -> str | None:
+    def _mcp_call(self, method: str, params: dict, stats: dict, *, timeout: float | None = None) -> dict:
+        started_at = perf_counter()
+        stats["mcp_call_count"] = int(stats.get("mcp_call_count") or 0) + 1
+        try:
+            if isinstance(self._mcp_client, MCPClient):
+                return self._mcp_client.call(method, params, timeout=timeout)
+            return self._mcp_client.call(method, params)
+        finally:
+            stats["mcp_client_ms"] = int(stats.get("mcp_client_ms") or 0) + round(
+                (perf_counter() - started_at) * 1000
+            )
+
+    def _fetch_messages_range(
+        self,
+        group_id: str,
+        start_time: datetime,
+        end_time: datetime,
+        tz,
+        collect,
+        stats: dict,
+    ) -> None:
+        offset = 0
+        pages = 0
+        account = self.wechat_mcp_account.strip()
+        while pages < _MCP_MAX_PAGES:
+            params = {
+                "username": group_id,
+                "start_time": int(start_time.replace(tzinfo=tz).timestamp()),
+                "end_time": int(end_time.replace(tzinfo=tz).timestamp()),
+                "offset": offset,
+                "limit": min(_MCP_RANGE_PAGE_SIZE, _MCP_RANGE_MAX_PAGE_SIZE),
+                "source": "auto",
+            }
+            if account:
+                params["account"] = account
+            structured = self._mcp_call(
+                _MCP_RANGE_TOOL,
+                params,
+                stats,
+                timeout=float(self.wechat_mcp_range_timeout_seconds),
+            )
+            pages += 1
+            items = _extract_message_items(structured)
+            collect(items)
+            stats["server_elapsed_ms"] += _to_int(
+                structured.get("serverElapsedMs", structured.get("server_elapsed_ms"))
+            )
+            stats["read_strategy"] = _first_str(
+                structured, "readStrategy", "read_strategy"
+            ) or "range"
+            has_more = bool(structured.get("hasMore", structured.get("has_more", False)))
+            if not has_more:
+                stats["range_page_count"] = pages
+                return
+            next_offset = _to_int(structured.get("nextOffset", structured.get("next_offset")))
+            if not items or next_offset <= offset:
+                raise MCPError("范围读取分页未前进，拒绝接受不完整结果")
+            offset = next_offset
+        raise MCPError("范围读取分页超过安全上限")
+
+    def _fetch_messages_legacy(
+        self,
+        group_id: str,
+        start_time: datetime,
+        end_time: datetime,
+        tz,
+        collect,
+        stats: dict,
+    ) -> None:
+        day = start_time.date()
+        last_day = end_time.date()
+        while day <= last_day:
+            anchor = self._anchor_for_day(group_id, day, tz, stats)
+            if anchor:
+                self._drain_around(group_id, anchor, start_time, end_time, collect, stats)
+            day = day.fromordinal(day.toordinal() + 1)
+
+    def _anchor_for_day(self, group_id: str, day: object, tz, stats: dict) -> str | None:
         """获取某天第一条消息的锚点 ID；当天无消息返回 None。"""
-        structured = self._mcp_client.call(
+        structured = self._mcp_call(
             "wechat.chat.get_message_anchor",
             {
                 "username": group_id,
@@ -344,6 +455,7 @@ class WeChatDataAnalysisProvider(ChatHistoryProvider):
                 "date": day.isoformat(),
                 "source": "auto",
             },
+            stats,
         )
         return structured.get("anchorId") or None
 
@@ -354,6 +466,7 @@ class WeChatDataAnalysisProvider(ChatHistoryProvider):
         start_time: datetime,
         end_time: datetime,
         collect,
+        stats: dict,
     ) -> None:
         """从锚点向前后翻页读取，直到完全越过时间窗。
 
@@ -365,7 +478,7 @@ class WeChatDataAnalysisProvider(ChatHistoryProvider):
         rounds = 0
         while cur and rounds < _MCP_MAX_PAGES:
             rounds += 1
-            structured = self._mcp_client.call(
+            structured = self._mcp_call(
                 "wechat.chat.get_message_around",
                 {
                     "username": group_id,
@@ -374,6 +487,7 @@ class WeChatDataAnalysisProvider(ChatHistoryProvider):
                     "after": 0,
                     "source": "auto",
                 },
+                stats,
             )
             items = structured.get("messages") or []
             if not items:
@@ -392,7 +506,7 @@ class WeChatDataAnalysisProvider(ChatHistoryProvider):
         rounds = 0
         while cur and rounds < _MCP_MAX_PAGES:
             rounds += 1
-            structured = self._mcp_client.call(
+            structured = self._mcp_call(
                 "wechat.chat.get_message_around",
                 {
                     "username": group_id,
@@ -401,6 +515,7 @@ class WeChatDataAnalysisProvider(ChatHistoryProvider):
                     "after": _MCP_PAGE_SIZE,
                     "source": "auto",
                 },
+                stats,
             )
             items = structured.get("messages") or []
             if not items:
@@ -417,6 +532,60 @@ class WeChatDataAnalysisProvider(ChatHistoryProvider):
 
 
 # ---------- 导出数据工具 ----------
+
+
+_INVISIBLE_NAME_CHARS = frozenset(
+    {
+        "\u115f",  # HANGUL CHOSEONG FILLER
+        "\u3164",  # HANGUL FILLER
+        "\uffa0",  # HALFWIDTH HANGUL FILLER
+        "\u200b",
+        "\u200c",
+        "\u200d",
+        "\u2060",
+        "\ufeff",
+    }
+)
+
+
+def _sanitize_sender_name(value: object) -> str:
+    """移除微信中常见的隐形昵称字符，保留中文、Emoji 与普通字母。"""
+    if value is None:
+        return ""
+    visible: list[str] = []
+    for char in str(value):
+        if char in _INVISIBLE_NAME_CHARS:
+            continue
+        if unicodedata.category(char) in {"Cf", "Cc"}:
+            continue
+        visible.append(char)
+    return "".join(visible).strip()
+
+
+def _usable_sender_name(name: str, sender_id: str) -> bool:
+    if not name or name.lower() in {"none", "null"}:
+        return False
+    return not sender_id or name.casefold() != sender_id.strip().casefold()
+
+
+def _anonymous_sender_name(sender_id: str) -> str:
+    digest = hashlib.sha256((sender_id or "unknown").encode("utf-8")).hexdigest()[:4]
+    return f"未命名成员-{digest}"
+
+
+def _is_unknown_range_tool(error: Exception) -> bool:
+    text = str(error).casefold()
+    markers = (
+        "unknown tool",
+        "tool not found",
+        "no such tool",
+        "无处理器",
+        "不存在",
+        "未注册",
+        "不支持",
+        "unsupported",
+    )
+    return any(marker in text for marker in markers)
 
 
 def _safe(group_id: str) -> str:
@@ -457,6 +626,14 @@ def _first_str(item: dict, *keys: str) -> str:
             continue
         text = str(value).strip()
         if text and text.lower() not in ("none", "null"):
+            return text
+    return ""
+
+
+def _first_visible_str(item: dict, *keys: str) -> str:
+    for key in keys:
+        text = _sanitize_sender_name(item.get(key))
+        if text and text.lower() not in {"none", "null"}:
             return text
     return ""
 
@@ -574,7 +751,7 @@ def _mcp_to_raw(item: dict, group_id: str, ts: datetime) -> RawMessage:
         group_id=group_id,
         group_name="",
         sender_id=_first_str(item, "senderUsername", "sender_username", "sender", "fromUser"),
-        sender_name=_first_str(
+        sender_name=_first_visible_str(
             item, "senderDisplayName", "sender_display_name", "senderName", "fromNickName"
         ),
         timestamp=ts,

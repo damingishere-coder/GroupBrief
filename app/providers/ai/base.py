@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from app.ai.conversation_segments import PromptMessage
+
 
 @dataclass
 class PromptContext:
@@ -14,7 +16,8 @@ class PromptContext:
     range_end: str
     total_messages: int
     speaker_count: int
-    messages_text: str = ""  # 已整理、已截断的聊天文本
+    messages_text: str = ""  # 兼容旧调用；新链路优先使用 message_items
+    message_items: list[PromptMessage] = field(default_factory=list)
     weekdays_text: str = ""  # 周一特殊标题提示等
 
 
@@ -25,6 +28,7 @@ class ImagePromptResult:
     error: str = ""
     provider: str = ""
     model: str = ""
+    meta: dict = field(default_factory=dict)
 
 
 class PromptGeneratorProvider:
@@ -42,6 +46,7 @@ class PromptGeneratorProvider:
         total_messages: int,
         speaker_count: int,
         messages_text: str = "",
+        message_items: list[PromptMessage] | None = None,
         weekdays_text: str = "",
     ) -> PromptContext:
         return PromptContext(
@@ -53,6 +58,7 @@ class PromptGeneratorProvider:
             total_messages=total_messages,
             speaker_count=speaker_count,
             messages_text=messages_text,
+            message_items=list(message_items or []),
             weekdays_text=weekdays_text,
         )
 

@@ -1,21 +1,13 @@
 ===== {{group_name}} =====
-
 【发言排行榜】
-
 {{group_name}}
 消息统计
 ------------
-
 时间起：{{period_start}}
 时间止：{{period_end}}
-
 ------------
-
 发言人数：{{speaker_count}}
-
 总消息：{{message_count}}
-
 ------------
-
-发言 Top10
-{{top10_lines}}
+发言 Top{{top_limit}}
+{{top_lines}}

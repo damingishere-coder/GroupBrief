@@ -3,7 +3,7 @@
 分类日志文件：
 - logs/app.log        业务日志
 - logs/provider.log   微信读取 Provider 日志
-- logs/ai.log         DeepSeek AI 日志
+- logs/ai.log         群聊总结模型日志
 - logs/scheduler.log  调度日志
 - logs/email.log      邮件日志
 

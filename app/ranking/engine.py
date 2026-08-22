@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 from collections import Counter
+import unicodedata
 
 from app.data_sources.base import V2Message
 from app.services.message_normalizer import COUNTABLE_TYPES, SYSTEM_KEYWORDS
@@ -27,13 +28,25 @@ class RankingEngine:
             return False
         return m.message_type in COUNTABLE_TYPES
 
+    @staticmethod
+    def _name_sort_key(name: str) -> tuple[str, str]:
+        """同分时忽略前导 Emoji/装饰符，用可见文字主体保持稳定排序。"""
+        visible_core = str(name or "").lstrip()
+        while visible_core and unicodedata.category(visible_core[0]).startswith(("P", "S", "Z")):
+            visible_core = visible_core[1:].lstrip()
+        return (visible_core or str(name or ""), str(name or ""))
+
     def compute(
         self,
         messages: list[V2Message],
         group_name: str,
         period_start: str,
         period_end: str,
+        top_limit: int = 10,
     ) -> RankingResult:
+        if top_limit <= 0:
+            raise ValueError("排行榜上限必须大于 0")
+
         counter: Counter[str] = Counter()
         for m in messages:
             if not self._countable(m):
@@ -46,10 +59,10 @@ class RankingEngine:
         speaker_count = len(counter)
 
         # 确定性排序：消息数降序，同数量按名称稳定升序
-        ordered = sorted(counter.items(), key=lambda kv: (-kv[1], kv[0]))
+        ordered = sorted(counter.items(), key=lambda kv: (-kv[1], self._name_sort_key(kv[0])))
         top_speakers = [
             TopSpeaker(rank=i + 1, name=name, count=count)
-            for i, (name, count) in enumerate(ordered[:10])
+            for i, (name, count) in enumerate(ordered[:top_limit])
         ]
 
         return RankingResult(
@@ -58,5 +71,6 @@ class RankingEngine:
             period_end=period_end,
             speaker_count=speaker_count,
             message_count=message_count,
+            top_limit=top_limit,
             top_speakers=top_speakers,
         )

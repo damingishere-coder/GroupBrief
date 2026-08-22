@@ -1,6 +1,6 @@
 """V2 P2：排行榜引擎单元测试。
 
-验证：计数正确 / Top10 / 系统消息过滤 / 确定性 / 同数量稳定排序 /
+验证：计数正确 / 动态 Top 上限 / 系统消息过滤 / 确定性 / 同数量稳定排序 /
 中文与 Emoji 昵称 / 空消息 / ranking.json 结构。
 """
 
@@ -49,6 +49,34 @@ def test_count_and_top10():
     assert [s.rank for s in r.top_speakers] == [1, 2, 3]
 
 
+def test_three_day_messages_are_summed_by_speaker():
+    messages = [
+        _msg("张三", i=1),
+        _msg("张三", i=2),
+        _msg("张三", i=3),
+        _msg("李四", i=4),
+    ]
+    messages[0].timestamp = datetime(2026, 8, 14, 10, 0, 0)  # 周五
+    messages[1].timestamp = datetime(2026, 8, 15, 10, 0, 0)  # 周六
+    messages[2].timestamp = datetime(2026, 8, 16, 10, 0, 0)  # 周日
+    messages[3].timestamp = datetime(2026, 8, 16, 11, 0, 0)
+
+    r = engine.compute(
+        messages,
+        "测试群",
+        "2026-08-14 00:00:00",
+        "2026-08-16 23:59:59",
+        top_limit=15,
+    )
+    assert r.message_count == 4
+    assert r.speaker_count == 2
+    assert (r.top_speakers[0].rank, r.top_speakers[0].name, r.top_speakers[0].count) == (
+        1,
+        "张三",
+        3,
+    )
+
+
 def test_system_message_filtered():
     messages = [
         _msg("张三", i=1),
@@ -80,6 +108,12 @@ def test_tie_stable_sort():
     assert [s.name for s in r.top_speakers] == ["张三", "李四", "王五", "赵六"]
 
 
+def test_tie_sort_ignores_leading_emoji_decoration():
+    messages = [_msg("请下载“生气”App", i=1), _msg("🌸林诗雅小仙女", i=2)]
+    r = engine.compute(messages, "测试群", PERIOD_START, PERIOD_END)
+    assert [s.name for s in r.top_speakers] == ["🌸林诗雅小仙女", "请下载“生气”App"]
+
+
 def test_chinese_emoji_names():
     messages = [
         _msg("茶馆V3.0（三周年纪念）🐮🐴", i=1),
@@ -106,6 +140,20 @@ def test_top10_capped():
     assert r.top_speakers[-1].rank == 10
 
 
+def test_top15_capped_when_requested():
+    messages = [_msg(f"成员{n:02}", i=n) for n in range(20)]
+    r = engine.compute(
+        messages,
+        "测试群",
+        PERIOD_START,
+        PERIOD_END,
+        top_limit=15,
+    )
+    assert r.top_limit == 15
+    assert len(r.top_speakers) == 15
+    assert r.top_speakers[-1].rank == 15
+
+
 def test_ranking_json_structure():
     messages = [_msg("张三", i=1), _msg("李四", i=2)]
     r = engine.compute(messages, "测试群", PERIOD_START, PERIOD_END)
@@ -116,6 +164,8 @@ def test_ranking_json_structure():
         "period_end",
         "speaker_count",
         "message_count",
+        "top_limit",
         "top_speakers",
     }
+    assert d["top_limit"] == 10
     assert d["top_speakers"][0] == {"rank": 1, "name": "张三", "count": 1}

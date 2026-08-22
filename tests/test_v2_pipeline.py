@@ -7,7 +7,8 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, time
+import json
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 
 import pytest
@@ -27,6 +28,8 @@ from app.db.models import Group
 from app.pipeline.daily_pipeline import DailyPipeline
 from app.v2.constants import (
     FAILED,
+    IMAGE_FILE_MISSING,
+    IMAGE_GENERATION_FAILED,
     IMAGE_READY,
     PROMPT_READY,
     READY_TO_SEND,
@@ -37,8 +40,10 @@ from app.v2.run_store import RunStore
 
 def _clear_groups() -> None:
     with Session(repo.engine) as session:
-        for g in repo.list_groups(session):
-            repo.delete_group(session, g.id)
+        # 测试数据库需要真正清空；产品 delete_group 已改为保留历史的软删除。
+        for g in repo.list_groups(session, include_deleted=True):
+            session.delete(g)
+        session.commit()
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -96,10 +101,12 @@ class FakeSource(WeChatDataSource):
 class FakePrompt:
     def __init__(self, fail=False):
         self.fail = fail
+        self.inputs = []
 
     def build(self, data):
         from app.ai.prompt_builder_types import PromptOutput
 
+        self.inputs.append(data)
         if self.fail:
             return PromptOutput(False, error="DeepSeek 失败")
         return PromptOutput(True, "【任务】\n生成图片\n【主标题】今天热聊", meta={"mode": "single"})
@@ -147,7 +154,22 @@ class FakeSender:
         return SendResult(not self.fail_image, "" if not self.fail_image else "图片发送失败", datetime.now().isoformat())
 
 
-def _make_pipeline(tmp_path, source=None, prompt=None, gen=None, sender=None, image_enabled=True, send_time="08:30"):
+class UnknownTextSender(FakeSender):
+    def send_text(self, target: str, text: str):
+        from app.sender.base import SendResult
+
+        self.text_calls.append((target, text))
+        return SendResult(
+            False,
+            "已按 Enter，但未观察到 UI 变化",
+            datetime.now().isoformat(),
+            submitted=True,
+            verification_level="unknown",
+            outcome_unknown=True,
+        )
+
+
+def _make_pipeline(tmp_path, source=None, prompt=None, gen=None, sender=None, image_enabled=True, send_time="08:30", image_theme="blue_white", image_theme_custom=""):
     source = source or FakeSource()
     prompt = prompt or FakePrompt()
     gen = gen or FakeGenerator()
@@ -167,10 +189,16 @@ def _make_pipeline(tmp_path, source=None, prompt=None, gen=None, sender=None, im
                 enabled=True,
                 send_time=send_time,
                 image_enabled=image_enabled,
+                image_theme=image_theme,
+                image_theme_custom=image_theme_custom,
+                wechat_send_enabled=True,
             )
         else:
             group.image_enabled = image_enabled
             group.send_time = send_time
+            group.image_theme = image_theme
+            group.image_theme_custom = image_theme_custom
+            group.wechat_send_enabled = True
         group = repo.save_group(session, group)
 
     return DailyPipeline(
@@ -188,7 +216,7 @@ def _make_pipeline(tmp_path, source=None, prompt=None, gen=None, sender=None, im
 def test_generate_flow_reaches_ready_to_send(tmp_path):
     pipeline, group = _make_pipeline(tmp_path)
     results = pipeline.generate_all(run_date="2026-08-18")  # 周二
-    assert results[0]["status"] in ("ready_to_send", "prompt_ready")
+    assert results[0]["status"] == "ready_to_send"
     run = pipeline.store.load_run("测试群", "2026-08-18")
     assert run["status"] == READY_TO_SEND
     # 文件生成
@@ -197,6 +225,10 @@ def test_generate_flow_reaches_ready_to_send(tmp_path):
     assert pipeline.store.ranking_txt_path("测试群", "2026-08-18").exists()
     assert pipeline.store.prompt_path("测试群", "2026-08-18").exists()
     assert pipeline.store.image_path("测试群", "2026-08-18").exists()
+    assert run["imagegen_ms"] >= 0
+    assert run["stage_timings"]["imagegen_ms"] == run["imagegen_ms"]
+    assert run["image_size_bytes"] == pipeline.store.image_path("测试群", "2026-08-18").stat().st_size
+    assert run["image_generated_at"]
 
 
 def test_generate_skip_when_already_ready(tmp_path):
@@ -214,7 +246,126 @@ def test_generate_force_regenerates(tmp_path):
     source = FakeSource()
     pipeline2, _ = _make_pipeline(tmp_path, source=source)
     results = pipeline2.generate_all(run_date="2026-08-18", force=True)
-    assert results[0]["status"] in ("ready_to_send", "prompt_ready")
+    assert results[0]["status"] == "ready_to_send"
+
+
+def test_monday_and_tuesday_both_generate_top10(tmp_path):
+    messages = [_msg(f"成员{n:02}", i=n) for n in range(20)]
+    pipeline, _ = _make_pipeline(
+        tmp_path,
+        source=FakeSource(messages=messages),
+        image_enabled=False,
+    )
+
+    monday = pipeline.generate_all(run_date="2026-08-17")
+    assert monday[0]["status"] == "ready_to_send"
+    monday_json = json.loads(
+        pipeline.store.ranking_json_path("测试群", "2026-08-17").read_text(encoding="utf-8")
+    )
+    monday_text = pipeline.store.ranking_txt_path(
+        "测试群", "2026-08-17"
+    ).read_text(encoding="utf-8")
+    assert monday_json["top_limit"] == 10
+    assert len(monday_json["top_speakers"]) == 10
+    assert monday_json["top_speakers"][-1]["rank"] == 10
+    assert "发言 Top10" in monday_text
+
+    tuesday = pipeline.generate_all(run_date="2026-08-18")
+    assert tuesday[0]["status"] == "ready_to_send"
+    tuesday_json = json.loads(
+        pipeline.store.ranking_json_path("测试群", "2026-08-18").read_text(encoding="utf-8")
+    )
+    tuesday_text = pipeline.store.ranking_txt_path(
+        "测试群", "2026-08-18"
+    ).read_text(encoding="utf-8")
+    assert tuesday_json["top_limit"] == 10
+    assert len(tuesday_json["top_speakers"]) == 10
+    assert "发言 Top10" in tuesday_text
+
+
+def test_pipeline_passes_group_theme_and_records_request_metadata(tmp_path):
+    prompt = FakePrompt()
+    pipeline, group = _make_pipeline(
+        tmp_path,
+        prompt=prompt,
+        image_enabled=False,
+        image_theme="random_preset",
+        image_theme_custom="可切回的旧主题",
+    )
+    pipeline.store.save_run(
+        "测试群",
+        "2026-08-17",
+        {
+            "status": "SENT",
+            "prompt_meta": {
+                "layout_id": "hero_cover",
+                "comedy_device": "字面化",
+                "layout_signature": "old-layout",
+            },
+        },
+    )
+    pipeline.store.save_run(
+        "测试群",
+        "2026-08-18",
+        {
+            "status": "PENDING",
+            "prompt_meta": {
+                "layout_id": "group_court",
+                "hero_topic_id": "topic-01",
+                "comedy_device": "反差",
+            },
+        },
+    )
+    result = pipeline.generate_all(run_date="2026-08-18")
+    assert result[0]["status"] == "ready_to_send"
+    assert prompt.inputs[0].image_theme == "random_preset"
+    assert prompt.inputs[0].image_theme_custom == "可切回的旧主题"
+    assert prompt.inputs[0].persisted_theme_meta["layout_id"] == "group_court"
+    assert prompt.inputs[0].recent_layout_history[0]["layout_id"] == "hero_cover"
+    run = pipeline.store.load_run("测试群", "2026-08-18")
+    assert run["image_theme"] == "random_preset"
+    assert run["image_theme_custom"] == "可切回的旧主题"
+
+
+def test_generate_one_refreshes_current_image_switch_before_decision(tmp_path):
+    pipeline, group = _make_pipeline(tmp_path, image_enabled=False)
+    assert group.image_enabled is False
+
+    # 保留传入的旧对象为 false，只把数据库中的当前配置切换为 true。
+    with Session(repo.engine) as session:
+        current = repo.get_group(session, group.id)
+        assert current is not None
+        current.image_enabled = True
+        repo.save_group(session, current)
+
+    window = pipeline.period_resolver.resolve(
+        run_date=date(2026, 8, 18),
+        timezone=pipeline.settings.app_timezone,
+    )
+    result = pipeline._generate_one(group, window, "2026-08-18", force=True)
+    run = pipeline.store.load_run("测试群", "2026-08-18")
+
+    assert result["need_image"] is True
+    assert run["image_enabled"] is True
+
+
+def test_force_generate_runs_image_queue_and_returns_final_state(tmp_path):
+    gen = FakeGenerator()
+    pipeline, group = _make_pipeline(tmp_path, gen=gen)
+    result = pipeline.force_generate(group.id, "2026-08-18")
+    assert result["status"] == "ready_to_send"
+    assert len(gen.calls) == 1
+    assert pipeline.store.load_run("测试群", "2026-08-18")["status"] == READY_TO_SEND
+
+
+def test_force_generate_image_failure_returns_failed_state(tmp_path):
+    gen = FakeGenerator(fail=True)
+    pipeline, group = _make_pipeline(tmp_path, gen=gen)
+    result = pipeline.force_generate(group.id, "2026-08-18")
+    assert result["status"] == "failed"
+    assert result["error_type"] == IMAGE_GENERATION_FAILED
+    run = pipeline.store.load_run("测试群", "2026-08-18")
+    assert run["status"] == FAILED
 
 
 def test_generate_data_failure_marks_failed(tmp_path):
@@ -253,10 +404,13 @@ def test_image_serial_order(tmp_path):
     assert len(gen.calls) == 1
 
 
-def test_saturday_skipped(tmp_path):
+def test_saturday_generates_previous_day(tmp_path):
     pipeline, group = _make_pipeline(tmp_path)
     results = pipeline.generate_all(run_date="2026-08-22")  # 周六
-    assert results[0]["status"] == "skipped"
+    assert results[0]["status"] == "ready_to_send"
+    run = pipeline.store.load_run("测试群", "2026-08-22")
+    assert run["period_start"] == "2026-08-21 00:00:00"
+    assert run["period_end"] == "2026-08-21 23:59:59"
 
 
 # ---------- 发送阶段 ----------
@@ -276,9 +430,65 @@ def test_send_due_sends_text_then_image(tmp_path):
     run = pipeline.store.load_run("测试群", "2026-08-18")
     assert run["status"] == SENT
     assert run.get("sent_at")
+    assert run["send_state"] == "sent"
+    assert run["text_attempt_started_at"]
+    assert run["text_attempt_finished_at"]
+    assert run["image_attempt_started_at"]
+    assert run["image_attempt_finished_at"]
+    assert run["verification_level"] == "provider_reported"
     sender = pipeline.sender
     assert len(sender.text_calls) == 1
     assert len(sender.image_calls) == 1
+
+
+def test_send_due_processes_same_time_groups_in_stable_order(tmp_path, monkeypatch):
+    sender = FakeSender()
+    pipeline, _ = _make_pipeline(tmp_path, sender=sender, image_enabled=False)
+    groups = [
+        Group(
+            id=101,
+            display_name="顺序群一",
+            wechat_group_name="顺序群一",
+            send_target="目标一",
+            send_time="08:30",
+            image_enabled=False,
+            wechat_send_enabled=True,
+        ),
+        Group(
+            id=102,
+            display_name="顺序群二",
+            wechat_group_name="顺序群二",
+            send_target="目标二",
+            send_time="08:30",
+            image_enabled=False,
+            wechat_send_enabled=True,
+        ),
+    ]
+    monkeypatch.setattr(pipeline, "_load_groups", lambda group_ids=None: groups)
+    for group in groups:
+        pipeline.store.save_run(group.display_name, "2026-08-18", {"status": READY_TO_SEND})
+        ranking_path = pipeline.store.ranking_txt_path(group.display_name, "2026-08-18")
+        ranking_path.parent.mkdir(parents=True, exist_ok=True)
+        ranking_path.write_text(f"{group.display_name}总结", encoding="utf-8")
+
+    results = pipeline.send_due(now=datetime(2026, 8, 18, 8, 30, 0))
+
+    assert [result["group_name"] for result in results] == ["顺序群一", "顺序群二"]
+    assert [target for target, _ in sender.text_calls] == ["目标一", "目标二"]
+
+
+def test_send_due_skips_group_when_wechat_send_is_not_enabled(tmp_path):
+    pipeline = _ready_to_send(tmp_path)
+    from sqlmodel import select
+
+    with Session(repo.engine) as session:
+        group = session.exec(select(Group).where(Group.display_name == "测试群")).first()
+        assert group is not None
+        group.wechat_send_enabled = False
+        repo.save_group(session, group)
+
+    assert pipeline.send_due(now=datetime(2026, 8, 18, 9, 0, 0)) == []
+    assert pipeline.store.load_run("测试群", "2026-08-18")["status"] == READY_TO_SEND
 
 
 def test_send_not_due_yet(tmp_path):
@@ -304,7 +514,56 @@ def test_send_text_failure(tmp_path):
     assert results[0]["status"] == "failed"
     assert results[0]["error_type"] == "SEND_TEXT_FAILED"
     run = pipeline.store.load_run("测试群", "2026-08-18")
-    assert run["status"] == FAILED
+    assert run["status"] == READY_TO_SEND
+    assert run["send_error_type"] == "SEND_TEXT_FAILED"
+
+
+def test_send_preflight_missing_ranking_does_not_call_sender(tmp_path):
+    pipeline = _ready_to_send(tmp_path)
+    ranking = pipeline.store.ranking_txt_path("测试群", "2026-08-18")
+    ranking.unlink()
+    sender = FakeSender()
+    pipeline.sender = sender
+    results = pipeline.send_due(now=datetime(2026, 8, 18, 9, 0, 0))
+    assert results[0]["status"] == "failed"
+    assert results[0]["error_type"] == "SEND_TEXT_FAILED"
+    assert sender.text_calls == []
+    assert sender.image_calls == []
+
+
+def test_send_preflight_empty_ranking_does_not_call_sender(tmp_path):
+    pipeline = _ready_to_send(tmp_path)
+    pipeline.store.ranking_txt_path("测试群", "2026-08-18").write_text("", encoding="utf-8")
+    sender = FakeSender()
+    pipeline.sender = sender
+    results = pipeline.send_due(now=datetime(2026, 8, 18, 9, 0, 0))
+    assert results[0]["status"] == "failed"
+    assert results[0]["error_type"] == "SEND_TEXT_FAILED"
+    assert sender.text_calls == []
+    assert sender.image_calls == []
+
+
+def test_send_preflight_missing_image_does_not_call_sender(tmp_path):
+    pipeline = _ready_to_send(tmp_path)
+    pipeline.store.image_path("测试群", "2026-08-18").unlink()
+    sender = FakeSender()
+    pipeline.sender = sender
+    results = pipeline.send_due(now=datetime(2026, 8, 18, 9, 0, 0))
+    assert results[0]["status"] == "failed"
+    assert results[0]["error_type"] == IMAGE_FILE_MISSING
+    assert sender.text_calls == []
+    assert sender.image_calls == []
+
+
+def test_send_image_disabled_sends_text_only(tmp_path):
+    pipeline = _ready_to_send(tmp_path, image_enabled=False)
+    sender = FakeSender()
+    pipeline.sender = sender
+    results = pipeline.send_due(now=datetime(2026, 8, 18, 9, 0, 0))
+    assert results[0]["status"] == "sent"
+    assert "未启用图片" in results[0]["detail"]
+    assert len(sender.text_calls) == 1
+    assert sender.image_calls == []
 
 
 def test_send_image_failure(tmp_path):
@@ -314,9 +573,140 @@ def test_send_image_failure(tmp_path):
     results = pipeline.send_due(now=now)
     assert results[0]["status"] == "failed"
     assert results[0]["error_type"] == "SEND_IMAGE_FAILED"
+    run = pipeline.store.load_run("测试群", "2026-08-18")
+    assert run["status"] == READY_TO_SEND
+    assert run["text_sent_at"]
+
+
+def test_send_image_retry_does_not_repeat_text(tmp_path):
+    pipeline = _ready_to_send(tmp_path)
+    first_sender = FakeSender(fail_image=True)
+    pipeline.sender = first_sender
+    pipeline.send_due(now=datetime(2026, 8, 18, 9, 0, 0))
+    assert len(first_sender.text_calls) == 1
+
+    retry_sender = FakeSender()
+    pipeline.sender = retry_sender
+    result = pipeline.send_due(now=datetime(2026, 8, 18, 9, 0, 0))
+
+    assert result[0]["status"] == "sent"
+    assert retry_sender.text_calls == []
+    assert len(retry_sender.image_calls) == 1
 
 
 def test_force_send(tmp_path):
     pipeline = _ready_to_send(tmp_path)
-    r = pipeline.force_send(1, "2026-08-18")
+    r = pipeline.force_send(1, "2026-08-18", confirm_late_send=True)
     assert r["status"] == "sent"
+
+
+def test_force_send_cannot_bypass_prompt_saved_hold(tmp_path):
+    pipeline = _ready_to_send(tmp_path)
+    pipeline.store.update(
+        "测试群",
+        "2026-08-18",
+        send_hold=True,
+        image_regen_status="prompt_saved",
+    )
+
+    result = pipeline.force_send(
+        1, "2026-08-18", confirm_regenerated=True, confirm_late_send=True
+    )
+
+    assert result["status"] == "failed"
+    assert "新图尚未完成审核" in result["error"]
+    assert pipeline.sender.text_calls == []
+
+
+def test_force_send_regenerated_image_requires_explicit_confirmation(tmp_path):
+    pipeline = _ready_to_send(tmp_path)
+    pipeline.store.update(
+        "测试群",
+        "2026-08-18",
+        send_hold=True,
+        image_regen_status="ready_for_review",
+    )
+
+    rejected = pipeline.force_send(1, "2026-08-18")
+    accepted = pipeline.force_send(
+        1, "2026-08-18", confirm_regenerated=True, confirm_late_send=True
+    )
+
+    assert rejected["status"] == "failed"
+    assert accepted["status"] == "sent"
+
+
+def test_send_due_allows_exact_30_minute_boundary(tmp_path):
+    pipeline = _ready_to_send(tmp_path)
+
+    result = pipeline.send_due(now=datetime(2026, 8, 18, 9, 0, 0))
+
+    assert result[0]["status"] == "sent"
+
+
+def test_send_due_holds_after_30_minute_boundary(tmp_path):
+    pipeline = _ready_to_send(tmp_path)
+
+    result = pipeline.send_due(now=datetime(2026, 8, 18, 9, 0, 1))
+
+    assert result[0]["status"] == "held"
+    assert result[0]["error_type"] == "MISSED_SEND_WINDOW"
+    run = pipeline.store.load_run("测试群", "2026-08-18")
+    assert run["send_hold"] is True
+    assert run["send_hold_reason"] == "MISSED_SEND_WINDOW"
+    assert pipeline.sender.text_calls == []
+
+
+def test_force_send_late_requires_independent_confirmation(tmp_path):
+    pipeline = _ready_to_send(tmp_path)
+
+    rejected = pipeline.force_send(1, "2026-08-18")
+    accepted = pipeline.force_send(1, "2026-08-18", confirm_late_send=True)
+
+    assert rejected["error_type"] == "MISSED_SEND_WINDOW"
+    assert accepted["status"] == "sent"
+
+
+def test_submitted_but_unverified_text_is_held_without_retry(tmp_path):
+    pipeline = _ready_to_send(tmp_path)
+    sender = UnknownTextSender()
+    pipeline.sender = sender
+
+    first = pipeline.send_due(now=datetime(2026, 8, 18, 8, 31, 0))
+    second = pipeline.send_due(now=datetime(2026, 8, 18, 8, 32, 0))
+
+    assert first[0]["error_type"] == "SEND_RESULT_UNKNOWN"
+    assert second == []
+    assert len(sender.text_calls) == 1
+    run = pipeline.store.load_run("测试群", "2026-08-18")
+    assert run["send_state"] == "unknown"
+    assert run["send_hold"] is True
+
+
+def test_run_store_send_claim_prevents_duplicate_and_marks_expired_attempt_unknown(tmp_path):
+    store = RunStore(tmp_path / "output")
+    store.save_run("测试群", "2026-08-18", {"status": READY_TO_SEND})
+    now = datetime(2026, 8, 18, 8, 30, 0)
+
+    claim_id, _, reason = store.claim_send(
+        "测试群", "2026-08-18", now=now, lease_seconds=30
+    )
+    duplicate, _, duplicate_reason = store.claim_send(
+        "测试群", "2026-08-18", now=now, lease_seconds=30
+    )
+
+    assert claim_id and reason == "claimed"
+    assert duplicate is None and duplicate_reason == "already_claimed"
+    store.update_send_claim(
+        "测试群",
+        "2026-08-18",
+        claim_id,
+        text_attempt_started_at=now.isoformat(),
+        text_attempt_finished_at="",
+    )
+    recovered, run, recovered_reason = store.claim_send(
+        "测试群", "2026-08-18", now=now + timedelta(seconds=31), lease_seconds=30
+    )
+    assert recovered is None
+    assert recovered_reason == "result_unknown"
+    assert run["send_state"] == "unknown"

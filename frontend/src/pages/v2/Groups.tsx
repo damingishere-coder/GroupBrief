@@ -1,153 +1,83 @@
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import {
-  DiscoveredGroup,
+  ArrowsClockwise,
+  Flask,
+  LinkSimple,
+  MagnifyingGlass,
+  PencilSimple,
+  Plus,
+  Trash,
+  ToggleLeft,
+  ToggleRight,
+} from "@phosphor-icons/react";
+import {
   GroupMatch,
   GroupV2,
+  TestReadResult,
   bindGroupFromName,
-  del,
-  discoverGroups,
-  get,
-  post,
-  put,
+  deleteGroup,
+  listGroups,
   resolveGroups,
   testReadGroup,
+  updateGroup,
 } from "../../api";
+import {
+  Button,
+  ConfirmDialog,
+  EmptyState,
+  LoadingState,
+  PageHeader,
+  StatusBadge,
+  Toast,
+} from "../../components/common";
 import { useToast } from "../../components/ui";
+import { navigateToHash } from "../../navigation";
 
-const EMPTY_GROUP: Partial<GroupV2> = {
-  display_name: "",
-  wechat_group_id: "",
-  enabled: true,
-  send_time: "08:30",
-  schedule_rule: "weekday_default",
-  summary_model: "deepseek-v4-flash",
-  prompt_model: "deepseek-v4-flash",
-  image_enabled: true,
-  send_target: "",
-  ranking_template: "default",
-  image_prompt_template: "default",
-};
+type GroupFilter = "all" | "enabled" | "disabled";
+type ToggleField = "enabled" | "image_enabled";
 
-function GroupForm({
-  initial,
-  onSave,
-  onCancel,
+function formatDateTime(value: string): string {
+  if (!value) return "—";
+  return value.replace("T", " ").slice(0, 16);
+}
+
+function ToggleSwitch({
+  checked,
+  label,
+  busy,
+  onChange,
 }: {
-  initial: Partial<GroupV2>;
-  onSave: (g: Partial<GroupV2>) => void;
-  onCancel: () => void;
+  checked: boolean;
+  label: string;
+  busy: boolean;
+  onChange: () => void;
 }) {
-  const { msg, toast } = useToast();
-  const [form, setForm] = useState<Partial<GroupV2>>({ ...EMPTY_GROUP, ...initial });
-  const [discovered, setDiscovered] = useState<DiscoveredGroup[]>([]);
-  const [showDiscover, setShowDiscover] = useState(false);
-  const set = (k: keyof GroupV2, v: unknown) => setForm((f) => ({ ...f, [k]: v }));
-
-  const loadDiscover = () => {
-    discoverGroups()
-      .then((list) => {
-        setDiscovered(list);
-        setShowDiscover(true);
-        toast(`从微信发现 ${list.length} 个群`);
-      })
-      .catch((e) => toast(String(e)));
-  };
-
-  const pick = (item: DiscoveredGroup) => {
-    setForm((f) => ({
-      ...f,
-      display_name: item.group_name,
-      wechat_group_id: item.group_id,
-      wechat_group_name: item.group_name,
-      send_target: item.group_name,
-    }));
-    toast(`已选择「${item.group_name}」`);
-  };
-
+  const Icon = checked ? ToggleRight : ToggleLeft;
   return (
-    <div className="card form-card">
-      <div className="card-title">{initial.id ? "编辑群" : "新增群"}</div>
+    <button
+      type="button"
+      className={`groups-toggle ${checked ? "is-on" : ""}`}
+      role="switch"
+      aria-checked={checked}
+      aria-label={label}
+      onClick={onChange}
+      disabled={busy}
+      title={busy ? "保存中…" : label}
+    >
+      <Icon size={28} weight="fill" aria-hidden="true" />
+      <span>{checked ? "已启用" : "已停用"}</span>
+    </button>
+  );
+}
 
-      {!initial.id && (
-        <div className="discover-bar">
-          <button type="button" className="btn btn-sm btn-secondary" onClick={loadDiscover}>
-            从微信发现群（避免手输群 ID）
-          </button>
-          {showDiscover && (
-            <div className="discover-list">
-              {discovered.length === 0 && <span className="muted">未发现群（请确认 WeChatDataAnalysis 已运行）</span>}
-              {discovered.map((item) => (
-                <button
-                  key={item.group_id}
-                  type="button"
-                  className="discover-item"
-                  onClick={() => pick(item)}
-                  title={item.group_id}
-                >
-                  {item.group_name}
-                </button>
-              ))}
-            </div>
-          )}
-        </div>
-      )}
-
-      <div className="form-grid">
-        <label className="field">
-          群名称
-          <input value={form.display_name || ""} onChange={(e) => set("display_name", e.target.value)} />
-        </label>
-        <label className="field">
-          微信群 ID
-          <input value={form.wechat_group_id || ""} onChange={(e) => set("wechat_group_id", e.target.value)} />
-        </label>
-        <label className="field">
-          发送时间
-          <input value={form.send_time || "08:30"} onChange={(e) => set("send_time", e.target.value)} />
-        </label>
-        <label className="field">
-          发送目标（微信群名）
-          <input value={form.send_target || ""} onChange={(e) => set("send_target", e.target.value)} />
-        </label>
-        <label className="field">
-          统计周期规则
-          <select value={form.schedule_rule || "weekday_default"} onChange={(e) => set("schedule_rule", e.target.value)}>
-            <option value="weekday_default">工作日默认（周一=周五~周日，周六日不生成）</option>
-          </select>
-        </label>
-        <label className="field">
-          排行榜模板
-          <input value={form.ranking_template || "default"} onChange={(e) => set("ranking_template", e.target.value)} />
-        </label>
-        <label className="field">
-          生图 Prompt 模板
-          <input
-            value={form.image_prompt_template || "default"}
-            onChange={(e) => set("image_prompt_template", e.target.value)}
-          />
-        </label>
-        <label className="field">
-          Prompt 模型
-          <input value={form.prompt_model || "deepseek-v4-flash"} onChange={(e) => set("prompt_model", e.target.value)} />
-        </label>
-        <label className="field switch-field">
-          <input type="checkbox" checked={form.enabled !== false} onChange={(e) => set("enabled", e.target.checked)} />
-          启用该群
-        </label>
-        <label className="field switch-field">
-          <input type="checkbox" checked={form.image_enabled !== false} onChange={(e) => set("image_enabled", e.target.checked)} />
-          启用生图
-        </label>
-      </div>
-      <div className="form-actions">
-        <button className="btn" onClick={() => onSave(form)}>
-          保存
-        </button>
-        <button className="btn btn-ghost" onClick={onCancel}>
-          取消
-        </button>
-      </div>
-      {msg && <div className="toast">{msg}</div>}
+function TestResult({ result }: { result: TestReadResult }) {
+  const tone = result.status === "OK" ? "success" : "warning";
+  return (
+    <div className="groups-test-result">
+      <StatusBadge tone={tone}>{result.status}</StatusBadge>
+      <span>Provider：{result.provider || "—"}</span>
+      <span>消息数：{result.message_count}</span>
+      <span>{result.detail || "无详细信息"}</span>
     </div>
   );
 }
@@ -155,164 +85,296 @@ function GroupForm({
 export default function Groups() {
   const { msg, toast } = useToast();
   const [groups, setGroups] = useState<GroupV2[]>([]);
-  const [editing, setEditing] = useState<Partial<GroupV2> | null>(null);
   const [loading, setLoading] = useState(true);
-  // 按群名搜索绑定
+  const [loadError, setLoadError] = useState("");
+  const [query, setQuery] = useState("");
+  const [filter, setFilter] = useState<GroupFilter>("all");
   const [searchName, setSearchName] = useState("");
   const [searching, setSearching] = useState(false);
   const [searchResult, setSearchResult] = useState<GroupMatch[]>([]);
-  // 测试读取结果
-  const [testReadingId, setTestReadingId] = useState<number | null>(null);
+  const [toggleBusy, setToggleBusy] = useState("");
+  const [testBusy, setTestBusy] = useState<number | null>(null);
+  const [testResults, setTestResults] = useState<Record<number, TestReadResult>>({});
+  const [deleteTarget, setDeleteTarget] = useState<GroupV2 | null>(null);
+  const [deleteBusy, setDeleteBusy] = useState(false);
 
   const load = () => {
     setLoading(true);
-    get<GroupV2[]>("/groups")
+    setLoadError("");
+    listGroups()
       .then(setGroups)
-      .catch((e) => toast(String(e)))
+      .catch((error: unknown) => {
+        const message = String(error);
+        setLoadError(message);
+        toast(message);
+      })
       .finally(() => setLoading(false));
   };
-  useEffect(load, []);
 
-  const save = (g: Partial<GroupV2>) => {
-    const p = g.id ? put<{ id: number }>(`/groups/${g.id}`, g) : post<{ id: number }>("/groups", g);
-    p.then(() => {
-      toast("已保存");
-      setEditing(null);
-      load();
-    }).catch((e) => toast(String(e)));
+  useEffect(() => {
+    load();
+  }, []);
+
+  const filteredGroups = useMemo(() => {
+    const normalizedQuery = query.trim().toLocaleLowerCase();
+    return groups.filter((group) => {
+      const matchesFilter = filter === "all" || (filter === "enabled" ? group.enabled : !group.enabled);
+      if (!matchesFilter) return false;
+      if (!normalizedQuery) return true;
+      return [group.display_name, group.wechat_group_name, group.wechat_group_id, group.send_target]
+        .filter(Boolean)
+        .some((value) => value.toLocaleLowerCase().includes(normalizedQuery));
+    });
+  }, [filter, groups, query]);
+
+  const toggle = (group: GroupV2, field: ToggleField) => {
+    const next = !group[field];
+    const key = `${group.id}:${field}`;
+    if (toggleBusy) return;
+    setToggleBusy(key);
+    setGroups((current) => current.map((item) => item.id === group.id ? { ...item, [field]: next } : item));
+    const body = field === "enabled" ? { enabled: next } : { image_enabled: next };
+    updateGroup(group.id, body)
+      .then(() => toast(`${field === "enabled" ? "启用状态" : "AI 图片开关"}已更新`))
+      .catch((error: unknown) => {
+        setGroups((current) => current.map((item) => item.id === group.id ? { ...item, [field]: !next } : item));
+        toast(`保存失败：${String(error)}`);
+      })
+      .finally(() => setToggleBusy(""));
   };
 
-  const remove = (g: GroupV2) => {
-    if (!window.confirm(`确认删除群「${g.display_name}」？此操作不可恢复。`)) return;
-    del<{ ok: boolean }>(`/groups/${g.id}`)
+  const testRead = (group: GroupV2) => {
+    if (testBusy !== null) return;
+    setTestBusy(group.id);
+    testReadGroup(group.id)
+      .then((result) => {
+        setTestResults((current) => ({ ...current, [group.id]: result }));
+        toast(`「${group.display_name}」测试读取完成`);
+      })
+      .catch((error: unknown) => toast(`读取失败：${String(error)}`))
+      .finally(() => setTestBusy(null));
+  };
+
+  const confirmDelete = () => {
+    if (!deleteTarget || deleteBusy) return;
+    setDeleteBusy(true);
+    deleteGroup(deleteTarget.id)
       .then(() => {
-        toast("已删除");
+        toast(`已将「${deleteTarget.display_name}」移入归档回收站`);
+        setDeleteTarget(null);
         load();
       })
-      .catch((e) => toast(String(e)));
+      .catch((error: unknown) => toast(`删除失败：${String(error)}`))
+      .finally(() => setDeleteBusy(false));
   };
 
-  // 按群名搜索真实群
   const doSearch = () => {
-    if (!searchName.trim()) {
-      toast("请输入群名关键词");
+    const name = searchName.trim();
+    if (!name || searching) {
+      if (!name) toast("请输入真实微信群名称关键词");
       return;
     }
     setSearching(true);
-    resolveGroups(searchName.trim())
-      .then((list) => {
-        setSearchResult(list);
-        if (list.length === 0) toast("未找到匹配的群");
-        setSearching(false);
+    resolveGroups(name)
+      .then((matches) => {
+        setSearchResult(matches);
+        if (matches.length === 0) toast("未找到匹配的真实微信群");
       })
-      .catch((e) => {
-        toast(String(e));
-        setSearching(false);
-      });
+      .catch((error: unknown) => toast(`搜索失败：${String(error)}`))
+      .finally(() => setSearching(false));
   };
 
-  const doBind = (m: GroupMatch) => {
-    bindGroupFromName({ name: searchName.trim(), group_id: m.id })
-      .then((res) => {
-        toast(res.already_existed ? `已绑定到已有群（id=${res.id}）` : `绑定成功（id=${res.id}）`);
+  const bindMatch = (match: GroupMatch) => {
+    bindGroupFromName({ name: searchName.trim(), group_id: match.id })
+      .then((result) => {
+        toast(result.restored ? "已恢复原群及历史归档，当前保持停用" : result.already_existed ? "该微信群已绑定" : "绑定成功");
         setSearchResult([]);
         setSearchName("");
         load();
       })
-      .catch((e) => {
-        const text = String(e);
-        toast(text.length > 120 ? text.slice(0, 120) + "…" : text);
-      });
+      .catch((error: unknown) => toast(`绑定失败：${String(error)}`));
   };
 
-  // 测试读取（显示该群最近周期的消息数）
-  const testRead = (g: GroupV2) => {
-    setTestReadingId(g.id);
-    testReadGroup(g.id)
-      .then((res) => {
-        toast(
-          `群「${g.display_name}」\n${res.provider} · ${res.status}\n消息数：${res.message_count}\n${res.detail}`
-        );
-      })
-      .catch((e) => toast(String(e)))
-      .finally(() => setTestReadingId(null));
-  };
+  if (loading && groups.length === 0) return <LoadingState label="正在加载群聊配置…" />;
+  if (loadError && groups.length === 0) {
+    return (
+      <EmptyState
+        title="群聊配置加载失败"
+        description={loadError}
+        action={<Button tone="secondary" onClick={load}>重新加载</Button>}
+      />
+    );
+  }
 
   return (
-    <div>
-      <div className="page-header">
-        <div>
-          <div className="page-title">群管理</div>
-          <div className="page-sub">管理启用的微信群与日报配置</div>
-        </div>
-        <button className="btn" onClick={() => setEditing({})}>
-          ＋ 新增群
-        </button>
-      </div>
+    <div className="groups-page">
+      <PageHeader
+        title="群聊配置"
+        description="管理真实微信群绑定、统计规则、生成和发送设置。"
+        actions={
+          <Button onClick={() => navigateToHash("/groups/new")}>
+            <Plus size={18} aria-hidden="true" />
+            新增群
+          </Button>
+        }
+      />
 
-      {/* 按群名搜索绑定（复用 V1 能力） */}
-      <div className="card search-bind">
-        <div className="search-bind-row">
-          <input
-            placeholder="按真实微信群名称搜索并绑定（如：茶馆）"
-            value={searchName}
-            onChange={(e) => setSearchName(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && doSearch()}
-          />
-          <button className="btn btn-secondary btn-sm" onClick={doSearch} disabled={searching}>
-            {searching ? "搜索中…" : "搜索群"}
-          </button>
+      <section className="groups-bind-panel">
+        <div className="groups-bind-copy">
+          <div className="groups-section-icon"><LinkSimple size={19} aria-hidden="true" /></div>
+          <div>
+            <h2>按真实群名搜索并绑定</h2>
+            <p>复用 WeChatDataAnalysis 的群解析能力，避免手动输入错误 ID。</p>
+          </div>
+        </div>
+        <div className="groups-search-row">
+          <label className="sr-only" htmlFor="group-bind-search">搜索真实微信群</label>
+          <div className="groups-search-input">
+            <MagnifyingGlass size={18} aria-hidden="true" />
+            <input
+              id="group-bind-search"
+              value={searchName}
+              placeholder="输入微信群名称关键词"
+              onChange={(event) => setSearchName(event.target.value)}
+              onKeyDown={(event) => event.key === "Enter" && doSearch()}
+            />
+          </div>
+          <Button tone="secondary" onClick={doSearch} busy={searching}>搜索群</Button>
         </div>
         {searchResult.length > 0 && (
-          <div className="search-result">
-            {searchResult.map((m) => (
-              <div key={m.id} className="search-result-row">
-                <span>
-                  {m.name}
-                  <span className="muted">（{m.match_type === "exact" ? "精确匹配" : "模糊匹配"} · {m.provider}）</span>
-                </span>
-                <button className="btn btn-sm" onClick={() => doBind(m)}>
-                  绑定
-                </button>
+          <div className="groups-bind-results">
+            {searchResult.map((match) => (
+              <div className="groups-bind-result" key={match.id}>
+                <div>
+                  <strong>{match.name}</strong>
+                  <span>{match.match_type === "exact" ? "精确匹配" : "模糊匹配"} · {match.provider}</span>
+                </div>
+                <Button tone="ghost" className="ui-button-compact" onClick={() => bindMatch(match)}>绑定</Button>
               </div>
             ))}
           </div>
         )}
-      </div>
+      </section>
 
-      {editing && <GroupForm initial={editing} onSave={save} onCancel={() => setEditing(null)} />}
+      <section className="groups-toolbar" aria-label="群聊筛选">
+        <div className="groups-search-input groups-list-search">
+          <MagnifyingGlass size={18} aria-hidden="true" />
+          <label className="sr-only" htmlFor="group-list-search">搜索群聊</label>
+          <input id="group-list-search" value={query} placeholder="搜索群名、微信群 ID 或发送目标" onChange={(event) => setQuery(event.target.value)} />
+        </div>
+        <div className="groups-filter-tabs" role="tablist" aria-label="群聊状态筛选">
+          {(["all", "enabled", "disabled"] as const).map((item) => {
+            const labels: Record<GroupFilter, string> = { all: "全部", enabled: "已启用", disabled: "已停用" };
+            return (
+              <button
+                key={item}
+                type="button"
+                className={filter === item ? "is-active" : ""}
+                role="tab"
+                aria-selected={filter === item}
+                onClick={() => setFilter(item)}
+              >
+                {labels[item]}
+              </button>
+            );
+          })}
+        </div>
+        <span className="groups-result-count">显示 {filteredGroups.length} / {groups.length} 个群</span>
+        <Button tone="ghost" className="ui-button-compact" onClick={load} busy={loading}>
+          <ArrowsClockwise size={16} aria-hidden="true" />
+          刷新
+        </Button>
+      </section>
 
-      <div className="group-list">
-        {loading && <div className="empty-state">加载中…</div>}
-        {!loading && groups.length === 0 && <div className="empty-state">暂无群，可点击「新增群」或在上方「搜索群」绑定。</div>}
-        {groups.map((g) => (
-          <div className="card group-row" key={g.id}>
-            <div className="group-row-main">
-              <div className="group-row-title">
-                {g.display_name}
-                {!g.enabled && <span className="badge badge-warn">已停用</span>}
-              </div>
-              <div className="muted">
-                {g.wechat_group_name || g.wechat_group_id || "未绑定"} · 发送 {g.send_time} ·{" "}
-                {g.image_enabled ? "生图开" : "生图关"} · 排行模板 {g.ranking_template} · Prompt 模板{" "}
-                {g.image_prompt_template}
-              </div>
-            </div>
-            <div className="row-actions">
-              <button className="btn btn-sm btn-secondary" onClick={() => testRead(g)} disabled={testReadingId === g.id}>
-                {testReadingId === g.id ? "读取中…" : "测试读取"}
-              </button>
-              <button className="btn btn-sm btn-secondary" onClick={() => setEditing({ ...g })}>
-                编辑
-              </button>
-              <button className="btn btn-sm btn-danger" onClick={() => remove(g)}>
-                删除
-              </button>
-            </div>
-          </div>
-        ))}
-      </div>
-      {msg && <div className="toast">{msg}</div>}
+      {filteredGroups.length === 0 ? (
+        <EmptyState
+          title={groups.length === 0 ? "暂无群聊配置" : "没有匹配的群聊"}
+          description={groups.length === 0 ? "可以新增群，或先按真实群名搜索并绑定。" : "请调整搜索关键词或状态筛选。"}
+          action={groups.length === 0 ? <Button onClick={() => navigateToHash("/groups/new")}><Plus size={17} aria-hidden="true" />新增群</Button> : undefined}
+        />
+      ) : (
+        <div className="groups-table-wrap">
+          <table className="groups-table">
+            <caption className="sr-only">群聊配置列表</caption>
+            <thead>
+              <tr>
+                <th>群名称 / 绑定信息</th>
+                <th>启用状态</th>
+                <th>统计规则</th>
+                <th>发送时间</th>
+                <th>排行榜配置</th>
+                <th>AI 图片</th>
+                <th>发送目标</th>
+                <th>最近配置</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filteredGroups.map((group) => {
+                const testResult = testResults[group.id];
+                return (
+                  <Fragment key={group.id}>
+                    <tr>
+                      <td data-label="群名称 / 绑定信息">
+                        <div className="groups-name-cell">
+                          <strong>{group.display_name || "未命名群"}</strong>
+                          <span>{group.wechat_group_name || group.wechat_group_id || "尚未绑定微信群"}</span>
+                          {group.wechat_group_id && <small>ID：{group.wechat_group_id}</small>}
+                        </div>
+                      </td>
+                      <td data-label="启用状态">
+                        <ToggleSwitch checked={group.enabled} label={`${group.display_name} 启用状态`} busy={toggleBusy === `${group.id}:enabled`} onChange={() => toggle(group, "enabled")} />
+                      </td>
+                      <td data-label="统计规则"><span className="groups-muted-cell">{group.schedule_rule || "weekday_default"}</span></td>
+                      <td data-label="发送时间"><strong>{group.send_time || "—"}</strong></td>
+                      <td data-label="排行榜配置">
+                        <div className="groups-template-cell">
+                          <strong>{group.ranking_template || "default"}</strong>
+                          <span>Prompt：{group.image_prompt_template || "default"}</span>
+                        </div>
+                      </td>
+                      <td data-label="AI 图片">
+                        <ToggleSwitch checked={group.image_enabled} label={`${group.display_name} AI 图片开关`} busy={toggleBusy === `${group.id}:image_enabled`} onChange={() => toggle(group, "image_enabled")} />
+                      </td>
+                      <td data-label="发送目标"><span className="groups-target-cell">{group.send_target || group.wechat_group_name || "未设置"}</span></td>
+                      <td data-label="最近配置"><span className="groups-muted-cell">{formatDateTime(group.updated_at)}</span></td>
+                      <td data-label="操作">
+                        <div className="groups-row-actions">
+                          <Button tone="ghost" className="ui-button-compact groups-action-button" onClick={() => testRead(group)} busy={testBusy === group.id} title="测试读取" aria-label={`测试读取 ${group.display_name}`}>
+                            <Flask size={16} aria-hidden="true" />
+                          </Button>
+                          <Button tone="secondary" className="ui-button-compact groups-action-button" onClick={() => navigateToHash(`/groups/${group.id}`)} title="编辑群配置" aria-label={`编辑 ${group.display_name}`}>
+                            <PencilSimple size={16} aria-hidden="true" />
+                          </Button>
+                          <Button tone="danger" className="ui-button-compact groups-action-button" onClick={() => setDeleteTarget(group)} title="删除群配置" aria-label={`删除 ${group.display_name}`}>
+                            <Trash size={16} aria-hidden="true" />
+                          </Button>
+                        </div>
+                      </td>
+                    </tr>
+                    {testResult && (
+                      <tr className="groups-test-row">
+                        <td colSpan={9}><TestResult result={testResult} /></td>
+                      </tr>
+                    )}
+                  </Fragment>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      <ConfirmDialog
+        open={Boolean(deleteTarget)}
+        title="移入归档回收站？"
+        description={deleteTarget ? `「${deleteTarget.display_name}」将停止任务和微信发送，并移入归档回收站；群配置与全部历史信息都不会删除。` : ""}
+        confirmLabel="移入回收站"
+        busy={deleteBusy}
+        onConfirm={confirmDelete}
+        onCancel={() => !deleteBusy && setDeleteTarget(null)}
+      />
+      <Toast message={msg} />
     </div>
   );
 }

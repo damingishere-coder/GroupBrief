@@ -23,7 +23,7 @@ def render_ranking(result: RankingResult, template_text: str) -> str:
     """把模板与统计结果渲染成最终排行榜文本。"""
     validate_template(template_text)
 
-    top10_lines = "\n".join(
+    top_lines = "\n".join(
         f"{s.rank}.{s.name}【{s.count}】" for s in result.top_speakers
     )
     values = {
@@ -32,7 +32,10 @@ def render_ranking(result: RankingResult, template_text: str) -> str:
         "period_end": result.period_end,
         "speaker_count": str(result.speaker_count),
         "message_count": str(result.message_count),
-        "top10_lines": top10_lines,
+        "top_limit": str(result.top_limit),
+        "top_lines": top_lines,
+        # 兼容已有自定义模板；变量名虽为 top10，内容仍以本次实际上限为准。
+        "top10_lines": top_lines,
     }
 
     def _replace(match: re.Match) -> str:

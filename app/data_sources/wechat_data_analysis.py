@@ -105,10 +105,11 @@ class WeChatDataAnalysisSource(WeChatDataSource):
                 messages=messages,
                 status=DataSourceStatus.OK,
                 detail=f"{self.name}：{len(messages)} 条消息",
+                meta=result.meta,
             )
         if result.status == ProviderStatus.GROUP_NOT_FOUND:
             return FetchResult(
-                [], DataSourceStatus.GROUP_NOT_FOUND, result.detail, GROUP_NOT_FOUND
+                [], DataSourceStatus.GROUP_NOT_FOUND, result.detail, GROUP_NOT_FOUND, result.meta
             )
         if result.status == ProviderStatus.EMPTY_RESULT:
             # 上游对不存在的群与「存在但无消息」都返回空；校验群是否存在，
@@ -118,9 +119,10 @@ class WeChatDataAnalysisSource(WeChatDataSource):
                     [], DataSourceStatus.GROUP_NOT_FOUND,
                     f"群 {group_id} 不存在于当前微信账号",
                     GROUP_NOT_FOUND,
+                    result.meta,
                 )
             return FetchResult(
-                [], DataSourceStatus.EMPTY_RESULT, result.detail, ""
+                [], DataSourceStatus.EMPTY_RESULT, result.detail, "", result.meta
             )
         # READ_FAILED / UNAVAILABLE 等一律归为取数失败
         error_type = WECHAT_DATA_UNAVAILABLE if result.status in (
@@ -128,7 +130,7 @@ class WeChatDataAnalysisSource(WeChatDataSource):
             ProviderStatus.UNSUPPORTED_WECHAT_VERSION,
         ) else MESSAGE_FETCH_FAILED
         return FetchResult(
-            [], DataSourceStatus.READ_FAILED, result.detail, error_type
+            [], DataSourceStatus.READ_FAILED, result.detail, error_type, result.meta
         )
 
 

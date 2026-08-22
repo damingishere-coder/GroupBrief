@@ -19,3 +19,5 @@ os.environ["WECHAT_MCP_URL"] = ""
 os.environ["WECHAT_MCP_TOKEN"] = ""
 os.environ["WECHAT_MCP_ACCOUNT"] = ""
 os.environ["AI_API_KEY"] = ""
+# 默认集成测试强制使用无需外部调用的旧兼容分支；Codex 主备路由由专门单测覆盖。
+os.environ["SUMMARY_PROVIDER_PRIMARY"] = "deepseek"

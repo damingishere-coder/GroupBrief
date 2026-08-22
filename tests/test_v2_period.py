@@ -1,10 +1,4 @@
-"""V2 P2：统计周期解析器单元测试。
-
-默认规则：
-- 周一：周五 00:00:00 ～ 周日 23:59:59（三天）
-- 周二~周五：前一天
-- 周六 / 周日：不生成
-"""
+"""V2 P2：每天统计前一自然日。"""
 
 from __future__ import annotations
 
@@ -16,58 +10,25 @@ from app.scheduler.period import PeriodResolver
 
 resolver = PeriodResolver()
 
-# 2026-08-14 周五 / 08-17 周一 / 08-18 周二 / 08-19 周三 /
-# 08-20 周四 / 08-21 周五 / 08-22 周六 / 08-23 周日
+@pytest.mark.parametrize(
+    ("run_date", "target_date"),
+    [
+        (date(2026, 8, 17), date(2026, 8, 16)),  # 周一 → 周日
+        (date(2026, 8, 18), date(2026, 8, 17)),
+        (date(2026, 8, 19), date(2026, 8, 18)),
+        (date(2026, 8, 20), date(2026, 8, 19)),
+        (date(2026, 8, 21), date(2026, 8, 20)),
+        (date(2026, 8, 22), date(2026, 8, 21)),  # 周六 → 周五
+        (date(2026, 8, 23), date(2026, 8, 22)),  # 周日 → 周六
+    ],
+)
+def test_every_day_covers_only_previous_natural_day(run_date, target_date):
+    window = resolver.resolve(run_date=run_date)
 
-
-def test_monday_covers_three_days():
-    w = resolver.resolve(run_date=date(2026, 8, 17))  # 周一
-    assert w.should_run is True
-    assert w.weekday == 0
-    assert w.period_start == datetime(2026, 8, 14, 0, 0, 0)  # 周五
-    assert w.period_end == datetime(2026, 8, 16, 23, 59, 59)  # 周日
-    assert len(w.covered_dates) == 3
-    assert w.period_start_str() == "2026-08-14 00:00:00"
-    assert w.period_end_str() == "2026-08-16 23:59:59"
-
-
-def test_tuesday_previous_day():
-    w = resolver.resolve(run_date=date(2026, 8, 18))  # 周二
-    assert w.should_run is True
-    assert w.period_start == datetime(2026, 8, 17, 0, 0, 0)
-    assert w.period_end == datetime(2026, 8, 17, 23, 59, 59)
-    assert len(w.covered_dates) == 1
-
-
-def test_wednesday_previous_day():
-    w = resolver.resolve(run_date=date(2026, 8, 19))
-    assert w.should_run is True
-    assert w.period_start == datetime(2026, 8, 18, 0, 0, 0)
-    assert w.period_end == datetime(2026, 8, 18, 23, 59, 59)
-
-
-def test_thursday_previous_day():
-    w = resolver.resolve(run_date=date(2026, 8, 20))
-    assert w.should_run is True
-    assert w.period_start == datetime(2026, 8, 19, 0, 0, 0)
-
-
-def test_friday_previous_day():
-    w = resolver.resolve(run_date=date(2026, 8, 21))
-    assert w.should_run is True
-    assert w.period_start == datetime(2026, 8, 20, 0, 0, 0)
-
-
-def test_saturday_skipped():
-    w = resolver.resolve(run_date=date(2026, 8, 22))  # 周六
-    assert w.should_run is False
-    assert w.weekday == 5
-
-
-def test_sunday_skipped():
-    w = resolver.resolve(run_date=date(2026, 8, 23))  # 周日
-    assert w.should_run is False
-    assert w.weekday == 6
+    assert window.should_run is True
+    assert window.period_start == datetime.combine(target_date, datetime.min.time())
+    assert window.period_end == datetime.combine(target_date, datetime.max.time().replace(microsecond=0))
+    assert window.covered_dates == [target_date]
 
 
 def test_unknown_rule_raises():

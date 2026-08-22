@@ -1,25 +1,36 @@
 """DeepSeek V4 Flash Provider。
 
-职责：根据整理好的群聊内容生成「可直接粘贴给 GPT 生图」的漫画日报 Prompt。
-- 超长内容按 CHUNK_MESSAGE_COUNT 分块，逐块分析事件，再合并
-- 严格约束：不得编造聊天中不存在的事件 / 人物 / 金额 / 时间 / 地点
+典型群聊整群一次提交；超长群聊按自然会话分段、并行提取结构化事件后
+再合并。所有请求共享进程级并发上限，且固定关闭思考模式以降低日报延迟。
 """
 
 from __future__ import annotations
 
-import json
+import random
 import time
-from dataclasses import dataclass
 
 import httpx
 
+from app.ai.concurrency import bounded_slot, normalized_limit, run_ai_tasks_ordered
+from app.ai.conversation_segments import (
+    HARD_CHUNK_CHARS,
+    OVERLAP_MESSAGES,
+    SESSION_GAP_MINUTES,
+    TARGET_CHUNK_CHARS,
+    ConversationChunk,
+    PromptMessage,
+    segment_messages,
+)
+from app.ai.deepseek_events import (
+    EVENT_ANALYZE_SYSTEM,
+    build_event_prompt,
+    deduplicate_event_cards,
+    event_cards_json,
+    parse_event_cards,
+)
 from app.config.settings import Settings
 from app.core.logging import get_logger
-from app.providers.ai.base import (
-    ImagePromptResult,
-    PromptContext,
-    PromptGeneratorProvider,
-)
+from app.providers.ai.base import ImagePromptResult, PromptContext, PromptGeneratorProvider
 
 logger = get_logger("groupbrief.ai")
 
@@ -33,157 +44,216 @@ SYSTEM_PROMPT = """你是「群报 GroupBrief」的漫画日报海报 Prompt 设
 3. 原话引用必须来自真实聊天，可适当缩写，但不能改写事实。
 4. 可以幽默化标题，但不能改变事实。
 5. 海报人物依据「聊天事件中提到的人物」，而不是发言排行榜 Top10。
-6. 输出结构固定：
-【任务】
-【群名称】
-【统计时间】
-【数据】（消息数、发言人数，必须使用给定数字，禁止自行计算）
-【主标题】
-【副标题】
-【整体视觉】（配色、风格、构图）
-【版面1】~【版面5-8】（标题/事件/代表人物/建议画面/可用文字）
-【底部总结】
-【硬性要求】"""
+6. 数据必须使用给定数字，禁止自行计算。
+7. 最终只选取 1～5 个最主要话题；内容不足时不硬凑。
+8. 输出结构固定：
+【任务】【群名称】【统计时间】【数据】【主标题】【副标题】【整体视觉】
+【版面1】～【版面N】【底部总结】【硬性要求】"""
 
-CHUNK_ANALYZE_PROMPT = """以下是微信群聊记录片段（{label}）。
+DIRECT_PROMPT = """以下是微信群「{group_name}」在 {range_start} ~ {range_end} 的完整可统计聊天记录：
 
-请分析并输出 JSON（不要输出其他内容）：
-{{
-  "events": [
-    {{"title": "事件短标题", "people": ["提到的人名"], "content": "事件描述（真实基于聊天）", "quotes": ["1-3条真实原话或改写原话"]}}
-  ]
-}}
+{messages_text}
 
-要求：只提取真实存在的内容；没有事件就返回空数组；不超过 6 个事件。"""
-
-MERGE_PROMPT = """你已分别分析了微信群「{group_name}」在 {range_start} ~ {range_end} 的聊天记录片段，
-每个片段的 JSON 分析结果如下：
-
-{chunk_results}
-
-请合并去重这些事件（相似事件合并，保留真实细节），然后生成一份完整的、
-可直接复制给 GPT 图片生成能力的漫画日报海报 Prompt。
-
+请基于完整上下文直接生成漫画日报海报 Prompt。
 {weekday_hint}
-必须遵守：不编造、不添加聊天中不存在的内容；数据（{total_messages} 条消息、{speaker_count} 人发言）必须原样使用。
-按以下结构输出：
-【任务】生成一张竖版微信群日报漫画信息图。
-【群名称】
-【统计时间】
-【数据】
-【主标题】（幽默有趣，可结合当天梗）
-【副标题】
-【整体视觉】（蓝白+多彩漫画风格，画面分区清晰）
-【版面1】~【版面N】（每个版面：标题/事件/代表人物/建议画面/可用文字；选取 5~8 个主要话题）
-【底部总结】（一句话文案）
-【硬性要求】"""
+必须遵守：不编造、不遗漏主要连续事件；数据（{total_messages} 条消息、{speaker_count} 人发言）必须原样使用。"""
 
+MERGE_PROMPT = """你已获得微信群「{group_name}」在 {range_start} ~ {range_end} 的结构化事件卡：
 
-@dataclass
-class _ChunkResult:
-    text: str
+{event_cards}
+
+请合并语义相同的事件，保留跨片段的连续过程和真实细节，然后生成完整漫画日报海报 Prompt。
+{weekday_hint}
+必须遵守：不编造、不添加事件卡中不存在的内容；数据（{total_messages} 条消息、{speaker_count} 人发言）必须原样使用；最终只选 1～5 个主要话题。"""
 
 
 class DeepSeekV4FlashProvider(PromptGeneratorProvider):
     name = "deepseek"
-    model = "deepseek-chat"
+    model = "deepseek-v4-flash"
 
     def __init__(self, settings: Settings):
         self.settings = settings
-        self.model = settings.ai_model or self.model
+        configured = (settings.ai_model or self.model).strip()
+        self.model = self.model if configured in {"", "deepseek-chat"} else configured
 
     def health_check(self) -> tuple[bool, str]:
         if not self.settings.ai_api_key:
             return False, "未配置 AI_API_KEY"
-        return True, f"已配置（{self.model}）"
+        return True, f"已配置（{self.model}，非思考模式）"
+
+    def _messages(self, context: PromptContext) -> list[PromptMessage]:
+        if context.message_items:
+            return list(context.message_items)
+        return [
+            PromptMessage(f"legacy-{index}", None, "", line)
+            for index, line in enumerate(context.messages_text.splitlines(), start=1)
+            if line.strip()
+        ]
+
+    def _segment(self, messages: list[PromptMessage]) -> list[ConversationChunk]:
+        direct_chars = max(1_000, int(self.settings.max_context_chars or 50_000))
+        return segment_messages(
+            messages,
+            direct_chars=direct_chars,
+            target_chars=min(TARGET_CHUNK_CHARS, direct_chars),
+            hard_chars=max(HARD_CHUNK_CHARS, direct_chars),
+            session_gap_minutes=SESSION_GAP_MINUTES,
+            overlap_messages=OVERLAP_MESSAGES,
+        )
 
     def generate_image_prompt(self, context: PromptContext) -> ImagePromptResult:
         try:
-            messages = context.messages_text.split("\n")
-            chunks = self._chunk_messages(messages)
-            logger.info("群 %s：共 %d 行消息，分 %d 块", context.group_name, len(messages), len(chunks))
+            source_messages = self._messages(context)
+            chunks = self._segment(source_messages)
+            if not chunks:
+                raise ValueError("没有可提交给总结模型的聊天文本")
+            context_chars = sum(len(message.text) for message in source_messages)
+            logger.info(
+                "群 %s：共 %d 行、%d 字，按自然边界分 %d 块",
+                context.group_name,
+                len(source_messages),
+                context_chars,
+                len(chunks),
+            )
 
             if len(chunks) == 1:
-                return self._merge(context, [chunks[0].text])
-
-            # 分块分析
-            chunk_results: list[str] = []
-            for idx, chunk in enumerate(chunks, start=1):
-                chunk_results.append(
-                    self._analyze_chunk(chunk.text, f"第 {idx}/{len(chunks)} 块")
+                prompt = DIRECT_PROMPT.format(
+                    group_name=context.group_name,
+                    range_start=context.range_start,
+                    range_end=context.range_end,
+                    messages_text=chunks[0].text,
+                    weekday_hint=context.weekdays_text or "",
+                    total_messages=context.total_messages,
+                    speaker_count=context.speaker_count,
                 )
-            return self._merge(context, chunk_results)
-        except Exception as e:
-            logger.exception("DeepSeek 调用失败")
-            return ImagePromptResult(False, error=str(e)[:300], provider=self.name, model=self.model)
+                text = self._chat(
+                    [
+                        {"role": "system", "content": SYSTEM_PROMPT},
+                        {"role": "user", "content": prompt},
+                    ]
+                )
+                return ImagePromptResult(
+                    True,
+                    text.strip(),
+                    provider=self.name,
+                    model=self.model,
+                    meta={"mode": "direct", "chunk_count": 1, "api_call_count": 1, "context_chars": context_chars},
+                )
 
-    def _chunk_messages(self, lines: list[str]) -> list[_ChunkResult]:
-        if not lines:
-            return []
-        chunk_size = max(1, self.settings.chunk_message_count)
-        chunks: list[_ChunkResult] = []
-        for i in range(0, len(lines), chunk_size):
-            chunks.append(_ChunkResult(text="\n".join(lines[i : i + chunk_size])))
-        return chunks
+            indexed_chunks = list(enumerate(chunks, start=1))
 
-    def _analyze_chunk(self, chunk_text: str, label: str) -> str:
-        messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": CHUNK_ANALYZE_PROMPT.format(label=label) + "\n\n聊天记录：\n" + chunk_text},
-        ]
-        text = self._chat(messages)
-        return text
+            def analyze(item: tuple[int, ConversationChunk]) -> list[dict]:
+                index, chunk = item
+                raw = self._chat(
+                    [
+                        {"role": "system", "content": EVENT_ANALYZE_SYSTEM},
+                        {"role": "user", "content": build_event_prompt(chunk, f"第 {index}/{len(chunks)} 块")},
+                    ],
+                    response_format="json_object",
+                    temperature=0.1,
+                    max_tokens=3000,
+                )
+                return parse_event_cards(raw, chunk)
 
-    def _merge(self, context: PromptContext, chunk_results: list[str]) -> ImagePromptResult:
-        merged = "\n\n".join(chunk_results)
-        user_prompt = MERGE_PROMPT.format(
-            group_name=context.group_name,
-            range_start=context.range_start,
-            range_end=context.range_end,
-            chunk_results=merged,
-            weekday_hint=context.weekdays_text or "",
-            total_messages=context.total_messages,
-            speaker_count=context.speaker_count,
-        )
-        messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_prompt},
-        ]
-        text = self._chat(messages)
-        return ImagePromptResult(True, text.strip(), provider=self.name, model=self.model)
+            analyses = run_ai_tasks_ordered(
+                analyze,
+                indexed_chunks,
+                max_workers=normalized_limit(self.settings.ai_request_concurrency, 6),
+            )
+            cards = deduplicate_event_cards(analyses)
+            if not cards:
+                raise ValueError("总结模型未从超长聊天中提取到可验证事件")
+            prompt = MERGE_PROMPT.format(
+                group_name=context.group_name,
+                range_start=context.range_start,
+                range_end=context.range_end,
+                event_cards=event_cards_json(cards),
+                weekday_hint=context.weekdays_text or "",
+                total_messages=context.total_messages,
+                speaker_count=context.speaker_count,
+            )
+            text = self._chat(
+                [
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": prompt},
+                ]
+            )
+            return ImagePromptResult(
+                True,
+                text.strip(),
+                provider=self.name,
+                model=self.model,
+                meta={
+                    "mode": "natural_chunked",
+                    "chunk_count": len(chunks),
+                    "event_count": len(cards),
+                    "api_call_count": len(chunks) + 1,
+                    "context_chars": context_chars,
+                },
+            )
+        except Exception as exc:
+            logger.exception("群聊总结模型调用失败")
+            return ImagePromptResult(False, error=str(exc)[:300], provider=self.name, model=self.model)
 
-    def _chat(self, messages: list[dict]) -> str:
+    # 兼容旧测试/诊断调用；返回值已改为自然分段块。
+    def _chunk_messages(self, lines: list[str]) -> list[ConversationChunk]:
+        messages = [PromptMessage(f"legacy-{index}", None, "", line) for index, line in enumerate(lines, start=1)]
+        return self._segment(messages)
+
+    def _chat(
+        self,
+        messages: list[dict],
+        *,
+        response_format: str = "text",
+        temperature: float = 0.7,
+        max_tokens: int = 3000,
+    ) -> str:
         base_url = self.settings.ai_base_url.rstrip("/")
         url = f"{base_url}/chat/completions"
         headers = {
             "Authorization": f"Bearer {self.settings.ai_api_key}",
             "Content-Type": "application/json",
         }
-        payload = {
+        payload: dict = {
             "model": self.model,
             "messages": messages,
-            "temperature": 0.7,
-            "max_tokens": 2000,
+            "thinking": {"type": "disabled"},
+            "temperature": temperature,
+            "max_tokens": max_tokens,
         }
+        if response_format == "json_object":
+            payload["response_format"] = {"type": "json_object"}
+
+        attempts = max(1, int(self.settings.ai_max_retries))
         last_error = ""
-        for attempt in range(1, self.settings.ai_max_retries + 1):
+        for attempt in range(1, attempts + 1):
+            retryable = True
             try:
-                resp = httpx.post(
-                    url,
-                    headers=headers,
-                    json=payload,
-                    timeout=self.settings.ai_timeout_seconds,
-                )
-                if resp.status_code == 200:
-                    data = resp.json()
+                with bounded_slot(
+                    "deepseek_request",
+                    normalized_limit(self.settings.ai_request_concurrency, 6),
+                ):
+                    response = httpx.post(
+                        url,
+                        headers=headers,
+                        json=payload,
+                        timeout=self.settings.ai_timeout_seconds,
+                    )
+                if response.status_code == 200:
+                    data = response.json()
                     content = data["choices"][0]["message"]["content"]
+                    if not isinstance(content, str) or not content.strip():
+                        raise ValueError("DeepSeek 返回空内容")
                     logger.info("DeepSeek 调用成功（attempt %d）", attempt)
                     return content
-                last_error = f"HTTP {resp.status_code}: {resp.text[:200]}"
+                last_error = f"HTTP {response.status_code}: {response.text[:200]}"
+                retryable = response.status_code in {429, 503} or response.status_code >= 500
                 logger.warning("DeepSeek attempt %d 失败：%s", attempt, last_error)
-            except Exception as e:
-                last_error = str(e)[:200]
+            except Exception as exc:
+                last_error = str(exc)[:200]
                 logger.warning("DeepSeek attempt %d 异常：%s", attempt, last_error)
-            if attempt < self.settings.ai_max_retries:
-                time.sleep(2 * attempt)
+            if attempt >= attempts or not retryable:
+                break
+            delay = min(8.0, 2 ** (attempt - 1)) + random.uniform(0.0, 0.35)
+            time.sleep(delay)
         raise RuntimeError(f"DeepSeek 调用失败：{last_error}")

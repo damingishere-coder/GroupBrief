@@ -1,6 +1,6 @@
 """V2 P3：排行榜模板系统单元测试。
 
-覆盖：模板渲染 / 变量替换 / top10_lines / 未知变量报错 /
+覆盖：模板渲染 / 动态 Top 上限 / 旧 top10_lines 兼容 / 未知变量报错 /
 模板服务 CRUD / 恢复默认 / default 不可删除 / Group 扩展字段。
 """
 
@@ -9,7 +9,9 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from sqlmodel import create_engine
 
+from app.db import repository as repo
 from app.db.models import Group
 from app.ranking.engine_types import RankingResult, TopSpeaker
 from app.ranking.renderer import RankingRenderer, render_ranking
@@ -99,6 +101,24 @@ def test_render_top10_lines_format():
     lines = text.split("\n")
     assert lines[0] == "1.停用【94】"
     assert lines[-1] == "10.神奇小郭【7】"
+
+
+def test_render_top15_heading_and_lines():
+    result = RankingResult(
+        group_name="周末群",
+        period_start="2026-08-14 00:00:00",
+        period_end="2026-08-16 23:59:59",
+        speaker_count=20,
+        message_count=210,
+        top_limit=15,
+        top_speakers=[
+            TopSpeaker(rank=i, name=f"成员{i:02}", count=21 - i)
+            for i in range(1, 16)
+        ],
+    )
+    text = render_ranking(result, DEFAULT_RANKING_TEMPLATE)
+    assert "发言 Top15" in text
+    assert "15.成员15【6】" in text
 
 
 def test_render_unknown_variable_raises():
@@ -193,9 +213,32 @@ def test_group_v2_defaults():
     g = Group()
     assert g.schedule_rule == "weekday_default"
     assert g.send_time == "08:30"
-    assert g.summary_model == "deepseek-v4-flash"
-    assert g.prompt_model == "deepseek-v4-flash"
+    assert g.summary_model == "gpt-5.6-sol"
+    assert g.prompt_model == "gpt-5.6-sol"
     assert g.image_enabled is True
     assert g.send_target == ""
     assert g.ranking_template == "default"
     assert g.image_prompt_template == "default"
+    assert g.image_theme == "random_preset"
+    assert g.image_theme_custom == ""
+
+
+def test_existing_groups_table_gets_image_theme_columns(tmp_path, monkeypatch):
+    """旧数据库启动时应补列，并为已有群写入安全默认值。"""
+    engine = create_engine(f"sqlite:///{tmp_path / 'legacy.db'}")
+    with engine.begin() as conn:
+        conn.exec_driver_sql(
+            "CREATE TABLE groups (id INTEGER PRIMARY KEY, display_name VARCHAR(128) NOT NULL DEFAULT '')"
+        )
+        conn.exec_driver_sql("INSERT INTO groups (id, display_name) VALUES (1, '旧群')")
+
+    monkeypatch.setattr(repo, "engine", engine)
+    repo._migrate_group_v2_columns()
+
+    with engine.connect() as conn:
+        columns = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(groups)")}
+        row = conn.exec_driver_sql(
+            "SELECT image_theme, image_theme_custom FROM groups WHERE id = 1"
+        ).one()
+    assert {"image_theme", "image_theme_custom"}.issubset(columns)
+    assert tuple(row) == ("random_preset", "")

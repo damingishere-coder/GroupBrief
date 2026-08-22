@@ -1,9 +1,9 @@
 """Template Prompt Provider（本地模板生成，不调用任何 LLM）。
 
-在未配置 DeepSeek API Key 时使用：
+在群聊总结主备模型都不可用时使用：
 - 完全基于真实统计与消息内容
 - 不编造事件（只引用真实出现的消息片段与人名）
-- 输出结构与 DeepSeek 版本一致，保证邮件/UI/文件全链路可交付
+- 输出结构与模型版本一致，保证邮件/UI/文件全链路可交付
 """
 
 from __future__ import annotations

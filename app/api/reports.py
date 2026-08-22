@@ -11,6 +11,7 @@ from sqlmodel import Session
 from app.db import repository as repo
 from app.db.models import GroupRun, Report
 from app.services.report_service import ReportService
+from app.services.generation_runtime import GenerationBusyError
 
 router = APIRouter(prefix="/api/reports", tags=["reports"])
 
@@ -30,16 +31,19 @@ def generate(payload: GenerateRequest, session: Session = Depends(repo.get_sessi
     service = ReportService()
     group = None
     if payload.group_id is not None:
-        group = repo.get_group(session, payload.group_id)
+        group = repo.get_active_group(session, payload.group_id)
         if not group:
             raise HTTPException(404, "群不存在")
-    run = service.generate(
-        session,
-        group=group,
-        report_date=payload.report_date or None,
-        trigger_type="manual",
-        force=payload.force,
-    )
+    try:
+        run = service.generate(
+            session,
+            group=group,
+            report_date=payload.report_date or None,
+            trigger_type="manual",
+            force=payload.force,
+        )
+    except GenerationBusyError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     return {
         "run_id": run.id,
         "status": run.status,

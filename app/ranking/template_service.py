@@ -36,8 +36,8 @@ DEFAULT_RANKING_TEMPLATE = """===== {{group_name}} =====
 
 ------------
 
-发言 Top10
-{{top10_lines}}
+发言 Top{{top_limit}}
+{{top_lines}}
 """
 
 # 支持的模板变量
@@ -48,6 +48,8 @@ SUPPORTED_VARS = frozenset(
         "period_end",
         "speaker_count",
         "message_count",
+        "top_limit",
+        "top_lines",
         "top10_lines",
     }
 )

@@ -4,6 +4,12 @@ export function useToast() {
   const [msg, setMsg] = useState("");
   const timer = useRef<number | null>(null);
 
+  useEffect(() => {
+    return () => {
+      if (timer.current) window.clearTimeout(timer.current);
+    };
+  }, []);
+
   const toast = useCallback((text: string) => {
     setMsg(text);
     if (timer.current) window.clearTimeout(timer.current);
@@ -33,12 +39,31 @@ export function downloadText(text: string, filename: string) {
 export function useFetch<T>(loader: () => Promise<T>, deps: unknown[] = []) {
   const [data, setData] = useState<T | null>(null);
   const [error, setError] = useState("");
+  const [loading, setLoading] = useState(true);
+  const mounted = useRef(true);
+  const requestId = useRef(0);
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
 
   const reload = useCallback(() => {
+    const id = ++requestId.current;
+    setLoading(true);
+    setError("");
     loader()
-      .then(setData)
-      .catch((e) => setError(String(e)))
-      .finally(() => {});
+      .then((value) => {
+        if (mounted.current && requestId.current === id) setData(value);
+      })
+      .catch((e) => {
+        if (mounted.current && requestId.current === id) setError(String(e));
+      })
+      .finally(() => {
+        if (mounted.current && requestId.current === id) setLoading(false);
+      });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, deps);
 
@@ -46,5 +71,5 @@ export function useFetch<T>(loader: () => Promise<T>, deps: unknown[] = []) {
     reload();
   }, [reload]);
 
-  return { data, error, reload };
+  return { data, error, loading, reload };
 }

@@ -1,18 +1,4 @@
-"""V2 统计周期解析器（PeriodResolver）。
-
-默认规则（schedule_rule=weekday_default）：
-    周一：周五 00:00:00 ～ 周日 23:59:59（三天汇总）
-    周二：周一 00:00:00 ～ 23:59:59
-    周三：周二
-    周四：周三
-    周五：周四
-    周六 / 周日：不生成
-
-与 V1（app/scheduler/calendar_rules.py）差异：
-- V2 周一统计「周五+周六+周日」三天；V1 周一统计「周六+周日」两天。
-- V2 周六、周日都不生成；V1 周六会生成。
-V1 日历规则保留给 V1 邮件链路使用，V2 业务一律使用本模块。
-"""
+"""V2 每日前一自然日统计周期解析器。"""
 
 from __future__ import annotations
 
@@ -34,7 +20,7 @@ class PeriodWindow:
     should_run: bool  # 今天是否生成
     weekday: int  # 0=周一 ... 6=周日
     rule: str = "weekday_default"
-    covered_dates: list[date] | None = None  # 覆盖的自然日（周一为三天）
+    covered_dates: list[date] | None = None  # 覆盖的自然日（每日固定一天）
 
     def period_start_str(self) -> str:
         return self.period_start.strftime("%Y-%m-%d %H:%M:%S")
@@ -60,29 +46,7 @@ class PeriodResolver:
             # 预留扩展：其他周期规则在此注册
             raise NotImplementedError(f"暂不支持的统计周期规则：{schedule_rule}")
 
-        if weekday >= 5:  # 周六(5)、周日(6)：不生成
-            return PeriodWindow(
-                run_date=today,
-                period_start=datetime.combine(today, time.min),
-                period_end=datetime.combine(today, _END_OF_DAY),
-                should_run=False,
-                weekday=weekday,
-            )
-
-        if weekday == 0:  # 周一：周五 00:00:00 ～ 周日 23:59:59
-            friday = today - timedelta(days=3)
-            saturday = today - timedelta(days=2)
-            sunday = today - timedelta(days=1)
-            return PeriodWindow(
-                run_date=today,
-                period_start=datetime.combine(friday, time.min),
-                period_end=datetime.combine(sunday, _END_OF_DAY),
-                should_run=True,
-                weekday=weekday,
-                covered_dates=[friday, saturday, sunday],
-            )
-
-        target = today - timedelta(days=1)  # 周二~周五：统计前一天
+        target = today - timedelta(days=1)
         return PeriodWindow(
             run_date=today,
             period_start=datetime.combine(target, time.min),

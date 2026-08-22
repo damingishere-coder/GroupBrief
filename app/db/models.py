@@ -18,16 +18,21 @@ class Group(SQLModel, table=True):
     provider_preference: str = ""
     created_at: datetime = Field(default_factory=datetime.now)
     updated_at: datetime = Field(default_factory=datetime.now)
+    deleted_at: datetime | None = Field(default=None, index=True)
 
     # ---------- V2 扩展字段（P3 起使用，P7 pipeline 落地） ----------
     schedule_rule: str = "weekday_default"  # 统计周期规则
     send_time: str = "08:30"  # 本群独立发送时间 HH:MM
-    summary_model: str = "deepseek-v4-flash"  # 总结模型
-    prompt_model: str = "deepseek-v4-flash"  # Prompt 模型
+    summary_model: str = "gpt-5.6-sol"  # 总结主模型
+    prompt_model: str = "gpt-5.6-sol"  # Prompt 主模型
     image_enabled: bool = True  # 是否生图
     send_target: str = ""  # 微信发送目标（群名）
     ranking_template: str = "default"  # 排行榜模板名
     image_prompt_template: str = "default"  # 生图 Prompt 模板名
+    image_theme: str = "random_preset"  # 生图大主题键（默认每日随机）
+    image_theme_custom: str = ""  # 自定义生图大主题（image_theme=custom 时使用）
+    image_prompt_override: str = ""  # 本群专属 Prompt 模板；为空时继承全局模板
+    wechat_send_enabled: bool = False  # 独立于生成开关，默认禁止自动对外发送
 
 
 class Run(SQLModel, table=True):

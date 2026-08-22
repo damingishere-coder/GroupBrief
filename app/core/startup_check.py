@@ -1,6 +1,7 @@
 """P9 启动检查：服务启动时验证关键外部依赖与本地环境。
 
-检查项：WeChatDataAnalysis 数据源 / 微信进程 / DeepSeek 配置 /
+检查项：WeChatDataAnalysis 数据源 / 微信进程 / Codex GPT 主总结 /
+DeepSeek 备用配置 /
 output 可写 / templates 完整。任一失败只记录日志并提示，不阻止启动
 （避免单点失败导致整个服务退出）。
 
@@ -62,18 +63,34 @@ def run_startup_checks(settings: Settings) -> list[dict]:
     except Exception as e:
         checks.append({"name": "微信客户端", "ok": False, "status": "OFFLINE", "detail": str(e)[:200]})
 
-    # 3) DeepSeek 配置
+    # 3) Codex GPT 主总结
+    try:
+        from app.providers.ai.codex import CodexGPTProvider
+
+        codex_ok, codex_detail = CodexGPTProvider(settings).health_check()
+        checks.append(
+            {
+                "name": "Codex GPT 群聊总结",
+                "ok": codex_ok,
+                "status": "OK" if codex_ok else "UNAVAILABLE",
+                "detail": codex_detail,
+            }
+        )
+    except Exception as e:
+        checks.append({"name": "Codex GPT 群聊总结", "ok": False, "status": "UNAVAILABLE", "detail": str(e)[:200]})
+
+    # 4) DeepSeek 备用配置
     key_ok = bool(settings.ai_api_key)
     checks.append(
         {
-            "name": "DeepSeek V4 Flash",
+            "name": "DeepSeek V4 Flash（备用）",
             "ok": key_ok,
             "status": "OK" if key_ok else "UNAVAILABLE",
-            "detail": f"模型 {settings.ai_model}；API Key {'已配置' if key_ok else '未配置（将使用本地模板）'}",
+            "detail": f"模型 {settings.ai_model}；API Key {'已配置' if key_ok else '未配置（主模型失败时无法接管）'}",
         }
     )
 
-    # 4) output 可写
+    # 5) output 可写
     try:
         settings.ensure_dirs()
         test = settings.output_dir / ".write_test"
@@ -83,7 +100,7 @@ def run_startup_checks(settings: Settings) -> list[dict]:
     except Exception as e:
         checks.append({"name": "输出目录", "ok": False, "status": "UNAVAILABLE", "detail": str(e)[:200]})
 
-    # 5) templates 完整
+    # 6) templates 完整
     try:
         from app.ai.prompt_templates import ImagePromptTemplateService
         from app.ranking.template_service import RankingTemplateService

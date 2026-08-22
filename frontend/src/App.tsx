@@ -1,51 +1,78 @@
-import { useState } from "react";
 import Dashboard from "./pages/v2/Dashboard";
 import Groups from "./pages/v2/Groups";
-import Templates from "./pages/v2/Templates";
-import History from "./pages/v2/History";
-import System from "./pages/v2/System";
+import GroupDetail from "./pages/v2/GroupDetail";
+import Ranking from "./pages/v2/Ranking";
+import AIImages from "./pages/v2/AIImages";
+import ChatRecords from "./pages/v2/ChatRecords";
+import Tasks from "./pages/v2/Tasks";
+import Archive from "./pages/v2/Archive";
+import Settings from "./pages/v2/Settings";
+import AppShell from "./components/layout/AppShell";
+import { usePageNavigation } from "./navigation";
 
-type Page = "dashboard" | "groups" | "templates" | "history" | "system";
-
-const NAV: { key: Page; label: string; icon: string }[] = [
-  { key: "dashboard", label: "今日概览", icon: "◐" },
-  { key: "groups", label: "群管理", icon: "▤" },
-  { key: "templates", label: "模板中心", icon: "❐" },
-  { key: "history", label: "历史日报", icon: "▦" },
-  { key: "system", label: "系统状态", icon: "✦" },
-];
+function WorkspaceTabs({
+  tabs,
+  active,
+  onNavigate,
+}: {
+  tabs: { key: "groups" | "tasks" | "messages" | "archive"; label: string }[];
+  active: string;
+  onNavigate: (key: string) => void;
+}) {
+  return (
+    <div className="workspace-tabs" role="tablist">
+      {tabs.map((tab) => (
+        <button
+          key={tab.key}
+          type="button"
+          role="tab"
+          aria-selected={active === tab.key}
+          className={active === tab.key ? "is-active" : ""}
+          onClick={() => onNavigate(tab.key)}
+        >
+          {tab.label}
+        </button>
+      ))}
+    </div>
+  );
+}
 
 export default function App() {
-  const [page, setPage] = useState<Page>("dashboard");
+  const { page, route, navigate } = usePageNavigation();
 
   return (
-    <div className="layout">
-      <aside className="sidebar">
-        <div className="brand">
-          <div className="brand-logo">报</div>
-          <div>
-            <div className="brand-name">群报 GroupBrief</div>
-            <div className="brand-sub">V2 全自动日报</div>
-          </div>
+    <AppShell activePage={page} onNavigate={navigate}>
+      {page === "dashboard" && <Dashboard />}
+      {page === "groups" && route.groupMode === "list" && (
+        <div className="combined-workspace">
+          <WorkspaceTabs active="groups" onNavigate={navigate} tabs={[{ key: "groups", label: "群聊配置" }, { key: "tasks", label: "任务中心" }]} />
+          <Groups />
         </div>
-        {NAV.map((item) => (
-          <button
-            key={item.key}
-            className={`nav-item ${page === item.key ? "active" : ""}`}
-            onClick={() => setPage(item.key)}
-          >
-            <span className="nav-icon">{item.icon}</span>
-            {item.label}
-          </button>
-        ))}
-      </aside>
-      <main className="main">
-        {page === "dashboard" && <Dashboard />}
-        {page === "groups" && <Groups />}
-        {page === "templates" && <Templates />}
-        {page === "history" && <History />}
-        {page === "system" && <System />}
-      </main>
-    </div>
+      )}
+      {page === "groups" && route.groupMode !== "list" && (
+        <GroupDetail groupId={route.groupId} invalidGroupId={route.invalidGroupId} />
+      )}
+      {page === "ranking" && <Ranking />}
+      {page === "images" && <AIImages />}
+      {page === "tasks" && (
+        <div className="combined-workspace">
+          <WorkspaceTabs active="tasks" onNavigate={navigate} tabs={[{ key: "groups", label: "群聊配置" }, { key: "tasks", label: "任务中心" }]} />
+          <Tasks />
+        </div>
+      )}
+      {page === "messages" && (
+        <div className="combined-workspace">
+          <WorkspaceTabs active="messages" onNavigate={navigate} tabs={[{ key: "messages", label: "聊天记录" }, { key: "archive", label: "归档中心" }]} />
+          <ChatRecords />
+        </div>
+      )}
+      {page === "archive" && (
+        <div className="combined-workspace">
+          <WorkspaceTabs active="archive" onNavigate={navigate} tabs={[{ key: "messages", label: "聊天记录" }, { key: "archive", label: "归档中心" }]} />
+          <Archive />
+        </div>
+      )}
+      {page === "settings" && <Settings />}
+    </AppShell>
   );
 }

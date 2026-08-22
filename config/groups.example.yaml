@@ -15,9 +15,9 @@ groups:
     # 本群发送时间（每群独立）
     send_time: "08:30"
 
-    # 总结模型 / Prompt 模型（当前均为 DeepSeek V4 Flash）
-    summary_model: "deepseek-v4-flash"
-    prompt_model: "deepseek-v4-flash"
+    # 总结模型 / Prompt 主模型（DeepSeek V4 Flash 为系统级备用）
+    summary_model: "gpt-5.6-sol"
+    prompt_model: "gpt-5.6-sol"
 
     # 是否生图（false 时跳过生图，PROMPT_READY 后直接 READY_TO_SEND）
     image_enabled: true

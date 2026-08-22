@@ -11,6 +11,7 @@ from __future__ import annotations
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
+from time import perf_counter
 from typing import Any, Callable
 
 from app.v2.constants import (
@@ -159,7 +160,9 @@ class SerialImageQueue:
         """按顺序逐群执行；上一群完成（成功或失败）后才执行下一群。"""
         results: list[dict] = []
         for job in jobs:
+            started_at = perf_counter()
             result = job.run()
+            result["imagegen_ms"] = round((perf_counter() - started_at) * 1000)
             results.append(result)
             if self.run_hook:
                 try:
