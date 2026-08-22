@@ -20,7 +20,7 @@ def _fetch_norm(group_id: str, day_str: str = "2026-08-13"):
 
 def _sample_context() -> PromptContext:
     normalized = _fetch_norm("group-a")
-    rank = RankingEngine().compute(normalized, "Eason张UED-4群", "2026-08-13 00:00:00", "2026-08-13 23:59:59")
+    rank = RankingEngine().compute(normalized, "示例UED-4群", "2026-08-13 00:00:00", "2026-08-13 23:59:59")
     lines = [
         f"[{m.timestamp.strftime('%H:%M')}] {m.sender_name}: {m.ai_text}"
         for m in normalized[:40]
@@ -28,7 +28,7 @@ def _sample_context() -> PromptContext:
     ]
     return PromptContext(
         group_id="group-a",
-        group_name="Eason张UED-4群",
+        group_name="示例UED-4群",
         report_date="2026-08-14",
         range_start="2026-08-13 00:00:00",
         range_end="2026-08-13 23:59:59",
@@ -58,9 +58,8 @@ def test_template_uses_real_speakers():
     provider = TemplatePromptProvider()
     context = _sample_context()
     result = provider.generate_image_prompt(context)
-    # Top 发言者（来自真实统计）应出现在版面2
-    normalized = _fetch_norm("group-a")
-    top = [name for name, _ in RankingEngine().compute(normalized, "g", "s", "e").top10[:3]]
+    # 模板会从本次传入的消息摘录中统计活跃发言者，结果应出现在版面2。
+    top = provider._top_speakers(context.messages_text.splitlines())
     assert top, "fixture 应有发言者"
     assert top[0] in result.prompt
 

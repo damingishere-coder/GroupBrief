@@ -43,7 +43,7 @@ class StubProvider(ChatHistoryProvider):
 
 def test_normalize_name_basic():
     assert normalize_name("产品经理交流群") == "产品经理交流群"
-    assert normalize_name("Eason张UED-4群") == normalize_name("Eason 张 UED-4 群")
+    assert normalize_name("示例UED-4群") == normalize_name("示例 UED-4 群")
     assert normalize_name("ＡＢＣｄ") == "abcd"  # NFKC + 大小写折叠
     assert normalize_name("  Product 群  ") == "product群"
     assert normalize_name("") == ""

@@ -18,7 +18,7 @@ repo.init_db(settings)
 
 
 def test_safe_dir_name():
-    assert safe_dir_name("Eason张UED-4群") == "Eason张UED-4群"
+    assert safe_dir_name("示例UED-4群") == "示例UED-4群"
     assert ":" not in safe_dir_name("a:b/c*d?e")
     assert "/" not in safe_dir_name("a/b")
     assert safe_dir_name("") == "group"
@@ -28,7 +28,7 @@ def test_generate_writes_files():
     with Session(repo.engine) as session:
         group = repo.save_group(
             session,
-            Group(display_name="Eason张UED-4群", wechat_group_id="group-a"),
+            Group(display_name="示例UED-4群", wechat_group_id="group-a"),
         )
         service = ReportService()
         run = service.generate(session, group=group, report_date="2026-08-13", force=True)
@@ -44,7 +44,7 @@ def test_generate_writes_files():
         assert report.ranking_file
 
         day_dir = settings.output_dir / "2026-08-13"
-        group_dir = day_dir / "Eason张UED-4群"
+        group_dir = day_dir / "示例UED-4群"
         assert (group_dir / "ranking.txt").exists()
         assert (group_dir / "image_prompt.txt").exists()
         assert (group_dir / "meta.json").exists()
@@ -85,10 +85,10 @@ def test_two_groups_isolated():
 
         day_dir = settings.output_dir / "2026-08-13"
         dirs = {p.name for p in day_dir.iterdir() if p.is_dir()}
-        assert "Eason张UED-4群" in dirs
+        assert "示例UED-4群" in dirs
         assert "产品经理交流群" in dirs
 
-        a = json.loads((day_dir / "Eason张UED-4群" / "meta.json").read_text(encoding="utf-8"))
+        a = json.loads((day_dir / "示例UED-4群" / "meta.json").read_text(encoding="utf-8"))
         b = json.loads((day_dir / "产品经理交流群" / "meta.json").read_text(encoding="utf-8"))
         assert a["group_id"] != b["group_id"]
         assert a["message_count"] > 0 and b["message_count"] > 0

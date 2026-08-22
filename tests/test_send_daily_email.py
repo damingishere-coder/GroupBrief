@@ -70,28 +70,28 @@ def test_build_message_uses_raw_ranking_and_one_image_attachment(tmp_path):
     image = b"\x89PNG\r\n\x1a\nminimal-png"
     group_dir = _write_group(
         tmp_path,
-        "茶馆 A",
+        "示例群 A",
         run_date,
-        "===== 茶馆 A =====\n【发言排行榜】\n1. Alice【3】",
+        "===== 示例群 A =====\n【发言排行榜】\n1. Alice【3】",
         image_enabled=True,
         image=image,
     )
     settings = _settings(tmp_path)
     blocks, skipped = mail_script.collect_group_inputs(
         settings,
-        [_group("茶馆 A", image_enabled=True)],
+        [_group("示例群 A", image_enabled=True)],
         run_date,
     )
 
     assert not skipped
     message = mail_script.build_message(blocks[0], settings)
     assert message.get_body(preferencelist=("plain",)).get_content().strip() == blocks[0].ranking_text
-    assert "茶馆 A" in message["Subject"]
+    assert "示例群 A" in message["Subject"]
     assert "2026-08-20" in message["Subject"]
     attachments = list(message.iter_attachments())
     assert len(attachments) == 1
     assert attachments[0].get_content_type() == "image/png"
-    assert "茶馆-A-日报图片.png" == attachments[0].get_filename()
+    assert "示例群-A-日报图片.png" == attachments[0].get_filename()
     assert str(group_dir) not in attachments[0].get_filename()
 
 

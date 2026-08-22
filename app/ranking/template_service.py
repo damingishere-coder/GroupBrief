@@ -15,7 +15,7 @@ from pathlib import Path
 from app.config.settings import PROJECT_ROOT
 
 # 默认模板内容（对应路线文档默认格式；用户可改文件，恢复默认即写回此内容）。
-# 注意：群名 {{group_name}} 原样渲染（真实群名可能自带 emoji，如「茶馆V3.0（三周年纪念）🐮🐴」），
+# 注意：群名 {{group_name}} 原样渲染（真实群名可能自带 emoji，如「示例交流群 A ✨」），
 # 模板不再硬编码装饰 emoji，避免出现「🐮🐴🐮🐴」重复；如需装饰请在模板中心自行编辑。
 DEFAULT_RANKING_TEMPLATE = """===== {{group_name}} =====
 

@@ -1,171 +1,196 @@
-# 群报 GroupBrief
+<p align="center">
+  <img src="frontend/public/assets/groupbrief-logo.png" width="84" alt="GroupBrief logo">
+</p>
 
-微信群聊日报小工具 · Windows 本地版 · V1
+<h1 align="center">GroupBrief 群报</h1>
 
-GroupBrief 从 Windows PC 微信的本地聊天记录中读取多个群聊，精确统计每日发言排行榜，并由 DeepSeek 分析当天真实聊天事件生成「可直接交给 GPT 生图」的海报 Prompt，最终每天 09:00 通过一封邮件发送给你。
+<p align="center">面向 Windows 的本地微信群日报工作台：读取群聊记录，生成排行榜、AI 摘要与海报，并支持复核、归档和可选发送。</p>
 
+<p align="center">
+  <a href="https://github.com/damingishere-coder/GroupBrief/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/damingishere-coder/GroupBrief/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="https://github.com/damingishere-coder/GroupBrief/releases"><img alt="Release" src="https://img.shields.io/github/v/release/damingishere-coder/GroupBrief?display_name=tag&amp;sort=semver"></a>
+  <a href="LICENSE"><img alt="License" src="https://img.shields.io/github/license/damingishere-coder/GroupBrief"></a>
+</p>
+
+<p align="center">
+  <a href="#快速开始">快速开始</a> ·
+  <a href="#工作方式">工作方式</a> ·
+  <a href="#产品界面">产品界面</a> ·
+  <a href="#当前状态与限制">当前限制</a>
+</p>
+
+![GroupBrief 运行总览](assets/screenshots/dashboard.png)
+
+## 为什么需要 GroupBrief
+
+活跃群聊每天会产生大量消息，重要讨论、资源和待办很容易被后续消息淹没。GroupBrief 把“翻记录、数消息、整理重点、生成海报、归档结果”变成一条可复核的本地工作流。
+
+- 排行榜由程序确定性计算，LLM 不参与数字统计。
+- 每个群、每个日期独立运行和保存，失败不会隐藏其他群的结果。
+- 对外发送默认关闭；先查看真实消息、排行榜、Prompt 和图片，再决定是否发送。
+
+## Available Now
+
+| 能力 | 当前行为 |
+| --- | --- |
+| 群聊接入 | 通过 WeChatDataAnalysis MCP 或结构化 JSON 读取历史；支持搜索、绑定和测试读取 |
+| 精确排行榜 | 统计消息数、发言人数和 Top10，并生成结构化 JSON 与固定格式文本 |
+| AI 日报与海报 | Codex GPT 生成摘要和海报 Prompt；可配置 DeepSeek 作为失败备用 |
+| 图片工作流 | 按群配置图片主题和 Prompt，支持串行生图、Prompt 编辑、重新生成与人工复核 |
+| 本地管理界面 | 提供总览、群聊与任务、排行榜、AI 图片、聊天归档和设置页面 |
+| 调度与归档 | 每日生成前一日群报，按 `output/<群>/<日期>/` 保存完整运行文件 |
+| 可选交付 | 支持邮件；微信文字/图片发送适配器默认关闭，并带防重复和异常状态保护 |
+
+## 工作方式
+
+```mermaid
+flowchart LR
+    A["Windows 微信历史"] --> B["读取与归一化"]
+    B --> C["程序计算排行榜"]
+    B --> D["AI 整理摘要与海报 Prompt"]
+    C --> E["人工复核"]
+    D --> E
+    E --> F["本地归档"]
+    E --> G["可选邮件或微信发送"]
 ```
-Windows PC 微信
-    ↓
-WeChatDataAnalysis（主读取）→ 失败时 wechat-cli（备用）
-    ↓
-GroupBrief 本地整理
-    ↓
-精确排行榜（程序确定性计算，LLM 不参与数字统计）
-    +
-DeepSeek V4 Flash 分析聊天 → GPT 生图 Prompt
-    ↓
-按 日期/群 保存本地文件（output/）
-    ↓
-每天 09:00 发送一封纯文字邮件
-    ↓
-你手动：复制排行榜 / 复制 Prompt → GPT 生图 → 发微信群
-```
 
-## V1 功能
+聊天数据库和运行文件保留在本机。使用 Codex 或 DeepSeek 时，完成总结与生图所需的内容会发送到你选择的模型服务；GroupBrief 不会默认把整个微信数据库作为一次请求上传。
 
-- 多群管理：添加 / 删除 / 启用 / 停用任意数量的群（首批两个群）
-- 精确排行榜：总消息数、发言人数、Top10，格式固定
-- DeepSeek V4 Flash 生成海报 Prompt（未配置 API Key 时使用本地模板，全链路可用）
-- 自动调度：周一～周六 08:45 生成、09:00 发邮件；周日不执行；周一统计周六+周日两天
-- 手动执行：指定日期、指定群、重新生成（force）、手动发邮件
-- 本地文件归档：`output/YYYY-MM-DD/{群}/`（含 V2 Handoff 交接文件）
-- 本地 Web UI（Apple 蓝白风格）：仪表盘 / 群聊管理 / 执行记录 / 文件管理 / 日志 / 设置 / 关于
-- 隐私：聊天记录只在本机读取，只有生成 Prompt 所需文本提交给 DeepSeek API
+## 产品界面
 
-## V2 规划（V1 只预留接口）
+以下均为当前真实应用界面，截图运行在隔离的匿名演示数据上；没有复制真实聊天数据库，也没有使用生成式假 UI。
 
-V2 由 Codex Automation 接管：读取 `image_prompt.txt` → GPT 自动生图 → 自动打开微信 → 发送排行榜文字 + 海报图片。
-V1 已预留：`ImageGenerationProvider`、`WeChatDeliveryProvider`、`handoff.json`（poster_file / poster_status）、UI 海报预览占位。
+| 群聊与任务 | 排行榜 |
+| --- | --- |
+| ![群聊管理与任务](assets/screenshots/group-management.png) | ![群聊排行榜](assets/screenshots/ranking.png) |
 
-## 安装
+| 归档中心 | 运行总览 |
+| --- | --- |
+| ![群报归档](assets/screenshots/archive.png) | ![运行总览](assets/screenshots/dashboard.png) |
 
-环境要求：Windows 10/11、Python 3.10+、Node.js 18+（仅构建前端时需要）。
+## 快速开始
+
+### 环境要求
+
+| 项目 | 要求 |
+| --- | --- |
+| 操作系统 | Windows 10/11 |
+| Python | 3.10 或更高版本 |
+| Node.js | 18 或更高版本；首次构建 Web UI 时需要 |
+| Git | 用于克隆和更新仓库 |
+| 真实微信数据 | 可选；需要 Windows 微信和 WeChatDataAnalysis |
+
+### 安装并启动
+
+在 Windows Terminal、PowerShell 或命令提示符中运行：
 
 ```bat
-cd /d "C:\Users\10578\Documents\AI - GroupBrief"
+git clone https://github.com/damingishere-coder/GroupBrief.git
+cd GroupBrief
+copy .env.example .env
 start_windows.bat
 ```
 
-首次运行会自动：创建 Python 虚拟环境 → 安装依赖 → 构建前端 → 启动服务。
-之后每次直接运行 `start_windows.bat` 即可。
+第一次运行会创建 Python 虚拟环境、安装依赖、构建前端并启动服务。浏览器访问：
 
-## 启动
+<http://127.0.0.1:8766>
+
+如果需要临时使用其他端口，可在启动前设置进程环境变量：
 
 ```bat
+set APP_PORT=8767
 start_windows.bat
 ```
 
-浏览器打开：<http://127.0.0.1:8766>
+### 第一次使用
 
-> 注：文档默认端口 8765 被本机其他项目占用，本项目使用 8766。如需修改，编辑 `.env` 中的 `APP_PORT`。
+1. 打开“帮助与系统检查”，确认数据库和基础服务正常。
+2. 在“群聊与任务”中搜索并绑定一个群，先执行测试读取。
+3. 保持微信发送关闭，选择一个已有消息的日期手动生成日报。
+4. 在“排行榜”和“AI 图片”中检查统计、Prompt 和图片。
+5. 在“记录与归档”中确认消息与运行文件已经保存。
+6. 只有完成当前微信版本和桌面环境的实机测试后，才开启该群的微信发送。
+
+### Docker（可选）
+
+```powershell
+Copy-Item .env.example .env
+docker compose up -d --build
+```
+
+Docker 只运行 GroupBrief 服务本体。微信桌面客户端、WeChatDataAnalysis、Codex CLI 和微信 UI 自动化仍在 Windows 宿主机上。完整说明见 [`docs/DOCKER.md`](docs/DOCKER.md)。
 
 ## 配置
 
-复制 `.env.example` 为 `.env` 并填写：
+所有可用字段及安全占位值见 [`.env.example`](.env.example)。最常用配置如下：
 
-| 配置 | 说明 |
-| --- | --- |
-| `AI_API_KEY` | DeepSeek API Key（配置后启用真实 AI；未配置自动使用本地模板） |
-| `AI_BASE_URL` / `AI_MODEL` | DeepSeek 接口地址与模型（默认 `https://api.deepseek.com` / `deepseek-chat`） |
-| `EMAIL_ENABLED=true` | 启用邮件 |
-| `EMAIL_RECIPIENT` | 收件地址 |
-| `EMAIL_SMTP_HOST/PORT/USER/PASSWORD` | SMTP 配置（默认 465 SSL） |
-| `WECHAT_DATA_DIR` | 微信数据目录（WeChatDataAnalysis 用） |
-| `WECHAT_CLI_PATH` | wechat-cli 可执行文件路径 |
-
-也可以在网页「配置设置」页修改（API Key 只显示掩码）。
-
-## 微信 Provider
-
-| Provider | 角色 | 说明 |
+| 配置 | 用途 | 是否必需 |
 | --- | --- | --- |
-| WeChatDataAnalysis | 主 | 读取 `data/wechat_export/` 下导出的 JSON（groups.json + messages/{群}/{日期}.json，格式与统一消息模型一致） |
-| wechat-cli | 备用 | 调用 `wechat-cli export/list-groups` 命令 |
-| Mock | 兜底 | 读取 `fixtures/` 模拟数据，无真实微信时保证全链路可开发可测试 |
+| `WECHAT_MCP_URL` / `WECHAT_MCP_TOKEN` | 连接本机 WeChatDataAnalysis MCP | 读取真实微信数据时需要 |
+| `WECHAT_EXPORT_DIR` | 使用结构化 JSON 导出作为读取来源 | 不使用 MCP 时可选 |
+| `CODEX_PATH` / `CODEX_HOME` | 定位已登录的 Codex CLI 和生成图片目录 | 使用 Codex 总结/生图时需要 |
+| `AI_API_KEY` | DeepSeek 失败备用 | 可选 |
+| `EMAIL_*` | SMTP 邮件发送 | 可选，默认关闭 |
+| `SCHEDULE_GENERATE_TIME` | 每日群报生成时间 | 可选，默认 `00:15` |
 
-降级链：主 Provider 不可用 → 备用 → Mock。所有 Provider 通过统一 `ChatHistoryProvider` 接口接入，业务层不依赖任何开源项目内部实现。Provider 状态在仪表盘「系统状态」区可见。
+网页“设置中心”保存的运行配置会持久化到本地数据库，并可能覆盖同名 `.env` 值。排查配置时应同时检查网页设置和 `.env`，不要在截图、Issue 或日志中公开真实凭据。
 
-> 真实微信读取为 REAL_ENV_PENDING：需在装有微信并登录的机器上，使用 WeChatDataAnalysis 导出数据（或配置 wechat-cli 路径）后自动生效。
+## 输出文件
 
-## DeepSeek
-
-- 只负责：聊天内容 → 理解事件 → 整理话题 → 生成 GPT 生图 Prompt（输出 `image_prompt.txt`）
-- 不负责：排行榜计算、微信读取、邮件、调度、文件管理
-- 超长群聊自动按 `CHUNK_MESSAGE_COUNT` 分块分析后合并
-- Prompt 硬性约束：不编造事件 / 人物 / 金额 / 时间 / 地点，原话必须来自真实聊天
-
-## 邮件
-
-- 每天只发送一封，包含所有启用群，每群 = 排行榜 + GPT 生图 Prompt
-- 发送前检查群报告是否成功生成，不发送空白结果
-- `EMAIL_SEND_PARTIAL_REPORT=true`（默认）：部分群失败仍发送成功群
-
-## 自动任务
-
-- 08:45 `GenerateDailyReports`：读取 → 整理 → 排行 → Prompt → 保存文件
-- 09:00 `SendDailyEmail`
-- 周日不执行
-- 周一统计周六 00:00:00 ～ 周日 23:59:59（两天汇总）；周二～周六统计前一天
-- 防重复：同一 日期+群+时间范围 已成功不重复生成；手动「重新生成」= force
-
-## 文件输出
-
-```
+```text
 output/
-└─ YYYY-MM-DD/
-   ├─ {群}/
-   │  ├─ ranking.txt
-   │  ├─ image_prompt.txt
-   │  ├─ meta.json
-   │  ├─ normalized_messages.json
-   │  └─ handoff.json
+└─ 示例群/
+   └─ 2026-01-15/
+      ├─ ranking.txt
+      ├─ ranking.json
+      ├─ messages.json
+      ├─ image_prompt.txt
+      ├─ daily_image.png
+      └─ run.json
 ```
 
-`handoff.json` 是 V1→V2 的机器可读交接协议（version/date/group/ranking_file/prompt_file/poster_file/status）。
+`data/`、`output/`、`logs/` 和 `.env` 默认不进入 Git。它们可能包含聊天、账号或凭据，不要手动提交。
 
-## 隐私
+## 当前状态与限制
 
-- 微信聊天只在本机读取，不自动上传整个聊天库
-- 仅生成 Prompt 所需的整理文本提交给 DeepSeek API
-- `output/`、`data/`、`logs/` 均不入 Git
-- 日志不记录 API Key / 邮件密码
+GroupBrief v1.0.0 已完成本地功能、自动化测试和前端生产构建，但外部环境仍有明确边界：
 
-## 常见故障
+- WeChatDataAnalysis 读取结果取决于本机微信版本、账号数据、MCP 服务和权限。
+- Codex 生图依赖本机 Codex CLI、登录状态和 ImageGen；DeepSeek 需要用户自己的 API Key。
+- 邮件发送需要有效 SMTP 配置，测试使用 fake SMTP，不代表真实邮箱已经验收。
+- 微信原生发送依赖已登录微信、未锁屏桌面、OCR 与窗口兼容性；目前默认关闭，尚未形成覆盖不同客户端版本的可重复实机 E2E。
+- 项目不提供云端托管服务、微信数据或通用兼容性承诺。
 
-| 现象 | 处理 |
-| --- | --- |
-| 仪表盘 Provider 显示不可用 | 未配置真实微信读取，属正常；会使用 Mock 数据，或按提示配置 WeChatDataAnalysis 导出 / wechat-cli |
-| Prompt 显示模板内容 | 未配置 `AI_API_KEY`，本地模板保证可用；配置 Key 后自动使用 DeepSeek |
-| 邮件发送失败 | 检查 SMTP 主机/端口/账号/授权码，网页「配置设置」或 `.env` |
-| 端口被占用 | 修改 `.env` 的 `APP_PORT` 后重启 |
-| 周日没有自动任务 | 正常，周日不执行 |
-| 生成报错 | 查看「日志」页，或 `logs/` 下对应分类日志 |
+下一阶段最值得完成的是：可重复的真实 Codex/微信发送验收，以及按微信客户端版本记录兼容结果。在此之前，这些能力不会被描述为开箱即用。
 
-## 开发
+## 开发与验证
 
-```bat
-cd frontend
-npm install
-npm run dev        :: 开发模式（5173，代理 /api 到 8766）
+后端：
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests -q
+.\.venv\Scripts\python.exe -m compileall -q app scripts tests
 ```
 
-后端测试：
+前端：
 
-```bat
-.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
-.venv\Scripts\python.exe -m pytest tests -q
+```powershell
+Set-Location frontend
+npm ci
+npm run build
 ```
 
-## 目录结构
+技术栈：FastAPI、SQLModel/SQLite、APScheduler、React 18、TypeScript 和 Vite。
 
-```
-app/            FastAPI 后端（api / providers / services / scheduler / db / config）
-frontend/       React + Vite + TypeScript（Apple 风格 UI）
-fixtures/       模拟聊天数据（Mock Provider）
-scripts/        工具脚本（fixtures 生成器等）
-output/         每日群报输出（不入 Git）
-data/           SQLite 与导出缓存（不入 Git）
-logs/           分类日志（不入 Git）
-tests/          pytest 自动化测试
-```
+开发约定见 [`CONTRIBUTING.md`](CONTRIBUTING.md)，历史设计记录位于 [`docs/development-history/`](docs/development-history/README.md)。
+
+## 安全与隐私
+
+- 只处理你有权访问和使用的聊天数据。
+- 不要把 `.env`、数据库、运行输出、日志或未脱敏截图提交到 GitHub。
+- 对外发送前始终核对目标群、文字、图片和运行日期。
+- 安全问题请按 [`SECURITY.md`](SECURITY.md) 私密报告，不要在公开 Issue 中粘贴秘密或聊天内容。
+
+## License
+
+GroupBrief 使用 [MIT License](LICENSE)。

@@ -5,7 +5,7 @@
 用法（在项目根目录运行）：
     .venv\\Scripts\\python.exe scripts/test_wechat_data.py health
     .venv\\Scripts\\python.exe scripts/test_wechat_data.py list-groups
-    .venv\\Scripts\\python.exe scripts/test_wechat_data.py resolve "茶馆"
+    .venv\\Scripts\\python.exe scripts/test_wechat_data.py resolve "示例"
     .venv\\Scripts\\python.exe scripts/test_wechat_data.py fetch <group_id> --start 2026-08-17 --end 2026-08-17
     .venv\\Scripts\\python.exe scripts/test_wechat_data.py all
 """
@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from datetime import datetime, time
 from pathlib import Path
@@ -155,13 +156,17 @@ def main() -> int:
         summary["fetch"] = cmd_fetch(source, args.group_id, args.start, args.end)
 
     if args.cmd == "all":
-        # 解析茶馆群并读取今天可用的最近数据
+        # 使用显式环境变量中的测试关键词，避免在公共脚本里固化真实群名。
         from datetime import timedelta
 
         today = datetime.now().date()
-        candidates = source.resolve_group("茶馆")
+        query = os.environ.get("GROUPBRIEF_TEST_GROUP_QUERY", "示例").strip() or "示例"
+        candidates = source.resolve_group(query)
         summary["all_resolve"] = candidates[:5]
-        _save("resolve_茶馆.json", [{"group_id": c.group_id, "group_name": c.group_name} for c in candidates[:5]])
+        _save(
+            f"resolve_{_safe(query)}.json",
+            [{"group_id": c.group_id, "group_name": c.group_name} for c in candidates[:5]],
+        )
         if candidates:
             g = candidates[0]
             yesterday = today - timedelta(days=1)

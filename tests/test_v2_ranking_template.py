@@ -26,7 +26,7 @@ from app.ranking.template_service import (
 def _result() -> RankingResult:
     return RankingResult(
         # 群名不含 emoji：默认模板自带 🐮🐴 装饰后缀（见路线文档 P3 默认模板）
-        group_name="茶馆V3.0（三周年纪念）",
+        group_name="示例交流群 A",
         period_start="2026-08-17 00:00:00",
         period_end="2026-08-17 23:59:59",
         speaker_count=27,
@@ -51,11 +51,11 @@ def _result() -> RankingResult:
 
 def test_render_default_template_matches_expected():
     text = render_ranking(_result(), DEFAULT_RANKING_TEMPLATE)
-    expected = """===== 茶馆V3.0（三周年纪念） =====
+    expected = """===== 示例交流群 A =====
 
 【发言排行榜】
 
-茶馆V3.0（三周年纪念）
+示例交流群 A
 消息统计
 ------------
 
@@ -88,7 +88,7 @@ def test_render_variable_substitution():
     # 自定义模板，验证各变量替换
     tpl = "【{{group_name}}】\n{{period_start}}~{{period_end}}\n人数{{speaker_count}} 消息{{message_count}}\n{{top10_lines}}"
     text = render_ranking(_result(), tpl)
-    assert "【茶馆V3.0（三周年纪念）】" in text
+    assert "【示例交流群 A】" in text
     assert "2026-08-17 00:00:00~2026-08-17 23:59:59" in text
     assert "人数27 消息409" in text
     assert "1.停用【94】" in text
@@ -130,16 +130,16 @@ def test_render_unknown_variable_raises():
 def test_render_utf8_emoji():
     # 含 Emoji 的中文群名应原样渲染（UTF-8 支持）
     emoji_result = RankingResult(
-        group_name="茶馆V3.0（三周年纪念）🐮🐴",
+        group_name="示例交流群 A ✨",
         period_start="2026-08-17 00:00:00",
         period_end="2026-08-17 23:59:59",
         speaker_count=27,
         message_count=409,
-        top_speakers=[TopSpeaker(rank=1, name="Eason张UED-4群🤘", count=8)],
+        top_speakers=[TopSpeaker(rank=1, name="示例UED-4群🤘", count=8)],
     )
     text = render_ranking(emoji_result, "{{group_name}}\n{{top10_lines}}")
-    assert "🐮🐴" in text
-    assert "Eason张UED-4群🤘" in text
+    assert "✨" in text
+    assert "示例UED-4群🤘" in text
 
 
 # ---------- 模板服务 ----------
@@ -203,7 +203,7 @@ def test_renderer_uses_template_file(tmp_path):
     svc.save("mytpl", "{{group_name}} 共 {{message_count}} 条")
     renderer = RankingRenderer(service=svc)
     text = renderer.render(_result(), template_name="mytpl")
-    assert text == "茶馆V3.0（三周年纪念） 共 409 条"
+    assert text == "示例交流群 A 共 409 条"
 
 
 # ---------- Group 模型扩展 ----------

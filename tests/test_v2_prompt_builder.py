@@ -44,7 +44,7 @@ def _input(
     persisted_theme_meta=None,
 ) -> PromptInput:
     return PromptInput(
-        group_name="茶馆V3.0（三周年纪念）",
+        group_name="示例交流群 A",
         group_id="group-1",
         run_date="2026-08-18",
         period_start="2026-08-17 00:00:00",
@@ -203,7 +203,7 @@ def test_build_input_contains_group_and_data():
     assert out.success
     system, _ = b._provider.calls[-1]
     _, user = b._provider.calls[0]
-    assert "茶馆V3.0（三周年纪念）" in system  # 模板变量已渲染进输出结构
+    assert "示例交流群 A" in system  # 模板变量已渲染进输出结构
     assert "3 条消息" in system  # 数据渲染进输出结构
     assert "2 人发言" in system
     assert "完整群聊记录" in user  # 候选提取输入含完整聊天内容
@@ -260,10 +260,10 @@ def test_template_variable_render():
 
     text = render_image_prompt_template(
         "【群名称】{{group_name}}\n【数据】{{message_count}}条/{{speaker_count}}人\n【时间】{{period_start}}~{{period_end}}",
-        {"group_name": "茶馆", "message_count": "409", "speaker_count": "27",
+        {"group_name": "示例群", "message_count": "409", "speaker_count": "27",
          "period_start": "2026-08-17 00:00:00", "period_end": "2026-08-17 23:59:59"},
     )
-    assert "【群名称】茶馆" in text
+    assert "【群名称】示例群" in text
     assert "【数据】409条/27人" in text
     assert "2026-08-17 00:00:00~2026-08-17 23:59:59" in text
 

@@ -31,7 +31,7 @@ def test_mock_fetch_range():
     assert result.status == ProviderStatus.OK
     assert len(result.messages) > 500
     names = {m.sender_name for m in result.messages}
-    assert "广州" in names
+    assert "成员 A01" in names
     # 系统消息也会返回（排行榜层过滤）
     types = {m.message_type for m in result.messages}
     assert "text" in types and "image" in types
@@ -45,7 +45,7 @@ def test_mock_fetch_empty_group():
 
 def test_fallback_to_mock():
     service = HistoryService()
-    outcome = service.fetch("group-a", "Eason张UED-4群🤘", datetime(2026, 8, 10), datetime(2026, 8, 17))
+    outcome = service.fetch("group-a", "示例UED-4群🤘", datetime(2026, 8, 10), datetime(2026, 8, 17))
     assert outcome.status == ProviderStatus.OK
     assert len(outcome.messages) > 0
     # 主/备不可用时降级到 mock

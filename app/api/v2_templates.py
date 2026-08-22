@@ -131,7 +131,7 @@ def delete_image_prompt_template(name: str):
 
 def _preview_result() -> RankingResult:
     return RankingResult(
-        group_name="茶馆V3.0（三周年纪念）🐮🐴",
+        group_name="示例交流群 A ✨",
         period_start="2026-08-17 00:00:00",
         period_end="2026-08-17 23:59:59",
         speaker_count=27,

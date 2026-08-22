@@ -18,7 +18,7 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # 服务（8765 被本机其他项目占用，默认使用 8766）
+    # 服务（默认仅监听本机 8766 端口）
     app_host: str = "127.0.0.1"
     app_port: int = 8766
     app_timezone: str = "Asia/Shanghai"

@@ -109,19 +109,19 @@ def test_tie_stable_sort():
 
 
 def test_tie_sort_ignores_leading_emoji_decoration():
-    messages = [_msg("请下载“生气”App", i=1), _msg("🌸林诗雅小仙女", i=2)]
+    messages = [_msg("成员 02", i=1), _msg("成员 01", i=2)]
     r = engine.compute(messages, "测试群", PERIOD_START, PERIOD_END)
-    assert [s.name for s in r.top_speakers] == ["🌸林诗雅小仙女", "请下载“生气”App"]
+    assert [s.name for s in r.top_speakers] == ["成员 01", "成员 02"]
 
 
 def test_chinese_emoji_names():
     messages = [
-        _msg("茶馆V3.0（三周年纪念）🐮🐴", i=1),
-        _msg("茶馆V3.0（三周年纪念）🐮🐴", i=2),
-        _msg("Eason张UED-4群🤘", i=3),
+        _msg("示例交流群 A ✨", i=1),
+        _msg("示例交流群 A ✨", i=2),
+        _msg("示例UED-4群🤘", i=3),
     ]
     r = engine.compute(messages, "测试群", PERIOD_START, PERIOD_END)
-    assert r.top_speakers[0].name == "茶馆V3.0（三周年纪念）🐮🐴"
+    assert r.top_speakers[0].name == "示例交流群 A ✨"
     assert r.top_speakers[0].count == 2
 
 

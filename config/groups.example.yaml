@@ -5,7 +5,7 @@
 
 groups:
   - id: tea_house
-    name: "茶馆V3.0（三周年纪念）🐮🐴"
+    name: "示例交流群 A ✨"
 
     enabled: true
 
@@ -23,7 +23,7 @@ groups:
     image_enabled: true
 
     # 发送目标（微信中显示的群名，用于自动发送定位）
-    send_target: "茶馆V3.0（三周年纪念）🐮🐴"
+    send_target: "示例交流群 A ✨"
 
     # 使用的排行榜模板 / 生图 Prompt 模板（templates/ 下）
     ranking_template: "default"

@@ -90,7 +90,7 @@ def test_ranking_render_format():
     normalized = normalize_messages([_msg("张三", "text", "a")])
     result = engine.compute(
         normalized,
-        "Eason张UED-4群🤘",
+        "示例UED-4群🤘",
         "2026-08-16 00:00:00",
         "2026-08-16 23:59:59",
     )

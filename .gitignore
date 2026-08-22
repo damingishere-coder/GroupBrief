@@ -33,3 +33,11 @@ frontend/.vite/
 Thumbs.db
 .DS_Store
 desktop.ini
+
+# --- 本地开发与发布过程资料 ---
+docs/backups/
+docs/tasks/
+docs/qa/
+前端效果图/
+design-qa.md
+scripts/alter_groupbrief_backend.toml

@@ -32,14 +32,19 @@ frontend/.vite
 
 # 文档与日志（不进镜像）
 *.log
-DEVELOPMENT_LOG.md
-V2_DEVELOPMENT_LOG.md
-GroupBrief_V1_开发流程文档.md
-GroupBrief_V2_Development_Roadmap.md
+docs
+assets
+前端效果图
+design-qa.md
 README.md
 LICENSE
-V1_ACCEPTANCE_REPORT.md
+CHANGELOG.md
+CONTRIBUTING.md
+SECURITY.md
 fixtures
+
+# 本机项目管理配置
+scripts/alter_groupbrief_backend.toml
 
 # Docker 自身
 Dockerfile

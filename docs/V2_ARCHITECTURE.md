@@ -2,7 +2,7 @@
 
 > 状态：P0 基线固化
 > 日期：2026-08-18
-> 依据：`GroupBrief_V2_Development_Roadmap.md`（P0～P9 严格串行推进）
+> 历史依据：[`development-history/v2-roadmap.md`](development-history/v2-roadmap.md)（P0～P9 严格串行推进）
 
 ---
 
@@ -49,7 +49,7 @@ V2 明确不做的能力（沿用路线文档）：实时监听、AI 实时回�
 | --- | --- | --- |
 | `app/data_sources/base.py` | WeChatDataSource 抽象 + Message Schema | P1 |
 | `app/data_sources/wechat_data_analysis.py` | WeChatDataAnalysisSource 实现 | P1 |
-| `app/scheduler/period.py` | PeriodResolver（V2 周一=周五~周日 三天） | P2 |
+| `app/scheduler/period.py` | PeriodResolver（每天统计前一自然日） | P2 |
 | `app/ranking/engine.py` | V2 RankingEngine（输出 ranking.json） | P2 |
 | `app/ranking/renderer.py` | RankingRenderer（模板渲染 ranking.txt） | P3 |
 | `templates/ranking/` | 排行榜模板资产 | P3 |
@@ -73,7 +73,7 @@ V2 明确不做的能力（沿用路线文档）：实时监听、AI 实时回�
                                ▼
                      ┌──────────────────┐
                      │    Scheduler     │
-                     │  每日 08:00 启动   │
+                    │  每日 00:15 启动   │
                      └────────┬─────────┘
                               │
                               ▼
@@ -118,10 +118,10 @@ V2 明确不做的能力（沿用路线文档）：实时监听、AI 实时回�
 
 数据流分两个阶段（P7 DailyPipeline 实现）：
 
-- **生成阶段（默认 08:00）**：取数据 → 存 messages.json → 排行 → ranking.json →
+- **生成阶段（默认 00:15）**：取前一自然日数据 → 存 messages.json → 排行 → ranking.json →
   ranking.txt（模板）→ DeepSeek → image_prompt.txt → Codex 串行生图 →
   daily_image.png → 状态 READY_TO_SEND
-- **发送阶段（每群 send_time）**：发排行榜文字 → 发图片 → 状态 SENT
+- **发送阶段（默认 08:30 起，每群 send_time）**：按群顺序发排行榜文字 → 发图片 → 状态 SENT
 
 ---
 
@@ -173,16 +173,11 @@ SEND_IMAGE_FAILED
 
 ## 六、V2 统计周期规则（PeriodResolver）
 
-| 生成日 | 统计范围 |
+| 执行日 | 统计范围 |
 | --- | --- |
-| 周一 | 周五 00:00:00 ～ 周日 23:59:59 |
-| 周二 | 周一 00:00:00 ～ 23:59:59 |
-| 周三 | 周二 |
-| 周四 | 周三 |
-| 周五 | 周四 |
-| 周六 / 周日 | 不生成 |
+| 周一至周日 | 前一自然日 00:00:00 ～ 23:59:59 |
 
-> 注意：V2 周一统计 **三天**（周五+周六+周日），与 V1 周一两天（周六+周日）不同。
+例如 8 月 22 日 00:15 执行时，统计 8 月 21 日全天；周末也运行，周一不再合并周五至周日。
 
 ---
 

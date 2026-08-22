@@ -20,7 +20,7 @@ repo.init_db(settings)
 def _prepare_run(session: Session) -> int:
     group = repo.save_group(
         session,
-        Group(display_name="Eason张UED-4群", wechat_group_id="group-a"),
+        Group(display_name="示例UED-4群", wechat_group_id="group-a"),
     )
     service = ReportService()
     run = service.generate(session, group=group, report_date="2026-08-13", force=True)

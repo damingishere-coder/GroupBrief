@@ -60,7 +60,7 @@ def main() -> int:
     if args.cmd == "dry-run":
         sender = _sender(dry_run=True)
         r1 = sender.send_text(args.target, "测试文字")
-        r2 = sender.send_image(args.target, Path("output/test-data/ranking_茶馆_2026-08-17.txt"))
+        r2 = sender.send_image(args.target, Path("output/test-data/ranking_demo_group_2026-08-17.txt"))
         print(r1.detail)
         print(r2.detail)
         return 0
