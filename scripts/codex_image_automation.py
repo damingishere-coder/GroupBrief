@@ -21,11 +21,13 @@ r"""供 Codex Desktop 自动化使用的 GroupBrief 图片交接脚本。
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
 import sqlite3
 import sys
+import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -323,6 +325,62 @@ def _marker_elapsed_ms(marker: dict[str, Any]) -> int:
     return max(0, round((datetime.now().astimezone() - started_at).total_seconds() * 1000))
 
 
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest().upper()
+
+
+def _sync_scheduler_result(store: RunStore, group_name: str, run_date: str) -> None:
+    """同步人工认领结果，不触碰已经完成的邮件批次或微信发送字段。"""
+    scheduler_path = store.root / ".scheduler" / f"{run_date}.json"
+    if not scheduler_path.is_file():
+        return
+    try:
+        state = json.loads(scheduler_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+    if not isinstance(state, dict):
+        return
+    raw_results = state.get("generation_results")
+    results = list(raw_results) if isinstance(raw_results, list) else []
+    replacement = {
+        "group_name": group_name,
+        "status": "ready_to_send",
+        "detail": "图片已安全恢复，可以按原计划发送",
+    }
+    matched = False
+    for index, item in enumerate(results):
+        if isinstance(item, dict) and str(item.get("group_name") or "") == group_name:
+            results[index] = replacement
+            matched = True
+            break
+    if not matched:
+        results.append(replacement)
+    statuses = {str(item.get("status") or "") for item in results if isinstance(item, dict)}
+    if statuses and statuses <= {"ready_to_send", "skipped", "no_groups"}:
+        generation_status = "success"
+    elif statuses == {"failed"}:
+        generation_status = "failed"
+    else:
+        generation_status = "partial"
+    state.update(
+        generation_results=results,
+        generation_status=generation_status,
+        generation_recovered_at=datetime.now().astimezone().isoformat(),
+        updated_at=datetime.now().astimezone().isoformat(),
+    )
+    scheduler_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = scheduler_path.with_suffix(f".json.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    try:
+        temp_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(temp_path, scheduler_path)
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+
 def _new_images(marker: dict[str, Any]) -> list[Path]:
     directory = Path(str(marker.get("generated_images_dir") or "")).resolve()
     before = marker.get("before") if isinstance(marker.get("before"), dict) else {}
@@ -347,6 +405,33 @@ def _validate_source(source: Path, generated_dir: Path) -> Path:
     if detect_image_format(resolved) != "png":
         raise ValueError("ImageGen 输出不是 PNG，未写入日报图片")
     return resolved
+
+
+def _copy_png_atomic(source: Path, destination: Path) -> tuple[int, int, str]:
+    """完整解码 PNG 后原子落盘，并核对源/目标内容哈希。"""
+    from PIL import Image
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        with Image.open(source) as image:
+            image.load()
+            if image.format != "PNG":
+                raise ValueError("ImageGen 输出不是 PNG，未写入日报图片")
+            width, height = image.size
+        if width <= 0 or height <= 0:
+            raise ValueError(f"ImageGen 图片尺寸无效：{width}x{height}")
+        source_hash = _sha256(source)
+        copy_generated_image(source, temp_path)
+        ok, detail = verify_image(temp_path)
+        if not ok:
+            raise ValueError(f"日报图片临时落盘验证失败：{detail}")
+        if _sha256(temp_path) != source_hash:
+            raise ValueError("日报图片临时落盘哈希与来源不一致")
+        os.replace(temp_path, destination)
+        return width, height, source_hash
+    finally:
+        temp_path.unlink(missing_ok=True)
 
 
 def adopt_image(
@@ -375,26 +460,31 @@ def adopt_image(
     output_path = store.image_path(group_name, run_date)
     regeneration = bool(marker.get("regeneration"))
     existing_ok, _ = verify_image(output_path)
+    image_width = 0
+    image_height = 0
+    source_hash = ""
     if regeneration:
         temp_path = store.regenerating_image_path(group_name, run_date)
         previous_path = store.previous_image_path(group_name, run_date)
-        copy_generated_image(selected, temp_path)
-        temp_ok, temp_detail = verify_image(temp_path)
-        if not temp_ok:
-            temp_path.unlink(missing_ok=True)
-            raise ValueError(f"新图片临时落盘验证失败：{temp_detail}")
+        image_width, image_height, source_hash = _copy_png_atomic(selected, temp_path)
         if existing_ok:
             shutil.copy2(output_path, previous_path)
         temp_path.replace(output_path)
-    elif not existing_ok:
-        copy_generated_image(selected, output_path)
+    else:
+        image_width, image_height, source_hash = _copy_png_atomic(selected, output_path)
     ok, detail = verify_image(output_path)
     if not ok:
         raise ValueError(f"日报图片落盘验证失败：{detail}")
+    if _sha256(output_path) != source_hash:
+        raise ValueError("日报图片哈希与认领来源不一致")
 
     current_status = str(run.get("status") or "")
     next_status = SENT if current_status == SENT else READY_TO_SEND
-    imagegen_ms = _marker_elapsed_ms(marker)
+    explicit_source = source is not None
+    previous_imagegen_ms = int(run.get("imagegen_ms") or 0)
+    imagegen_ms = previous_imagegen_ms if explicit_source and previous_imagegen_ms > 0 else _marker_elapsed_ms(marker)
+    source_relative = selected.relative_to(generated_dir).as_posix()
+    recovered_at = datetime.now().astimezone().isoformat()
     stage_timings = dict(run.get("stage_timings") or {})
     stage_timings["imagegen_ms"] = imagegen_ms
     fields: dict[str, Any] = {
@@ -403,9 +493,33 @@ def adopt_image(
         "image_error": None,
         "image_size_bytes": output_path.stat().st_size,
         "image_format": detect_image_format(output_path),
+        "image_width": image_width,
+        "image_height": image_height,
         "imagegen_ms": imagegen_ms,
         "image_generated_at": datetime.now().astimezone().isoformat(),
         "stage_timings": stage_timings,
+        "image_attempt_count": max(int(run.get("image_attempt_count") or 0), 1),
+        "image_recovery_status": (
+            "manually_adopted_explicit_source" if explicit_source else "manually_adopted_unique_delta"
+        ),
+        "image_recovery": {
+            "recovered_at": recovered_at,
+            "reason": "approved_existing_image_recovery" if explicit_source else "unique_incremental_candidate",
+            "source_root": "generated_images",
+            "relative_path": source_relative,
+            "size_bytes": selected.stat().st_size,
+            "sha256": source_hash,
+            "preserved_imagegen_ms": bool(explicit_source and previous_imagegen_ms > 0),
+        },
+        "image_candidate_diagnostics": [
+            {
+                "source": "manual_explicit" if explicit_source else "manual_delta",
+                "root": "generated_images",
+                "relative_path": source_relative,
+                "size_bytes": selected.stat().st_size,
+                "sha256": source_hash,
+            }
+        ],
     }
     if regeneration:
         fields.update(
@@ -421,6 +535,7 @@ def adopt_image(
     else:
         fields.update(failed_stage=None, error=None, error_type=None)
     updated = store.update(group_name, run_date, **fields)
+    _sync_scheduler_result(store, group_name, run_date)
     marker_path.unlink(missing_ok=True)
     return {
         "ok": True,

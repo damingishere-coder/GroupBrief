@@ -593,6 +593,9 @@ class DailyPipeline:
         imagegen_ms = int(result.get("imagegen_ms") or 0)
         stage_timings["imagegen_ms"] = imagegen_ms
         image_size_bytes = job.output_path.stat().st_size if result["success"] and job.output_path.is_file() else 0
+        generator_detail = result.get("generator_detail")
+        if not isinstance(generator_detail, dict):
+            generator_detail = {}
         self.store.update(
             job.group_name, job.output_path.parent.name,
             status=status,
@@ -601,8 +604,16 @@ class DailyPipeline:
             error_type=error_type if not result["success"] else None,
             stage_timings=stage_timings,
             imagegen_ms=imagegen_ms,
-            image_generated_at=datetime.now().astimezone().isoformat(),
+            image_generated_at=(
+                datetime.now().astimezone().isoformat()
+                if result["success"]
+                else current.get("image_generated_at")
+            ),
             image_size_bytes=image_size_bytes,
+            image_attempt_count=int(generator_detail.get("attempt_count") or 0),
+            image_recovery_status=str(generator_detail.get("recovery_status") or ""),
+            image_candidate_diagnostics=generator_detail.get("candidate_diagnostics") or [],
+            image_attempts=generator_detail.get("attempts") or [],
         )
 
     def _after_image(self, job: ImageJob, run_date: str) -> None:

@@ -137,6 +137,38 @@ def test_daily_v2_job_resumes_interrupted_generation_without_email(tmp_path, mon
     assert saved["generation_error"] == ""
 
 
+def test_daily_v2_job_exception_keeps_generation_incomplete_for_startup_resume(tmp_path, monkeypatch):
+    from app.config.settings import Settings
+    from app.scheduler import daily_v2_job as daily
+
+    settings = Settings(_env_file=None, email_enabled=False, email_smtp_host="")
+    real_state_class = daily.DailyScheduleState
+
+    class TempState(real_state_class):
+        def __init__(self, _output_root):
+            super().__init__(tmp_path)
+
+    class BrokenPipeline:
+        def __init__(self, settings):
+            pass
+
+        def generate_all(self, run_date, acquire_lock=True):
+            raise RuntimeError("simulated process interruption")
+
+    monkeypatch.setattr(daily, "DailyScheduleState", TempState)
+    monkeypatch.setattr(daily, "DailyPipeline", BrokenPipeline)
+    monkeypatch.setattr(daily.repo, "init_db", lambda settings: None)
+    monkeypatch.setattr(daily.repo, "apply_db_settings", lambda settings: [])
+
+    result = daily.run_daily_v2_job("2026-08-24", settings=settings, skip_email=True)
+    state = TempState(tmp_path).load("2026-08-24")
+
+    assert result["status"] == "failed"
+    assert "generation_completed_at" not in state
+    assert state["generation_status"] == "interrupted"
+    assert state["generation_hold"] is True
+
+
 def test_startup_catchup_is_added_only_when_today_is_incomplete(monkeypatch):
     from app.config.settings import Settings
     from app.scheduler import manager

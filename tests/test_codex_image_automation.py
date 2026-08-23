@@ -11,7 +11,10 @@ from scripts import codex_image_automation as automation
 from scripts.codex_image_automation import adopt_image, begin_task, collect_pending
 
 
-PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"groupbrief-image"
+PNG_BYTES = bytes.fromhex(
+    "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489"
+    "0000000d4944415478da63f8cfc0f01f00050001fff83f240000000049454e44ae426082"
+)
 
 
 def _make_run(store: RunStore, group: str = "测试群", date: str = "2026-08-20", **fields) -> None:
@@ -227,3 +230,54 @@ def test_desktop_regeneration_fallback_replaces_old_image_and_requires_review(tm
     assert run["desktop_regen_requested"] is False
     assert run["send_hold"] is True
     assert run["needs_manual_send"] is True
+
+
+def test_explicit_adopt_preserves_timing_audits_hash_and_syncs_scheduler(tmp_path: Path):
+    store = RunStore(tmp_path / "output")
+    generated_dir = tmp_path / "generated_images"
+    source = generated_dir / "execution-approved" / "final.png"
+    source.parent.mkdir(parents=True)
+    _make_run(
+        store,
+        status=FAILED,
+        failed_stage="image",
+        error_type=IMAGE_GENERATION_FAILED,
+        image_error="codex 超时",
+        imagegen_ms=601137,
+        stage_timings={"imagegen_ms": 601137},
+    )
+    begin_task(store, generated_dir, "测试群", "2026-08-20")
+    source.write_bytes(PNG_BYTES + b"-approved")
+    scheduler_path = store.root / ".scheduler" / "2026-08-20.json"
+    scheduler_path.parent.mkdir(parents=True)
+    scheduler_path.write_text(
+        json.dumps(
+            {
+                "run_date": "2026-08-20",
+                "generation_status": "partial",
+                "generation_completed_at": "done",
+                "generation_results": [
+                    {"group_name": "测试群", "status": "failed", "error_type": IMAGE_GENERATION_FAILED},
+                    {"group_name": "其他群", "status": "ready_to_send"},
+                ],
+                "email_completed_at": "sent-before-recovery",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    result = adopt_image(store, "测试群", "2026-08-20", source)
+    run = store.load_run("测试群", "2026-08-20")
+    scheduler = json.loads(scheduler_path.read_text(encoding="utf-8"))
+
+    assert result["status"] == READY_TO_SEND
+    assert run["imagegen_ms"] == 601137
+    assert run["stage_timings"]["imagegen_ms"] == 601137
+    assert run["image_recovery_status"] == "manually_adopted_explicit_source"
+    assert run["image_recovery"]["relative_path"] == "execution-approved/final.png"
+    assert run["image_recovery"]["preserved_imagegen_ms"] is True
+    assert len(run["image_recovery"]["sha256"]) == 64
+    assert scheduler["generation_status"] == "success"
+    assert scheduler["email_completed_at"] == "sent-before-recovery"
+    assert scheduler["generation_results"][0]["status"] == "ready_to_send"

@@ -6,7 +6,7 @@ CodexImageGenerator health_check 不可用判定。
 
 from __future__ import annotations
 
-import os
+import json
 from pathlib import Path
 import subprocess
 import threading
@@ -197,150 +197,215 @@ def test_codex_generate_returns_failure_when_unavailable(tmp_path):
     assert "不可用" in result.error
 
 
-def test_codex_prompt_is_passed_via_stdin_not_command_line(tmp_path, monkeypatch):
-    generated = tmp_path / "generated.png"
-    generated.write_bytes(_PNG_1PX)
-    prompt = tmp_path / "image_prompt.txt"
-    prompt.write_text("包含引号 \"、换行\n和 $() 的完整 Prompt", encoding="utf-8")
-    captured = {}
-
-    class Proc:
-        returncode = 0
-        stdout = "ok"
-        stderr = ""
-
-    def fake_run(command, **kwargs):
-        captured["command"] = command
-        captured["input"] = kwargs.get("input")
-        return Proc()
-
-    gen = CodexImageGenerator(codex_path="codex-test")
-    monkeypatch.setattr(gen, "health_check", lambda: (True, "ok"))
-    monkeypatch.setattr(gen, "_snapshot", lambda: {})
-    monkeypatch.setattr(gen, "_scan_new", lambda before: [generated])
-    monkeypatch.setattr("app.image.codex_generator._run_codex_process", fake_run)
-
-    result = gen.generate(prompt, tmp_path / "daily_image.png")
-
-    assert result.success
-    assert captured["command"][-1] == "-"
-    assert "包含引号" not in " ".join(captured["command"])
-    assert captured["input"] == "$imagegen 包含引号 \"、换行\n和 $() 的完整 Prompt"
+class _Proc:
+    returncode = 0
+    stdout = ""
+    stderr = ""
 
 
-def test_codex_rejects_multiple_new_images_as_ambiguous(tmp_path, monkeypatch):
-    first = tmp_path / "first.png"
-    second = tmp_path / "second.png"
-    first.write_bytes(_PNG_1PX)
-    second.write_bytes(_PNG_1PX + b"different-image-content")
-    prompt = tmp_path / "image_prompt.txt"
-    prompt.write_text("test", encoding="utf-8")
-
-    class Proc:
-        returncode = 0
-        stdout = ""
-        stderr = ""
-
-    gen = CodexImageGenerator(codex_path="codex-test")
-    monkeypatch.setattr(gen, "health_check", lambda: (True, "ok"))
-    monkeypatch.setattr(gen, "_snapshot", lambda: {})
-    monkeypatch.setattr(gen, "_scan_new", lambda before: [first, second])
-    monkeypatch.setattr("app.image.codex_generator._run_codex_process", lambda *a, **k: Proc())
-
-    result = gen.generate(prompt, tmp_path / "daily_image.png")
-
-    assert result.success is False
-    assert result.detail["stage"] == "ambiguous"
-    assert not (tmp_path / "daily_image.png").exists()
-
-
-def test_codex_selects_latest_image_from_same_execution(tmp_path, monkeypatch):
+def _codex_test_generator(tmp_path, monkeypatch) -> tuple[CodexImageGenerator, Path]:
     generated_root = tmp_path / "generated_images"
-    execution_dir = generated_root / "execution-1"
-    execution_dir.mkdir(parents=True)
-    first = execution_dir / "first.png"
-    second = execution_dir / "second.png"
-    first.write_bytes(_PNG_1PX)
-    second.write_bytes(_PNG_1PX + b"different-image-content")
-    os.utime(first, (1, 1))
-    os.utime(second, (2, 2))
-    prompt = tmp_path / "image_prompt.txt"
-    prompt.write_text("test", encoding="utf-8")
-
-    class Proc:
-        returncode = 0
-        stdout = ""
-        stderr = ""
-
-    gen = CodexImageGenerator(
+    generated_root.mkdir(exist_ok=True)
+    prompt = tmp_path / "task" / "image_prompt.txt"
+    prompt.parent.mkdir(exist_ok=True)
+    prompt.write_text("包含引号 \"、换行\n和 $() 的完整 Prompt", encoding="utf-8")
+    generator = CodexImageGenerator(
         codex_path="codex-test",
         generated_images_dir=str(generated_root),
     )
-    monkeypatch.setattr(gen, "health_check", lambda: (True, "ok"))
-    monkeypatch.setattr(gen, "_snapshot", lambda: {})
-    monkeypatch.setattr(gen, "_scan_new", lambda before: [first, second])
-    monkeypatch.setattr("app.image.codex_generator._run_codex_process", lambda *a, **k: Proc())
-
-    output = tmp_path / "daily_image.png"
-    result = gen.generate(prompt, output)
-
-    assert result.success is True
-    assert output.exists()
-    assert result.detail["source"] == str(second.resolve())
-    assert result.detail["candidate_count"] == 2
-    assert result.detail["candidate_selection"] == "latest_same_execution"
+    monkeypatch.setattr(generator, "health_check", lambda: (True, "ok"))
+    monkeypatch.setattr(codex_generator, "_RECOVERY_POLL_ROUNDS", 0)
+    return generator, prompt
 
 
-def test_codex_deduplicates_identical_image_copies(tmp_path, monkeypatch):
-    first = tmp_path / "generated-home.png"
-    second = tmp_path / "task-copy.png"
-    first.write_bytes(_PNG_1PX)
-    second.write_bytes(_PNG_1PX)
-    prompt = tmp_path / "image_prompt.txt"
-    prompt.write_text("test", encoding="utf-8")
+def _attempt_paths(command: list[str]) -> tuple[Path, Path]:
+    result_path = Path(command[command.index("--output-last-message") + 1])
+    staging_path = result_path.with_name(result_path.name.replace(".result.json", ".png"))
+    return staging_path, result_path
 
-    class Proc:
-        returncode = 0
-        stdout = ""
-        stderr = ""
 
-    gen = CodexImageGenerator(codex_path="codex-test")
-    monkeypatch.setattr(gen, "health_check", lambda: (True, "ok"))
-    monkeypatch.setattr(gen, "_snapshot", lambda: {})
-    monkeypatch.setattr(gen, "_scan_new", lambda before: [first, second])
-    monkeypatch.setattr("app.image.codex_generator._run_codex_process", lambda *a, **k: Proc())
+def test_codex_prompt_uses_stdin_and_explicit_output_contract(tmp_path, monkeypatch):
+    generator, prompt = _codex_test_generator(tmp_path, monkeypatch)
+    captured = {}
 
-    output = tmp_path / "daily_image.png"
-    result = gen.generate(prompt, output)
+    def fake_run(command, **kwargs):
+        captured["command"] = command
+        captured["input"] = kwargs["input"]
+        staging, result_path = _attempt_paths(command)
+        staging.write_bytes(_PNG_1PX)
+        result_path.write_text(json.dumps({"image_path": str(staging)}), encoding="utf-8")
+        return _Proc()
+
+    monkeypatch.setattr(codex_generator, "_run_codex_process", fake_run)
+    output = prompt.parent / "daily_image.png"
+    result = generator.generate(prompt, output)
 
     assert result.success is True
-    assert output.exists()
-    assert result.detail["format"] == "png"
-    assert result.detail["width"] == 1
-    assert result.detail["height"] == 1
+    assert "--output-schema" in captured["command"]
+    assert "--output-last-message" in captured["command"]
+    assert captured["command"][-1] == "-"
+    assert "包含引号" not in " ".join(captured["command"])
+    assert "包含引号" in captured["input"]
+    assert result.detail["attempt_count"] == 1
+    assert result.detail["recovery_status"] == "completed"
+
+
+def test_codex_stdout_old_paths_are_not_candidates_and_retry_once(tmp_path, monkeypatch):
+    generator, prompt = _codex_test_generator(tmp_path, monkeypatch)
+    old = tmp_path / "generated_images" / "old.png"
+    old.write_bytes(_PNG_1PX)
+    calls = []
+
+    class Proc(_Proc):
+        stdout = json.dumps({"message": f"existing image {old}"})
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        return Proc()
+
+    monkeypatch.setattr(codex_generator, "_run_codex_process", fake_run)
+    result = generator.generate(prompt, prompt.parent / "daily_image.png")
+
+    assert result.success is False
+    assert len(calls) == 2
+    assert result.detail["attempt_count"] == 2
+    assert result.detail["candidate_diagnostics"] == []
+
+
+def test_codex_rejects_structured_path_outside_allowed_roots(tmp_path, monkeypatch):
+    generator, prompt = _codex_test_generator(tmp_path, monkeypatch)
+    outside = tmp_path / "outside.png"
+    outside.write_bytes(_PNG_1PX)
+    calls = 0
+
+    def fake_run(command, **kwargs):
+        nonlocal calls
+        calls += 1
+        _, result_path = _attempt_paths(command)
+        result_path.write_text(json.dumps({"image_path": str(outside)}), encoding="utf-8")
+        return _Proc()
+
+    monkeypatch.setattr(codex_generator, "_run_codex_process", fake_run)
+    result = generator.generate(prompt, prompt.parent / "daily_image.png")
+
+    assert result.success is False
+    assert calls == 2
+    assert result.detail["candidate_diagnostics"] == []
+
+
+def test_codex_does_not_guess_between_different_images(tmp_path, monkeypatch):
+    generator, prompt = _codex_test_generator(tmp_path, monkeypatch)
+    calls = 0
+
+    def fake_run(command, **kwargs):
+        nonlocal calls
+        calls += 1
+        execution = tmp_path / "generated_images" / f"execution-{calls}"
+        execution.mkdir()
+        (execution / "first.png").write_bytes(_PNG_1PX + bytes([calls]))
+        (execution / "second.png").write_bytes(_PNG_1PX + b"different" + bytes([calls]))
+        return _Proc()
+
+    monkeypatch.setattr(codex_generator, "_run_codex_process", fake_run)
+    result = generator.generate(prompt, prompt.parent / "daily_image.png")
+
+    assert result.success is False
+    assert calls == 2
+    assert result.detail["stage"] == "ambiguous"
+    assert len(result.detail["candidate_diagnostics"]) == 2
+
+
+def test_codex_deduplicates_staging_and_generated_copy_by_hash(tmp_path, monkeypatch):
+    generator, prompt = _codex_test_generator(tmp_path, monkeypatch)
+
+    def fake_run(command, **kwargs):
+        staging, result_path = _attempt_paths(command)
+        generated = tmp_path / "generated_images" / "execution-1" / "final.png"
+        generated.parent.mkdir()
+        generated.write_bytes(_PNG_1PX)
+        staging.write_bytes(_PNG_1PX)
+        result_path.write_text(json.dumps({"image_path": str(generated)}), encoding="utf-8")
+        return _Proc()
+
+    monkeypatch.setattr(codex_generator, "_run_codex_process", fake_run)
+    result = generator.generate(prompt, prompt.parent / "daily_image.png")
+
+    assert result.success is True
+    assert len(result.detail["candidate_diagnostics"]) == 1
+    assert result.detail["candidate_diagnostics"][0]["sources"] == ["staging", "structured", "scan"]
+
+
+def test_codex_recovers_single_staged_image_after_timeout(tmp_path, monkeypatch):
+    generator, prompt = _codex_test_generator(tmp_path, monkeypatch)
+    calls = 0
+
+    def fake_run(command, **kwargs):
+        nonlocal calls
+        calls += 1
+        staging, _ = _attempt_paths(command)
+        staging.write_bytes(_PNG_1PX)
+        raise subprocess.TimeoutExpired(command, generator.timeout)
+
+    monkeypatch.setattr(codex_generator, "_run_codex_process", fake_run)
+    result = generator.generate(prompt, prompt.parent / "daily_image.png")
+
+    assert result.success is True
+    assert calls == 1
+    assert result.detail["attempt_count"] == 1
+    assert result.detail["recovery_status"] == "recovered_after_timeout"
+
+
+def test_codex_retry_budget_survives_next_call(tmp_path, monkeypatch):
+    generator, prompt = _codex_test_generator(tmp_path, monkeypatch)
+    calls = 0
+
+    def fake_run(command, **kwargs):
+        nonlocal calls
+        calls += 1
+        return _Proc()
+
+    monkeypatch.setattr(codex_generator, "_run_codex_process", fake_run)
+    first = generator.generate(prompt, prompt.parent / "daily_image.png")
+    second = generator.generate(prompt, prompt.parent / "daily_image.png")
+    manifest = json.loads((prompt.parent / ".codex-image-attempt.json").read_text(encoding="utf-8"))
+
+    assert first.success is False
+    assert second.success is False
+    assert calls == 2
+    assert manifest["state"] == "exhausted"
+    assert "包含引号" not in json.dumps(manifest, ensure_ascii=False)
+
+
+def test_codex_recovers_interrupted_attempt_before_new_process(tmp_path, monkeypatch):
+    generator, prompt = _codex_test_generator(tmp_path, monkeypatch)
+    attempt = generator._new_attempt(prompt.parent, 1, [])
+    Path(attempt["staging_path"]).write_bytes(_PNG_1PX)
+    generator._write_attempt_manifest(prompt.parent / ".codex-image-attempt.json", attempt)
+    monkeypatch.setattr(
+        codex_generator,
+        "_run_codex_process",
+        lambda *args, **kwargs: pytest.fail("已恢复中断产物，不应启动新进程"),
+    )
+
+    result = generator.generate(prompt, prompt.parent / "daily_image.png")
+
+    assert result.success is True
+    assert result.detail["recovery_status"] == "recovered_after_interruption"
 
 
 def test_codex_rejects_corrupt_image_without_overwriting_existing(tmp_path, monkeypatch):
-    corrupt = tmp_path / "corrupt.png"
-    corrupt.write_bytes(b"not-an-image")
-    output = tmp_path / "daily_image.png"
+    generator, prompt = _codex_test_generator(tmp_path, monkeypatch)
+    output = prompt.parent / "daily_image.png"
     output.write_bytes(_PNG_1PX)
     original = output.read_bytes()
-    prompt = tmp_path / "image_prompt.txt"
-    prompt.write_text("test", encoding="utf-8")
 
-    class Proc:
-        returncode = 0
-        stdout = ""
-        stderr = ""
+    def fake_run(command, **kwargs):
+        staging, _ = _attempt_paths(command)
+        staging.write_bytes(b"not-an-image")
+        return _Proc()
 
-    gen = CodexImageGenerator(codex_path="codex-test")
-    monkeypatch.setattr(gen, "health_check", lambda: (True, "ok"))
-    monkeypatch.setattr(gen, "_snapshot", lambda: {})
-    monkeypatch.setattr(gen, "_scan_new", lambda before: [corrupt])
-    monkeypatch.setattr("app.image.codex_generator._run_codex_process", lambda *a, **k: Proc())
-
-    result = gen.generate(prompt, output)
+    monkeypatch.setattr(codex_generator, "_run_codex_process", fake_run)
+    result = generator.generate(prompt, output)
 
     assert result.success is False
     assert output.read_bytes() == original

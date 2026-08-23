@@ -127,9 +127,8 @@ def _run_locked(settings: Settings, run_date: date, *, skip_email: bool) -> dict
         except Exception as exc:
             state_store.update(
                 run_date_text,
-                generation_completed_at=_now_iso(),
-                generation_status="failed",
-                generation_hold=False,
+                generation_status="interrupted",
+                generation_hold=True,
                 generation_error=str(exc)[:300],
             )
             raise

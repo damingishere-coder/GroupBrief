@@ -80,7 +80,7 @@ class Settings(BaseSettings):
     codex_path: str = ""
     # Codex 用户目录；认证与 generated_images 必须来自同一目录。
     codex_home: str = ""
-    codex_timeout_seconds: int = 600
+    codex_timeout_seconds: int = 1200
     codex_generated_images_dir: str = ""  # 留空时默认 ~/.codex/generated_images
 
     # 微信发送（V2）。默认适配微信 4.1.x 的 Windows 键盘/剪贴板/OCR 驱动；

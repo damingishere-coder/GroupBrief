@@ -146,6 +146,24 @@ def _migrate_codex_summary_defaults() -> None:
         session.commit()
 
 
+def _migrate_codex_image_timeout_default() -> None:
+    """一次性把旧 Codex 生图默认超时 600 秒升级为 1200 秒。
+
+    只迁移项目历史默认值；用户主动设置的任何其他值都保持不变。迁移标记
+    保证用户以后即使主动改回 600 秒，也不会在重启后再次被覆盖。
+    """
+    marker = "migration_codex_image_timeout_1200_v1"
+    with Session(engine) as session:
+        if session.get(Setting, marker) is not None:
+            return
+        timeout_setting = session.get(Setting, "codex_timeout_seconds")
+        if timeout_setting is not None and timeout_setting.value.strip() == "600":
+            timeout_setting.value = "1200"
+            session.add(timeout_setting)
+        session.add(Setting(key=marker, value="done"))
+        session.commit()
+
+
 def init_db(settings: Settings) -> Any:
     """初始化 SQLite 引擎并建表。"""
     global engine
@@ -161,6 +179,7 @@ def init_db(settings: Settings) -> Any:
     # 先种默认值再迁移，确保旧 .env 中的 deepseek-chat / 12000 也会升级。
     _migrate_parallel_summary_defaults()
     _migrate_codex_summary_defaults()
+    _migrate_codex_image_timeout_default()
     _migrate_daily_schedule_defaults()
     _migrate_daily_schedule_0015()
     apply_db_settings(settings)

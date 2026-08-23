@@ -5,6 +5,7 @@ from sqlmodel import Session, SQLModel, select
 
 from app.db import repository as repo
 from app.db.models import Group, Setting
+from app.config.settings import Settings
 
 
 def test_group_prompt_and_wechat_columns_migrate_idempotently_with_safe_defaults(tmp_path, monkeypatch):
@@ -157,3 +158,35 @@ def test_daily_schedule_defaults_migrate_once_without_overwriting_custom(tmp_pat
     with Session(engine) as session:
         assert session.get(Setting, "schedule_generate_time").value == "00:01"
         assert session.exec(select(Group).where(Group.display_name == "旧默认群")).one().send_time == "00:01"
+
+
+def test_codex_image_timeout_default_and_migration_are_safe(tmp_path, monkeypatch):
+    assert Settings(_env_file=None).codex_timeout_seconds == 1200
+
+    legacy_engine = create_engine(f"sqlite:///{tmp_path / 'legacy-timeout.db'}")
+    SQLModel.metadata.create_all(legacy_engine)
+    monkeypatch.setattr(repo, "engine", legacy_engine)
+    with Session(legacy_engine) as session:
+        session.add(Setting(key="codex_timeout_seconds", value="600"))
+        session.commit()
+
+    repo._migrate_codex_image_timeout_default()
+    with Session(legacy_engine) as session:
+        assert session.get(Setting, "codex_timeout_seconds").value == "1200"
+        assert session.get(Setting, "migration_codex_image_timeout_1200_v1").value == "done"
+        # 迁移完成后用户主动改回 600，下一次启动不得再覆盖。
+        session.get(Setting, "codex_timeout_seconds").value = "600"
+        session.commit()
+    repo._migrate_codex_image_timeout_default()
+    with Session(legacy_engine) as session:
+        assert session.get(Setting, "codex_timeout_seconds").value == "600"
+
+    custom_engine = create_engine(f"sqlite:///{tmp_path / 'custom-timeout.db'}")
+    SQLModel.metadata.create_all(custom_engine)
+    monkeypatch.setattr(repo, "engine", custom_engine)
+    with Session(custom_engine) as session:
+        session.add(Setting(key="codex_timeout_seconds", value="900"))
+        session.commit()
+    repo._migrate_codex_image_timeout_default()
+    with Session(custom_engine) as session:
+        assert session.get(Setting, "codex_timeout_seconds").value == "900"

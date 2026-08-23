@@ -130,6 +130,7 @@ class ImageJob:
                 "success": False,
                 "detail": result.error,
                 "error_type": IMAGE_GENERATION_FAILED,
+                "generator_detail": result.detail or {},
             }
         ok, detail = verify_image(self.output_path)
         if not ok:
@@ -146,6 +147,7 @@ class ImageJob:
             "success": True,
             "detail": f"图片已落盘：{self.output_path}",
             "error_type": "",
+            "generator_detail": result.detail or {},
         }
 
 

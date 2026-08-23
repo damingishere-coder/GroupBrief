@@ -11,7 +11,6 @@ import ctypes
 import hashlib
 import json
 import os
-import re
 import signal
 import shutil
 import subprocess
@@ -20,7 +19,7 @@ import time
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator
+from typing import Callable, Iterator
 
 from app.config.settings import Settings, get_settings
 from app.core.logging import get_logger
@@ -30,7 +29,10 @@ logger = get_logger("groupbrief.image")
 
 _IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff"}
 _POLL_INTERVAL = 0.5
-_MAX_POLL_ROUNDS = 20
+_RECOVERY_POLL_ROUNDS = 30
+_MAX_ATTEMPTS = 2
+_ATTEMPT_MANIFEST = ".codex-image-attempt.json"
+_RESULT_SCHEMA = Path(__file__).with_name("codex_image_result.schema.json")
 _PROCESS_IMAGE_LOCK = threading.Lock()
 _MUTEX_NAME = "Local\\GroupBrief.CodexImagegen"
 _WAIT_OBJECT_0 = 0
@@ -70,6 +72,7 @@ def _run_codex_process(
     cwd: str,
     input: str,
     env: dict[str, str],
+    on_start: Callable[[int], None] | None = None,
 ) -> subprocess.CompletedProcess:
     """运行 Codex；超时时先杀进程树，再回收管道并抛出 TimeoutExpired。"""
     popen_kwargs: dict = {
@@ -87,6 +90,16 @@ def _run_codex_process(
     else:
         popen_kwargs["start_new_session"] = True
     process = subprocess.Popen(command, **popen_kwargs)
+    if on_start is not None:
+        try:
+            on_start(process.pid)
+        except Exception:
+            _terminate_process_tree(process)
+            try:
+                process.communicate(timeout=5)
+            except (subprocess.TimeoutExpired, OSError):
+                pass
+            raise
     try:
         stdout, stderr = process.communicate(input=input, timeout=timeout)
     except subprocess.TimeoutExpired:
@@ -222,7 +235,7 @@ class CodexImageGenerator:
 
     def generate(self, prompt_file: Path, output_path: Path) -> ImageTaskResult:
         try:
-            with _imagegen_mutex(self.timeout + 30):
+            with _imagegen_mutex((self.timeout * _MAX_ATTEMPTS) + 60):
                 return self._generate_locked(Path(prompt_file), Path(output_path))
         except TimeoutError as exc:
             return ImageTaskResult(False, error=str(exc), detail={"stage": "mutex"})
@@ -237,75 +250,197 @@ class CodexImageGenerator:
         if not prompt_file.exists():
             return ImageTaskResult(False, error=f"image_prompt.txt 不存在：{prompt_file}", detail={"stage": "input"})
 
-        before = self._snapshot()
         try:
             prompt_text = prompt_file.read_text(encoding="utf-8")
-            command = self._build_command()
-            logger.info("调用 Codex $imagegen：%s", " ".join(command)[:240])
-            environment = os.environ.copy()
-            environment["CODEX_HOME"] = str(self.codex_home)
-            proc = _run_codex_process(
-                command,
-                timeout=self.timeout,
-                cwd=str(prompt_file.parent),
-                input=f"$imagegen {prompt_text}",
-                env=environment,
-            )
-            logger.info("codex 退出码=%s", proc.returncode)
-            if proc.returncode != 0:
-                detail_text = (proc.stderr or proc.stdout or "")[-500:]
+        except (OSError, UnicodeError) as exc:
+            return ImageTaskResult(False, error=f"无法读取 image_prompt.txt：{exc}", detail={"stage": "input"})
+
+        task_dir = prompt_file.parent.resolve()
+        output_path = output_path.resolve()
+        manifest_path = task_dir / _ATTEMPT_MANIFEST
+        history: list[dict] = []
+        next_attempt = 1
+
+        previous = self._load_attempt_manifest(manifest_path)
+        if previous:
+            history = list(previous.get("attempt_history") or [])
+            previous_number = self._safe_attempt_number(previous.get("attempt_number"))
+            if previous.get("state") == "exhausted":
+                return self._attempts_exhausted_result(previous_number, history, previous)
+            if previous.get("state") == "blocked_process":
                 return ImageTaskResult(
                     False,
-                    error=f"codex 退出码 {proc.returncode}：{detail_text}",
-                    detail={"stage": "exec", "outcome_unknown": False},
+                    error="上次 Codex 生图进程仍未确认结束，禁止启动新尝试",
+                    detail={
+                        "stage": "resume",
+                        "outcome_unknown": True,
+                        "attempt_count": previous_number,
+                        "recovery_status": "timeout_process_still_running",
+                        "candidate_diagnostics": previous.get("candidate_diagnostics") or [],
+                        "attempts": history,
+                    },
                 )
-        except FileNotFoundError as exc:
-            return ImageTaskResult(False, error=f"无法启动 codex：{exc}", detail={"stage": "exec"})
-        except subprocess.TimeoutExpired:
-            return ImageTaskResult(
-                False,
-                error=f"codex 超时（>{self.timeout}s）；结果未知，禁止自动重试",
-                detail={"stage": "exec", "outcome_unknown": True},
-            )
-        except Exception as exc:
-            logger.exception("调用 codex 异常")
-            return ImageTaskResult(False, error=str(exc)[:300], detail={"stage": "exec"})
+            if previous.get("state") == "retrying":
+                next_attempt = previous_number + 1
+            if previous.get("state") == "running":
+                source, diagnostics, reason = self._reconcile_attempt(previous, task_dir)
+                recovered_history = [
+                    *history,
+                    self._attempt_audit(previous, "interrupted", reason, diagnostics),
+                ]
+                recovered = self._promote_recovered_candidate(
+                    source,
+                    output_path,
+                    recovery_status="recovered_after_interruption",
+                    attempt_number=previous_number,
+                    diagnostics=diagnostics,
+                    attempts=recovered_history,
+                    manifest_path=manifest_path,
+                    attempt=previous,
+                )
+                if recovered is not None:
+                    return recovered
+                if not self._ensure_recorded_process_stopped(previous):
+                    return ImageTaskResult(
+                        False,
+                        error="上次 Codex 生图进程仍未确认结束，已停止自动重试",
+                        detail={
+                            "stage": "resume",
+                            "outcome_unknown": True,
+                            "attempt_count": previous_number,
+                            "recovery_status": "interrupted_process_still_running",
+                            "candidate_diagnostics": diagnostics,
+                            "attempts": history,
+                        },
+                    )
+                history = recovered_history
+                next_attempt = previous_number + 1
 
-        structured = self._structured_candidates(proc.stdout or "", prompt_file.parent, before)
-        scanned = self._scan_new(before)
-        candidates = self._unique_candidates([*structured, *scanned], before)
-        if not candidates:
-            return ImageTaskResult(
-                False,
-                error="codex 执行完成但未发现本次生成的新图片",
-                detail={"stage": "save"},
-            )
-        source = self._select_same_execution_candidate(candidates)
-        if source is None:
-            return ImageTaskResult(
-                False,
-                error=f"本次发现 {len(candidates)} 张新图片，无法唯一归属，已停止接管",
-                detail={"stage": "ambiguous", "candidates": [str(path) for path in candidates]},
-            )
+        environment = os.environ.copy()
+        environment["CODEX_HOME"] = str(self.codex_home)
+        last_reason = ""
+        last_diagnostics: list[dict] = []
 
-        try:
-            image_detail = self._promote_valid_image(source, output_path)
-        except Exception as exc:
-            return ImageTaskResult(False, error=f"图片验证或原子落盘失败：{exc}", detail={"stage": "copy"})
-        # 仅项目 output 内的正式/烟测产物可更新健康标记，避免单元测试或
-        # 临时目录里的模拟图片被误报为真实图片能力实测。
-        if self._is_project_output(output_path):
-            self._save_last_smoke(source, output_path, image_detail)
+        for attempt_number in range(next_attempt, _MAX_ATTEMPTS + 1):
+            attempt = self._new_attempt(task_dir, attempt_number, history)
+            self._write_attempt_manifest(manifest_path, attempt)
+            command = self._build_command(Path(attempt["result_path"]))
+            logger.info(
+                "调用 Codex $imagegen：attempt=%d/%d id=%s",
+                attempt_number,
+                _MAX_ATTEMPTS,
+                attempt["attempt_id"],
+            )
+            outcome = "completed"
+            exit_code: int | None = None
+            try:
+                proc = _run_codex_process(
+                    command,
+                    timeout=self.timeout,
+                    cwd=str(task_dir),
+                    input=self._attempt_prompt(prompt_text, Path(attempt["staging_path"])),
+                    env=environment,
+                    on_start=lambda pid, record=attempt: self._record_attempt_pid(
+                        manifest_path, record, pid
+                    ),
+                )
+                exit_code = int(proc.returncode)
+                if proc.returncode != 0:
+                    outcome = "nonzero_exit"
+            except FileNotFoundError:
+                outcome = "start_failed"
+            except subprocess.TimeoutExpired:
+                outcome = "timeout"
+            except Exception:
+                logger.exception("调用 codex 异常")
+                outcome = "exec_error"
+
+            source, diagnostics, reason = self._reconcile_attempt(attempt, task_dir)
+            last_reason = reason
+            last_diagnostics = diagnostics
+            recovery_status = {
+                "timeout": "recovered_after_timeout",
+                "nonzero_exit": "recovered_after_nonzero_exit",
+                "completed": "completed",
+            }.get(outcome, "recovered_after_exec_error")
+            recovered = self._promote_recovered_candidate(
+                source,
+                output_path,
+                recovery_status=recovery_status,
+                attempt_number=attempt_number,
+                diagnostics=diagnostics,
+                attempts=history,
+                manifest_path=manifest_path,
+                attempt=attempt,
+            )
+            audit = self._attempt_audit(attempt, outcome, reason, diagnostics, exit_code)
+            history.append(audit)
+            if recovered is not None:
+                recovered.detail["attempts"] = history
+                return recovered
+            if source is not None:
+                reason = "唯一候选未通过完整图片验证"
+                last_reason = reason
+                audit["recovery_reason"] = reason
+
+            if outcome == "timeout" and not self._ensure_recorded_process_stopped(attempt):
+                reason = "超时进程树未确认结束，禁止启动重试"
+                audit["recovery_reason"] = reason
+                attempt.update(
+                    state="blocked_process",
+                    finished_at=datetime_now_iso(),
+                    outcome=outcome,
+                    recovery_reason=reason,
+                    attempt_history=history,
+                    candidate_diagnostics=diagnostics,
+                )
+                self._write_attempt_manifest(manifest_path, attempt)
+                return ImageTaskResult(
+                    False,
+                    error="Codex 超时进程树未确认结束，已禁止自动重试",
+                    detail={
+                        "stage": "exec",
+                        "outcome_unknown": True,
+                        "attempt_count": attempt_number,
+                        "recovery_status": "timeout_process_still_running",
+                        "candidate_diagnostics": diagnostics,
+                        "attempts": history,
+                    },
+                )
+
+            attempt.update(
+                state="retrying" if attempt_number < _MAX_ATTEMPTS else "exhausted",
+                finished_at=datetime_now_iso(),
+                outcome=outcome,
+                exit_code=exit_code,
+                recovery_reason=reason,
+                attempt_history=history,
+                candidate_diagnostics=diagnostics,
+            )
+            self._write_attempt_manifest(manifest_path, attempt)
+            self._cleanup_attempt_files(attempt)
+            if attempt_number < _MAX_ATTEMPTS:
+                logger.warning(
+                    "Codex 生图第 %d 次尝试未获得唯一图片，将进行最后一次重试：%s",
+                    attempt_number,
+                    reason,
+                )
+
+        error = (
+            f"Codex 生图两次尝试后仍无法认领唯一图片：{last_reason}"
+            if last_reason
+            else "Codex 生图两次尝试后仍失败"
+        )
         return ImageTaskResult(
-            True,
-            image_path=output_path,
+            False,
+            error=error,
             detail={
-                "source": str(source),
-                "candidate_count": len(candidates),
-                "candidate_selection": (
-                    "latest_same_execution" if len(candidates) > 1 else "single"
-                ),
-                **image_detail,
+                "stage": "ambiguous" if len(last_diagnostics) > 1 else "save",
+                "outcome_unknown": False,
+                "attempt_count": min(max(len(history), 1), _MAX_ATTEMPTS),
+                "recovery_status": "retry_exhausted",
+                "candidate_diagnostics": last_diagnostics,
+                "attempts": history,
             },
         )
 
@@ -322,7 +457,7 @@ class CodexImageGenerator:
         self._resolved_binary = resolved or ""
         return self._resolved_binary
 
-    def _build_command(self) -> list[str]:
+    def _build_command(self, result_path: Path) -> list[str]:
         return [
             self._resolve_binary() or self.codex_path,
             "exec",
@@ -332,148 +467,360 @@ class CodexImageGenerator:
             "workspace-write",
             "--skip-git-repo-check",
             "--ephemeral",
+            "--output-schema",
+            str(_RESULT_SCHEMA.resolve()),
+            "--output-last-message",
+            str(result_path.resolve()),
             "--json",
             "-",
         ]
 
-    def _snapshot(self) -> dict[str, float]:
-        result: dict[str, float] = {}
-        if not self.generated_images_dir.exists():
-            return result
-        for path in self.generated_images_dir.rglob("*"):
-            if not path.is_file() or path.suffix.lower() not in _IMAGE_EXTENSIONS:
+    @staticmethod
+    def _safe_attempt_number(value: object) -> int:
+        try:
+            return min(max(int(value), 1), _MAX_ATTEMPTS)
+        except (TypeError, ValueError):
+            return 1
+
+    @staticmethod
+    def _attempt_prompt(prompt_text: str, staging_path: Path) -> str:
+        return (
+            "$imagegen " + prompt_text + "\n\n"
+            "只为本次任务生成一张最终图片。不要读取、引用或复用任何已有图片。"
+            f"完成后把最终图片复制到这个精确路径：{staging_path.resolve()}。"
+            "最终回复必须严格符合 output schema，并在 image_path 中返回该最终图片路径。"
+        )
+
+    def _new_attempt(self, task_dir: Path, attempt_number: int, history: list[dict]) -> dict:
+        attempt_id = uuid.uuid4().hex
+        return {
+            "version": 1,
+            "state": "running",
+            "attempt_id": attempt_id,
+            "attempt_number": attempt_number,
+            "started_at": datetime_now_iso(),
+            "pid": None,
+            "staging_path": str(task_dir / f".codex-image-{attempt_id}.png"),
+            "result_path": str(task_dir / f".codex-image-{attempt_id}.result.json"),
+            "before": self._snapshot(task_dir),
+            "attempt_history": list(history),
+        }
+
+    @staticmethod
+    def _write_attempt_manifest(path: Path, payload: dict) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp = path.with_suffix(f".json.{uuid.uuid4().hex}.tmp")
+        try:
+            temp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            os.replace(temp, path)
+        finally:
+            temp.unlink(missing_ok=True)
+
+    @staticmethod
+    def _load_attempt_manifest(path: Path) -> dict | None:
+        try:
+            parsed = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(parsed, dict) and parsed.get("attempt_id"):
+                return parsed
+        except (OSError, json.JSONDecodeError):
+            return None
+        return None
+
+    def _record_attempt_pid(self, manifest_path: Path, attempt: dict, pid: int) -> None:
+        attempt["pid"] = int(pid)
+        self._write_attempt_manifest(manifest_path, attempt)
+
+    def _snapshot(self, task_dir: Path) -> dict[str, dict[str, int]]:
+        result: dict[str, dict[str, int]] = {}
+        roots = (("task", task_dir.resolve()), ("generated_images", self.generated_images_dir.resolve()))
+        for label, root in roots:
+            if not root.is_dir():
                 continue
-            try:
-                result[str(path.resolve())] = path.stat().st_mtime
-            except OSError:
-                continue
+            for path in root.rglob("*"):
+                if not path.is_file() or path.suffix.lower() not in _IMAGE_EXTENSIONS:
+                    continue
+                try:
+                    relative = path.resolve().relative_to(root).as_posix()
+                    stat = path.stat()
+                except (OSError, ValueError):
+                    continue
+                result[f"{label}:{relative}"] = {
+                    "mtime_ns": int(stat.st_mtime_ns),
+                    "size": int(stat.st_size),
+                }
         return result
 
-    def _scan_new(self, before: dict[str, float]) -> list[Path]:
-        """等待进程退出后的图片落盘，并多观察一轮以捕获多图歧义。"""
-        found: list[Path] = []
-        for _ in range(_MAX_POLL_ROUNDS):
-            current = self._snapshot()
-            found = [
-                Path(path)
-                for path, mtime in current.items()
-                if path not in before or mtime > before[path]
-            ]
-            if found:
-                time.sleep(_POLL_INTERVAL)
-                current = self._snapshot()
-                return [
-                    Path(path)
-                    for path, mtime in current.items()
-                    if path not in before or mtime > before[path]
-                ]
-            time.sleep(_POLL_INTERVAL)
-        return found
-
-    def _structured_candidates(self, stdout: str, cwd: Path, before: dict[str, float]) -> list[Path]:
-        candidates: list[Path] = []
-
-        def inspect(value) -> None:
-            if isinstance(value, dict):
-                for item in value.values():
-                    inspect(item)
-            elif isinstance(value, list):
-                for item in value:
-                    inspect(item)
-            elif isinstance(value, str):
-                candidates.extend(self._paths_from_text(value, cwd))
-
-        for line in stdout.splitlines():
-            try:
-                inspect(json.loads(line))
-            except json.JSONDecodeError:
-                continue
-        return self._unique_candidates(candidates, before)
-
-    @staticmethod
-    def _paths_from_text(value: str, cwd: Path) -> list[Path]:
-        raw_values = [value.strip()]
-        raw_values.extend(
-            match.group(0)
-            for match in re.finditer(
-                r"(?:[A-Za-z]:[\\/]|/)[^\r\n\"']+?\.(?:png|jpe?g|webp|gif|bmp|tiff?)",
-                value,
-                flags=re.IGNORECASE,
-            )
-        )
-        paths: list[Path] = []
-        for raw in raw_values:
-            cleaned = raw.strip().strip("`\"'.,;:()[]{}")
-            if not cleaned or Path(cleaned).suffix.lower() not in _IMAGE_EXTENSIONS:
-                continue
-            candidate = Path(cleaned).expanduser()
-            if not candidate.is_absolute():
-                candidate = cwd / candidate
-            if candidate.is_file():
-                paths.append(candidate.resolve())
-        return paths
-
-    @staticmethod
-    def _unique_candidates(paths: list[Path], before: dict[str, float]) -> list[Path]:
-        unique_paths: dict[str, Path] = {}
-        for path in paths:
-            try:
-                resolved = path.resolve()
-                stat = resolved.stat()
-            except OSError:
-                continue
-            key = str(resolved)
-            if key in before and stat.st_mtime <= before[key]:
-                continue
-            unique_paths[key.lower()] = resolved
-
-        # Codex imagegen 可能把同一产物同时落到 CODEX_HOME/generated_images
-        # 和当前任务目录。内容完全一致时，它们是同一张图的两个路径，不应
-        # 被误判成多图；内容不同的多个候选仍必须失败关闭。
-        unique_content: dict[tuple[int, str], Path] = {}
-        for path in unique_paths.values():
-            try:
-                digest = hashlib.sha256(path.read_bytes()).hexdigest()
-                content_key = (path.stat().st_size, digest)
-            except OSError:
-                continue
-            unique_content.setdefault(content_key, path)
-        return sorted(unique_content.values(), key=lambda item: str(item).lower())
-
-    def _select_same_execution_candidate(self, candidates: list[Path]) -> Path | None:
-        """同一次 Codex 执行产出多张图时取最后一张；跨执行候选仍失败关闭。
-
-        imagegen 的一次 `codex exec` 可能先生成草稿、再生成修订图，两者会落在
-        `generated_images/<execution-id>/` 同一目录。GroupBrief 已持有跨进程生图
-        互斥锁，因此该目录内最后写入的图片可确定归属于当前任务。若候选来自
-        不同 execution 目录或目录结构异常，仍返回 None，避免误认领其他任务。
-        """
-        if not candidates:
-            return None
-        if len(candidates) == 1:
-            return candidates[0]
-
-        execution_dirs: set[str] = set()
-        resolved_candidates: list[Path] = []
-        for candidate in candidates:
-            try:
-                resolved = candidate.resolve()
-                relative = resolved.relative_to(self.generated_images_dir)
-                if len(relative.parts) < 2:
-                    return None
-                execution_dirs.add(relative.parts[0].lower())
-                resolved_candidates.append(resolved)
-            except (OSError, ValueError):
-                return None
-        if len(execution_dirs) != 1:
-            return None
+    def _path_label(self, path: Path, task_dir: Path) -> tuple[str, str] | None:
         try:
-            return max(
-                resolved_candidates,
-                key=lambda item: (item.stat().st_mtime_ns, str(item).lower()),
-            )
+            resolved = path.resolve(strict=True)
         except OSError:
             return None
+        for label, root in (
+            ("task", task_dir.resolve()),
+            ("generated_images", self.generated_images_dir.resolve()),
+        ):
+            try:
+                return label, resolved.relative_to(root).as_posix()
+            except ValueError:
+                continue
+        return None
+
+    def _is_new_candidate(self, path: Path, task_dir: Path, before: dict) -> bool:
+        label = self._path_label(path, task_dir)
+        if label is None or path.suffix.lower() not in _IMAGE_EXTENSIONS:
+            return False
+        try:
+            stat = path.stat()
+        except OSError:
+            return False
+        old = before.get(f"{label[0]}:{label[1]}")
+        return not isinstance(old, dict) or (
+            int(old.get("mtime_ns") or 0) != stat.st_mtime_ns
+            or int(old.get("size") or -1) != stat.st_size
+        )
+
+    def _structured_result_path(self, result_path: Path, task_dir: Path) -> Path | None:
+        try:
+            parsed = json.loads(result_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        if not isinstance(parsed, dict) or set(parsed) != {"image_path"}:
+            return None
+        raw = parsed.get("image_path")
+        if not isinstance(raw, str) or not raw.strip():
+            return None
+        candidate = Path(raw.strip()).expanduser()
+        if not candidate.is_absolute():
+            candidate = task_dir / candidate
+        return candidate
+
+    @staticmethod
+    def _sha256(path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest().upper()
+
+    def _candidate_records(self, attempt: dict, task_dir: Path) -> list[tuple[Path, dict]]:
+        before = attempt.get("before") if isinstance(attempt.get("before"), dict) else {}
+        staging_path = Path(str(attempt.get("staging_path") or ""))
+        result_path = Path(str(attempt.get("result_path") or ""))
+        paths: list[tuple[Path, str]] = []
+        if self._is_new_candidate(staging_path, task_dir, before):
+            paths.append((staging_path, "staging"))
+        structured = self._structured_result_path(result_path, task_dir)
+        if structured is not None and self._is_new_candidate(structured, task_dir, before):
+            paths.append((structured, "structured"))
+        current = self._snapshot(task_dir)
+        for key, meta in current.items():
+            old = before.get(key)
+            if isinstance(old, dict) and old == meta:
+                continue
+            label, relative = key.split(":", 1)
+            root = task_dir if label == "task" else self.generated_images_dir
+            paths.append((root / Path(relative), "scan"))
+
+        by_hash: dict[tuple[int, str], tuple[Path, dict]] = {}
+        priority = {"staging": 0, "structured": 1, "scan": 2}
+        for path, source in paths:
+            label = self._path_label(path, task_dir)
+            if label is None:
+                continue
+            try:
+                stat = path.stat()
+                digest = self._sha256(path)
+            except OSError:
+                continue
+            key = (stat.st_size, digest)
+            record = {
+                "source": source,
+                "sources": [source],
+                "root": label[0],
+                "relative_path": label[1],
+                "mtime_ns": int(stat.st_mtime_ns),
+                "size_bytes": int(stat.st_size),
+                "sha256": digest,
+            }
+            existing = by_hash.get(key)
+            if existing is None:
+                by_hash[key] = (path.resolve(), record)
+                continue
+            existing_path, existing_record = existing
+            sources = set(existing_record.get("sources") or [])
+            sources.add(source)
+            existing_record["sources"] = sorted(sources, key=lambda item: priority[item])
+            if priority[source] < priority[str(existing_record.get("source") or "scan")]:
+                record["sources"] = existing_record["sources"]
+                by_hash[key] = (path.resolve(), record)
+            else:
+                by_hash[key] = (existing_path, existing_record)
+        return sorted(by_hash.values(), key=lambda item: (priority[item[1]["source"]], item[1]["relative_path"]))
+
+    @staticmethod
+    def _select_candidate(records: list[tuple[Path, dict]]) -> tuple[Path | None, str]:
+        if not records:
+            return None, "未发现本次尝试新增或修改的有效候选"
+        staged = [item for item in records if "staging" in item[1].get("sources", [])]
+        if len(staged) == 1:
+            return staged[0][0], "staging 路径唯一"
+        structured = [item for item in records if "structured" in item[1].get("sources", [])]
+        if len(structured) == 1:
+            return structured[0][0], "结构化最终路径唯一"
+        if len(records) == 1:
+            return records[0][0], "本次增量候选唯一"
+        return None, f"发现 {len(records)} 个不同内容候选，无法唯一归属"
+
+    def _reconcile_attempt(self, attempt: dict, task_dir: Path) -> tuple[Path | None, list[dict], str]:
+        last_records: list[tuple[Path, dict]] = []
+        last_reason = ""
+        for round_number in range(_RECOVERY_POLL_ROUNDS + 1):
+            last_records = self._candidate_records(attempt, task_dir)
+            selected, last_reason = self._select_candidate(last_records)
+            if selected is not None:
+                return selected, [record for _, record in last_records], last_reason
+            if round_number < _RECOVERY_POLL_ROUNDS:
+                time.sleep(_POLL_INTERVAL)
+        return None, [record for _, record in last_records], last_reason
+
+    @staticmethod
+    def _attempt_audit(
+        attempt: dict,
+        outcome: str,
+        reason: str,
+        diagnostics: list[dict],
+        exit_code: int | None = None,
+    ) -> dict:
+        return {
+            "attempt_id": str(attempt.get("attempt_id") or ""),
+            "attempt_number": int(attempt.get("attempt_number") or 1),
+            "started_at": str(attempt.get("started_at") or ""),
+            "finished_at": datetime_now_iso(),
+            "outcome": outcome,
+            "exit_code": exit_code,
+            "recovery_reason": reason,
+            "candidate_count": len(diagnostics),
+        }
+
+    def _promote_recovered_candidate(
+        self,
+        source: Path | None,
+        output_path: Path,
+        *,
+        recovery_status: str,
+        attempt_number: int,
+        diagnostics: list[dict],
+        attempts: list[dict],
+        manifest_path: Path,
+        attempt: dict,
+    ) -> ImageTaskResult | None:
+        if source is None:
+            return None
+        try:
+            image_detail = self._promote_valid_image(source, output_path)
+        except Exception:
+            logger.warning("候选图片验证失败，将按有限重试策略继续", exc_info=True)
+            return None
+        if self._is_project_output(output_path):
+            self._save_last_smoke(source, output_path, image_detail)
+        self._cleanup_attempt_files(attempt)
+        manifest_path.unlink(missing_ok=True)
+        return ImageTaskResult(
+            True,
+            image_path=output_path,
+            detail={
+                "attempt_count": attempt_number,
+                "recovery_status": recovery_status,
+                "candidate_diagnostics": diagnostics,
+                "attempts": list(attempts),
+                **image_detail,
+            },
+        )
+
+    @staticmethod
+    def _cleanup_attempt_files(attempt: dict) -> None:
+        for key in ("staging_path", "result_path"):
+            raw = str(attempt.get(key) or "")
+            if raw:
+                try:
+                    Path(raw).unlink(missing_ok=True)
+                except OSError:
+                    pass
+
+    @staticmethod
+    def _pid_is_running(pid: int) -> bool:
+        if pid <= 0:
+            return False
+        if os.name == "nt":
+            from ctypes import wintypes
+
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+            kernel32.OpenProcess.restype = wintypes.HANDLE
+            kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+            kernel32.WaitForSingleObject.restype = wintypes.DWORD
+            kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+            kernel32.CloseHandle.restype = wintypes.BOOL
+            handle = kernel32.OpenProcess(0x100000, False, pid)
+            if not handle:
+                return False
+            try:
+                return kernel32.WaitForSingleObject(handle, 0) == 0x102
+            finally:
+                kernel32.CloseHandle(handle)
+        try:
+            os.kill(pid, 0)
+            return True
+        except OSError:
+            return False
+
+    def _ensure_recorded_process_stopped(self, attempt: dict) -> bool:
+        try:
+            pid = int(attempt.get("pid") or 0)
+        except (TypeError, ValueError):
+            return True
+        if not self._pid_is_running(pid):
+            return True
+        if os.name == "nt":
+            try:
+                subprocess.run(
+                    ["taskkill", "/PID", str(pid), "/T", "/F"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                    timeout=15,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+            except (OSError, subprocess.SubprocessError):
+                return False
+        else:
+            try:
+                os.killpg(pid, signal.SIGKILL)
+            except OSError:
+                pass
+        for _ in range(10):
+            if not self._pid_is_running(pid):
+                return True
+            time.sleep(0.25)
+        return False
+
+    @staticmethod
+    def _attempts_exhausted_result(attempt_number: int, history: list[dict], attempt: dict) -> ImageTaskResult:
+        diagnostics = attempt.get("candidate_diagnostics")
+        if not isinstance(diagnostics, list):
+            diagnostics = []
+        return ImageTaskResult(
+            False,
+            error="本任务的 Codex 生图尝试已耗尽；禁止无限自动重试",
+            detail={
+                "stage": "save",
+                "outcome_unknown": False,
+                "attempt_count": attempt_number,
+                "recovery_status": "retry_exhausted",
+                "candidate_diagnostics": diagnostics,
+                "attempts": history,
+            },
+        )
 
     @staticmethod
     def _promote_valid_image(source: Path, output_path: Path) -> dict:

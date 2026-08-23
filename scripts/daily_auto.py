@@ -67,7 +67,7 @@ def main() -> int:
     )
     log.info("===== 每日自动任务结束：%s =====", result)
     return 0 if result.get("status") in {
-        "success", "partial", "skipped", "already_completed", "already_running"
+        "success", "skipped", "already_completed", "already_running"
     } else 1
 
 
