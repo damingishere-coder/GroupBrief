@@ -1,4 +1,4 @@
-"""有证据、喜剧优先的日报候选主题评分与 2～5 个动态选题。"""
+"""有证据、喜剧优先的日报候选主题评分与 5～7 个高密度动态选题。"""
 
 from __future__ import annotations
 
@@ -7,17 +7,18 @@ from datetime import datetime
 import json
 import math
 import re
+import unicodedata
 from typing import Any, Iterable
 
 from app.services.speaker_identity import build_speaker_stats, speaker_name_sort_key
 
 from app.ai.conversation_segments import ConversationChunk, PromptMessage
 
-TOPIC_SELECTION_VERSION = "3.0"
-MAX_CANDIDATES = 8
+TOPIC_SELECTION_VERSION = "4.0"
+MAX_CANDIDATES = 10
 MIN_SELECTED = 2
-TARGET_SELECTED = 4
-MAX_SELECTED = 5
+TARGET_SELECTED = 5
+MAX_SELECTED = 7
 HIGH_VOLUME_MESSAGE_THRESHOLD = 200
 SELECTION_MIN_SCORE = 60.0
 SELECTION_MAX_GAP = 15.0
@@ -37,11 +38,12 @@ SCORE_WEIGHTS = {
 TOPIC_CANDIDATE_SYSTEM = """你是群聊日报选题编辑。只能基于给定消息或事件卡整理候选主题。
 必须返回一个 JSON 对象，不得输出 Markdown 或解释。候选主题必须引用真实 message_ids，禁止虚构。
 事实真实性是准入门槛；通过真实性校验后，好玩程度是第一排序目标。
-内容充足时输出 8 个候选，证据不足时允许少于 8 个；共享同一核心事实、里程碑或结论的相似话题必须合并，
+内容充足时输出 10 个候选，证据不足时允许少于 10 个；共享同一核心事实、里程碑或结论的相似话题必须合并，
 不得为了凑数把一个事件拆成“发起/回应”或重复角度。
 comedy_score 为 0～40，group_recognition_score 为 0～20，visual_score 为 0～20。
 comedy_angle 说明真实笑点，visual_gag 说明不改变事实的视觉笑点，并给出简短 score_reason。
 为避免响应截断，标题、人物和评分理由必须简洁；summary 必须是一句可直接放进图片的信息，建议不超过 48 个汉字；
+quotes 只能逐字摘录原消息，禁止改写或把摘要伪装成原话；
 每个候选的 message_ids 最多保留 100 条有效证据。"""
 
 _CANDIDATE_SCHEMA = """返回结构：
@@ -52,7 +54,7 @@ _CANDIDATE_SCHEMA = """返回结构：
       "title": "主题短标题",
       "summary": "基于证据的一句事实过程或结论",
       "people": ["真实参与者"],
-      "quotes": ["1-3 条真实原话或忠实缩写"],
+      "quotes": ["1-3 条逐字摘录的真实原话"],
       "start_time": "YYYY-MM-DD HH:MM",
       "end_time": "YYYY-MM-DD HH:MM",
       "message_ids": ["真实消息ID"],
@@ -83,6 +85,7 @@ class TopicEvidence:
     message_id: str
     sender_key: str
     sender_name: str
+    text: str
     timestamp: datetime | None
     source_index: int
 
@@ -99,7 +102,7 @@ def build_direct_candidate_prompt(chunk: ConversationChunk) -> str:
 def build_merged_candidate_prompt(event_cards: Iterable[dict[str, Any]]) -> str:
     return (
         "以下是从多个自然会话片段中提取并校验过 message_ids 的事件卡。"
-        "请语义合并后形成当天最多 8 个候选主题，不得添加卡片之外的事实。\n\n"
+        "请语义合并后形成当天最多 10 个候选主题，不得添加卡片之外的事实。\n\n"
         + _CANDIDATE_SCHEMA
         + "\n\n事件卡：\n"
         + json.dumps({"events": list(event_cards)}, ensure_ascii=False, separators=(",", ":"))
@@ -192,10 +195,57 @@ def _evidence(messages: Iterable[PromptMessage]) -> dict[str, TopicEvidence]:
             message_id=item.message_id,
             sender_key=item.sender_id or item.sender_name or "(未知)",
             sender_name=item.sender_name or "(未知)",
+            text=item.text or "",
             timestamp=item.timestamp,
             source_index=source_index,
         )
     return result
+
+
+_QUOTE_PUNCTUATION_RE = re.compile(r"[\s\u3000，。！？、；：,.!?;:'\"“”‘’（）()【】\[\]《》<>…—\-_]+")
+
+
+def _normalized_quote(value: str) -> str:
+    return _QUOTE_PUNCTUATION_RE.sub("", unicodedata.normalize("NFKC", value or "")).casefold()
+
+
+def _verified_quotes(candidate_quotes: Iterable[str], items: Iterable[TopicEvidence]) -> list[str]:
+    """只保留可从所引消息回查的原话；无有效候选时使用真实原文短句。"""
+    evidence_items = list(items)
+    normalized_messages = [(_normalized_quote(item.text), item.text.strip()) for item in evidence_items]
+    verified: list[str] = []
+    for quote in candidate_quotes:
+        normalized = _normalized_quote(quote)
+        if not normalized:
+            continue
+        if any(normalized in message for message, _ in normalized_messages) and quote not in verified:
+            verified.append(quote.strip())
+        if len(verified) >= 2:
+            break
+    if verified:
+        return verified
+
+    for _, original in normalized_messages:
+        if original:
+            return [original[:80]]
+    return []
+
+
+def _evidence_dialogue(items: Iterable[TopicEvidence]) -> list[dict[str, str]]:
+    """给最终 Prompt 保留小而可核对的原始对话，而不是只有模型二手摘要。"""
+    dialogue: list[dict[str, str]] = []
+    for item in sorted(items, key=lambda evidence_item: evidence_item.source_index)[:8]:
+        text = item.text.strip()
+        if not text:
+            continue
+        dialogue.append(
+            {
+                "message_id": item.message_id,
+                "speaker": item.sender_name,
+                "text": text[:240],
+            }
+        )
+    return dialogue
 
 
 def _resolved_participant_name(value: str) -> bool:
@@ -285,12 +335,22 @@ def score_and_select_topics(
         duration = 0.0
         if len(timestamps) >= 2:
             duration = max(0.0, (max(timestamps) - min(timestamps)).total_seconds() / 60.0)
+        attribution = _participant_attribution(items)
+        verified_quotes = _verified_quotes(candidate.get("quotes", []), items)
+        if not verified_quotes:
+            raise TopicSelectionError(
+                "TOPIC_CANDIDATES_INVALID",
+                f"候选主题“{candidate['title']}”没有可回查的原话证据",
+            )
         metrics.append(
             {
                 **candidate,
                 "message_ids": ids,
+                "people": attribution["participants"],
+                "quotes": verified_quotes,
+                "evidence_dialogue": _evidence_dialogue(items),
                 "evidence_message_count": len(ids),
-                **_participant_attribution(items),
+                **attribution,
                 "duration_minutes": round(duration, 1),
                 "start_time": min(timestamps).strftime("%Y-%m-%d %H:%M") if timestamps else candidate["start_time"],
                 "end_time": max(timestamps).strftime("%Y-%m-%d %H:%M") if timestamps else candidate["end_time"],
@@ -318,11 +378,7 @@ def score_and_select_topics(
     scored.sort(key=lambda item: (-item["scores"]["total"], item["start_time"] or "", item["topic_id"]))
     selected_ids: list[str] = []
     previous_total: float | None = None
-    guaranteed_selected = (
-        MAX_SELECTED
-        if len(evidence) > HIGH_VOLUME_MESSAGE_THRESHOLD and len(scored) >= MAX_SELECTED
-        else min(TARGET_SELECTED, len(scored))
-    )
+    guaranteed_selected = min(TARGET_SELECTED, len(scored))
     for rank, item in enumerate(scored, start=1):
         selected = rank <= guaranteed_selected
         if guaranteed_selected < rank <= MAX_SELECTED:
@@ -370,5 +426,5 @@ def score_and_select_topics(
 def selected_topics_json(selection: dict[str, Any]) -> str:
     selected = [item for item in selection.get("candidates", []) if item.get("selected")]
     if not (MIN_SELECTED <= len(selected) <= MAX_SELECTED):
-        raise TopicSelectionError("TOPIC_CANDIDATES_INSUFFICIENT", "最终入选主题数量不在 2～5 范围")
+        raise TopicSelectionError("TOPIC_CANDIDATES_INSUFFICIENT", "最终入选主题数量不在 2～7 范围")
     return json.dumps({"selected_topics": selected}, ensure_ascii=False, separators=(",", ":"))

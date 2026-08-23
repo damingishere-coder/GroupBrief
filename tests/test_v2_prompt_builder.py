@@ -76,18 +76,25 @@ class FakeDeepSeek:
         self.calls.append((system, user))
         if kwargs.get("response_format") == "json_object":
             matches = list(dict.fromkeys(re.findall(r"消息ID:([^\]#]+)(?:#片段\d+/\d+)?\]", user)))
-            if "可选版式" in user and "已入选主题" in user:
-                topic_ids = list(dict.fromkeys(re.findall(r'"topic_id":"([^"]+)"', user)))
-                history_text = user.split("最近版式历史：", 1)[-1].split("\n可选版式：", 1)[0]
-                layout_id = "comic_strip" if '"layout_id":"hero_cover"' in history_text else "hero_cover"
+            if "可选分镜骨架" in user and "已入选主题" in user:
+                topic_ids = list(dict.fromkeys(re.findall(r'"topic_id":"(topic-[^"]+)"', user)))
+                history_text = user.split("最近分镜历史：", 1)[-1].split("\n可选分镜骨架：", 1)[0]
+                layout_id = "cinematic_strips" if '"layout_id":"hero_with_insets"' in history_text else "hero_with_insets"
                 return json.dumps(
                     {
                         "layout_id": layout_id,
-                        "structure_mode": "equal_topics",
-                        "featured_topic_ids": [],
+                        "structure_mode": "dual_rhythm" if len(topic_ids) == 2 else "hero_rhythm",
+                        "featured_topic_ids": topic_ids[:2] if len(topic_ids) == 2 else topic_ids[:1],
                         "topic_order": topic_ids,
+                        "panel_beats": [
+                            {
+                                "topic_id": topic_id,
+                                "shots": ["establishing", "punchline"] if index == 0 else ["dialogue"],
+                            }
+                            for index, topic_id in enumerate(topic_ids)
+                        ],
                         "comedy_device": "反差",
-                        "layout_reason": "多个真实话题并列呈现",
+                        "layout_reason": "用大小格和连续镜头呈现真实对话",
                     },
                     ensure_ascii=False,
                 )
@@ -182,15 +189,22 @@ def test_build_success_returns_prompt():
     assert out.meta["api_model"] == "deepseek-v4-flash"
     assert "template" in out.meta
     assert out.meta["topic_selection"]["selected_count"] == 2
-    assert out.meta["layout_id"] == "hero_cover"
-    assert out.meta["structure_mode"] == "equal_topics"
-    assert out.meta["featured_topic_ids"] == []
+    assert out.meta["layout_id"] == "hero_with_insets"
+    assert out.meta["structure_mode"] == "dual_rhythm"
+    assert out.meta["featured_topic_ids"] == ["topic-01", "topic-02"]
     assert out.meta["topic_order"] == ["topic-01", "topic-02"]
+    assert out.meta["panel_count"] == 3
     assert out.meta["comedy_device"] == "反差"
     assert "统计日期：2026-08-17" in out.prompt
-    assert "【必须清晰绘制的群友署名与信息卡】" in out.prompt
-    assert "参与群友：张三" in out.prompt
-    assert "参与群友：李四" in out.prompt
+    assert "今天群里聊了票房" in out.prompt
+    assert "《牛来》破500万了" in out.prompt
+    assert "张三" in out.prompt
+    assert "李四" in out.prompt
+    assert "参与群友" not in out.prompt
+    assert "事实信息" not in out.prompt
+    assert "真实原话" not in out.prompt
+    assert "信息卡" not in out.prompt
+    assert "topic-" not in out.prompt
 
 
 def test_direct_candidate_truncation_retries_once_and_records_real_call_count():
@@ -275,7 +289,7 @@ def test_template_variable_render():
 
     preview = render_image_prompt_template("{{layout_name}}\n{{layout_instruction}}", {})
     assert "{{layout_name}}" not in preview
-    assert "生成时自动选择整张海报版式" in preview
+    assert "生成时自动选择漫画分镜骨架" in preview
 
 
 def test_default_template_reset_contains_theme_and_safe_topic_limit(tmp_path):
@@ -286,9 +300,10 @@ def test_default_template_reset_contains_theme_and_safe_topic_limit(tmp_path):
     assert "{{image_theme}}" in restored
     assert "{{layout_name}}" in restored
     assert "{{layout_instruction}}" in restored
-    assert "2~5 个入选主题" in restored
+    assert "2～7 个入选主题" in restored
     assert "统计日期：{{report_date}}" in restored
     assert "顶部大标题，中部按事件分区" not in restored
+    assert "整齐两列等高矩形" in restored
 
 
 def test_concrete_theme_enters_prompt_and_metadata():
@@ -353,22 +368,26 @@ def test_legacy_template_still_gets_theme_system_constraint(tmp_path):
     out = b.build(_input(template="legacy", image_theme="cyber_neon"))
     assert out.success
     assert "赛博霓虹" in b._provider.calls[-1][0]
-    assert "2～5" in b._provider.calls[-1][0]
-    assert "整体版式约束" in b._provider.calls[-1][0]
-    assert "必须清晰绘制的群友署名与信息卡" in out.prompt
+    assert "2～7" in b._provider.calls[-1][0]
+    assert "漫画分镜约束" in b._provider.calls[-1][0]
+    assert "今天群里聊了票房" in out.prompt
+    assert "参与群友" not in out.prompt
 
 
-def test_group_template_override_cannot_remove_visible_names_or_fact_cards(tmp_path):
+def test_group_template_override_cannot_remove_grounded_story_material(tmp_path):
     b = _builder(tmp_path=tmp_path)
     data = _input()
     data.template_override = "【群名称】{{group_name}}\n只画装饰"
     out = b.build(data)
     assert out.success
-    assert "参与群友：张三" in out.prompt
-    assert "参与群友：李四" in out.prompt
-    assert "事实信息：聊天中真实发生" in out.prompt
+    assert "张三" in out.prompt
+    assert "李四" in out.prompt
+    assert "今天群里聊了票房" in out.prompt
+    assert "《牛来》破500万了" in out.prompt
+    assert "参与群友" not in out.prompt
+    assert "事实信息" not in out.prompt
     final_system = b._provider.calls[-1][0]
-    assert "不得只画匿名人物" in final_system
+    assert "不得只画匿名人物或自由生成人名" in final_system
 
 
 def test_previous_layout_is_avoided_and_theme_remains_independent_hard_constraint():
@@ -377,16 +396,16 @@ def test_previous_layout_is_avoided_and_theme_remains_independent_hard_constrain
         _input(
             image_theme="custom",
             image_theme_custom="低饱和黏土摄影",
-            recent_layout_history=({"layout_id": "hero_cover", "comedy_device": "字面化"},),
+            recent_layout_history=({"layout_id": "hero_with_insets", "comedy_device": "字面化"},),
         )
     )
     assert out.success
-    assert out.meta["layout_id"] == "comic_strip"
-    assert out.meta["recent_layout_ids"] == ["hero_cover"]
+    assert out.meta["layout_id"] == "cinematic_strips"
+    assert out.meta["recent_layout_ids"] == ["hero_with_insets"]
     assert "低饱和黏土摄影" in out.prompt
     final_system = b._provider.calls[-1][0]
     assert "大主题约束｜全图最高视觉约束" in final_system
-    assert "整体版式只控制宏观区域" in final_system
+    assert "漫画分镜只控制格子几何" in final_system
 
 
 def test_legacy_same_date_layout_is_not_reused_for_new_prompt():
@@ -400,28 +419,33 @@ def test_legacy_same_date_layout_is_not_reused_for_new_prompt():
     b = _builder()
     out = b.build(_input(persisted_theme_meta=legacy))
     assert out.success
-    assert out.meta["layout_catalog_version"] == "poster-layout-v2"
+    assert out.meta["layout_catalog_version"] == "comic-panels-v3"
     assert out.meta["layout_reused"] is False
     assert out.meta["api_call_count"] == 3  # 候选 + 新版式 + 最终 Prompt
     assert len(b._provider.calls) == 3
 
 
-def test_same_date_reuses_v2_dynamic_layout_without_director_call():
+def test_same_date_reuses_v3_storyboard_without_director_call():
     persisted = {
-        "layout_catalog_version": "poster-layout-v2",
-        "layout_id": "group_court",
-        "structure_mode": "dual_focus",
+        "layout_catalog_version": "comic-panels-v3",
+        "layout_id": "split_focus",
+        "structure_mode": "dual_rhythm",
         "featured_topic_ids": ["topic-01", "topic-02"],
         "topic_order": ["topic-02", "topic-01"],
+        "panel_beats": [
+            {"topic_id": "topic-02", "shots": ["establishing", "reaction"]},
+            {"topic_id": "topic-01", "shots": ["dialogue"]},
+        ],
         "comedy_device": "一本正经地荒诞",
         "layout_reason": "同日已有双核心选择",
     }
     b = _builder()
     out = b.build(_input(persisted_theme_meta=persisted))
     assert out.success
-    assert out.meta["layout_id"] == "group_court"
-    assert out.meta["structure_mode"] == "dual_focus"
+    assert out.meta["layout_id"] == "split_focus"
+    assert out.meta["structure_mode"] == "dual_rhythm"
     assert out.meta["layout_reused"] is True
+    assert out.meta["panel_count"] == 3
     assert out.meta["api_call_count"] == 2
     assert len(b._provider.calls) == 2
 
@@ -431,9 +455,9 @@ def test_explicit_layout_inside_custom_style_wins_without_changing_style_text():
     b = _builder()
     out = b.build(_input(image_theme="custom", image_theme_custom=custom_style))
     assert out.success
-    assert out.meta["layout_id"] == "hero_cover"
+    assert out.meta["layout_id"] == "staggered_mosaic"
     assert out.meta["style_layout_locked"] is True
-    assert out.meta["structure_mode"] == "dual_focus"
+    assert out.meta["structure_mode"] == "dual_rhythm"
     assert custom_style in out.prompt
     assert out.meta["api_call_count"] == 2
 

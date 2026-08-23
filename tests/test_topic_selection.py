@@ -68,20 +68,29 @@ def test_score_weights_total_100_and_log_normalization():
     assert selection["selected_count"] == 2
 
 
-def test_selection_guarantees_four_then_applies_threshold_to_fifth():
-    messages = _messages(8)
+@pytest.mark.parametrize("candidate_count", [5, 6, 7])
+def test_selection_keeps_five_to_seven_high_quality_topics(candidate_count: int):
+    messages = _messages(candidate_count)
     candidates = [
-        _candidate(1, ["m0", "m1"], 40, 20, 20),
-        _candidate(2, ["m2", "m3"], 38, 19, 19),
-        _candidate(3, ["m4", "m5"], 35, 18, 18),
-        _candidate(4, ["m6"], 0, 0),
-        _candidate(5, ["m7"], 40, 20, 20),
+        _candidate(index, [f"m{index - 1}"], 36 - index, 18, 18)
+        for index in range(1, candidate_count + 1)
     ]
     selection = score_and_select_topics(candidates, messages)
-    assert selection["selected_count"] == 4
-    assert selection["thresholds"]["target_selected"] == 4
+    assert selection["selected_count"] == candidate_count
+    assert selection["thresholds"]["target_selected"] == 5
+    assert selection["thresholds"]["max_selected"] == 7
     selected_ranks = [item["rank"] for item in selection["candidates"] if item["selected"]]
-    assert selected_ranks == [1, 2, 3, 4]
+    assert selected_ranks == list(range(1, candidate_count + 1))
+
+
+def test_selection_stops_at_seven_topics():
+    messages = _messages(10)
+    selection = score_and_select_topics(
+        [_candidate(index, [f"m{index - 1}"], 38, 18, 18) for index in range(1, 11)],
+        messages,
+    )
+    assert selection["candidate_count"] == 10
+    assert selection["selected_count"] == 7
 
 
 def test_two_or_three_real_candidates_are_all_selected_without_padding():
@@ -93,14 +102,14 @@ def test_two_or_three_real_candidates_are_all_selected_without_padding():
     assert [item["selected"] for item in selection["candidates"]] == [True, True, True]
 
 
-def test_high_volume_chat_selects_five_real_candidates():
+def test_high_volume_chat_does_not_reduce_topic_density():
     messages = _messages(205)
     candidates = [
-        _candidate(index, [f"m{index - 1}"], comedy=40 - index * 5, visual=10, recognition=10)
-        for index in range(1, 6)
+        _candidate(index, [f"m{index - 1}"], comedy=36 - index, visual=18, recognition=18)
+        for index in range(1, 8)
     ]
     selection = score_and_select_topics(candidates, messages)
-    assert selection["selected_count"] == 5
+    assert selection["selected_count"] == 7
     assert selection["thresholds"]["high_volume_message_threshold"] == 200
 
 
@@ -137,6 +146,22 @@ def test_selected_topics_json_contains_only_selected_candidates():
     payload = selected_topics_json(selection)
     assert '"selected":true' in payload
     assert '"selected":false' not in payload
+    assert '"evidence_dialogue"' in payload
+
+
+def test_fabricated_quote_is_replaced_with_exact_evidence_text():
+    candidates = [_candidate(1, ["m0"]), _candidate(2, ["m1"])]
+    candidates[0]["quotes"] = ["这句根本没有出现在聊天里"]
+    candidates[1]["quotes"] = ["消息，1！"]
+    selection = score_and_select_topics(candidates, _messages(2))
+    by_id = {item["topic_id"]: item for item in selection["candidates"]}
+
+    assert by_id["topic-01"]["quotes"] == ["消息0"]
+    assert by_id["topic-01"]["evidence_dialogue"] == [
+        {"message_id": "m0", "speaker": "成员0", "text": "消息0"}
+    ]
+    assert by_id["topic-02"]["quotes"] == ["消息，1！"]
+    assert by_id["topic-02"]["people"] == ["成员1"]
 
 
 def test_visible_participants_are_derived_from_evidence_and_names_are_not_truncated():
