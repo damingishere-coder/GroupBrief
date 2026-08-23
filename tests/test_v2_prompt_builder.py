@@ -83,10 +83,11 @@ class FakeDeepSeek:
                 return json.dumps(
                     {
                         "layout_id": layout_id,
-                        "hero_topic_id": topic_ids[0],
-                        "support_topic_ids": topic_ids[1:],
+                        "structure_mode": "equal_topics",
+                        "featured_topic_ids": [],
+                        "topic_order": topic_ids,
                         "comedy_device": "反差",
-                        "layout_reason": "主事件突出且适合视觉反差",
+                        "layout_reason": "多个真实话题并列呈现",
                     },
                     ensure_ascii=False,
                 )
@@ -182,9 +183,14 @@ def test_build_success_returns_prompt():
     assert "template" in out.meta
     assert out.meta["topic_selection"]["selected_count"] == 2
     assert out.meta["layout_id"] == "hero_cover"
-    assert out.meta["hero_topic_id"] in {"topic-01", "topic-02"}
+    assert out.meta["structure_mode"] == "equal_topics"
+    assert out.meta["featured_topic_ids"] == []
+    assert out.meta["topic_order"] == ["topic-01", "topic-02"]
     assert out.meta["comedy_device"] == "反差"
     assert "统计日期：2026-08-17" in out.prompt
+    assert "【必须清晰绘制的群友署名与信息卡】" in out.prompt
+    assert "参与群友：张三" in out.prompt
+    assert "参与群友：李四" in out.prompt
 
 
 def test_direct_candidate_truncation_retries_once_and_records_real_call_count():
@@ -349,6 +355,20 @@ def test_legacy_template_still_gets_theme_system_constraint(tmp_path):
     assert "赛博霓虹" in b._provider.calls[-1][0]
     assert "2～5" in b._provider.calls[-1][0]
     assert "整体版式约束" in b._provider.calls[-1][0]
+    assert "必须清晰绘制的群友署名与信息卡" in out.prompt
+
+
+def test_group_template_override_cannot_remove_visible_names_or_fact_cards(tmp_path):
+    b = _builder(tmp_path=tmp_path)
+    data = _input()
+    data.template_override = "【群名称】{{group_name}}\n只画装饰"
+    out = b.build(data)
+    assert out.success
+    assert "参与群友：张三" in out.prompt
+    assert "参与群友：李四" in out.prompt
+    assert "事实信息：聊天中真实发生" in out.prompt
+    final_system = b._provider.calls[-1][0]
+    assert "不得只画匿名人物" in final_system
 
 
 def test_previous_layout_is_avoided_and_theme_remains_independent_hard_constraint():
@@ -369,8 +389,8 @@ def test_previous_layout_is_avoided_and_theme_remains_independent_hard_constrain
     assert "整体版式只控制宏观区域" in final_system
 
 
-def test_same_date_reuses_persisted_layout_without_director_call():
-    persisted = {
+def test_legacy_same_date_layout_is_not_reused_for_new_prompt():
+    legacy = {
         "layout_id": "group_court",
         "hero_topic_id": "topic-02",
         "support_topic_ids": ["topic-01"],
@@ -378,11 +398,31 @@ def test_same_date_reuses_persisted_layout_without_director_call():
         "layout_reason": "同日已有选择",
     }
     b = _builder()
+    out = b.build(_input(persisted_theme_meta=legacy))
+    assert out.success
+    assert out.meta["layout_catalog_version"] == "poster-layout-v2"
+    assert out.meta["layout_reused"] is False
+    assert out.meta["api_call_count"] == 3  # 候选 + 新版式 + 最终 Prompt
+    assert len(b._provider.calls) == 3
+
+
+def test_same_date_reuses_v2_dynamic_layout_without_director_call():
+    persisted = {
+        "layout_catalog_version": "poster-layout-v2",
+        "layout_id": "group_court",
+        "structure_mode": "dual_focus",
+        "featured_topic_ids": ["topic-01", "topic-02"],
+        "topic_order": ["topic-02", "topic-01"],
+        "comedy_device": "一本正经地荒诞",
+        "layout_reason": "同日已有双核心选择",
+    }
+    b = _builder()
     out = b.build(_input(persisted_theme_meta=persisted))
     assert out.success
     assert out.meta["layout_id"] == "group_court"
+    assert out.meta["structure_mode"] == "dual_focus"
     assert out.meta["layout_reused"] is True
-    assert out.meta["api_call_count"] == 2  # 候选 + 最终 Prompt，无新版式调用
+    assert out.meta["api_call_count"] == 2
     assert len(b._provider.calls) == 2
 
 
@@ -393,6 +433,7 @@ def test_explicit_layout_inside_custom_style_wins_without_changing_style_text():
     assert out.success
     assert out.meta["layout_id"] == "hero_cover"
     assert out.meta["style_layout_locked"] is True
+    assert out.meta["structure_mode"] == "dual_focus"
     assert custom_style in out.prompt
     assert out.meta["api_call_count"] == 2
 

@@ -23,6 +23,7 @@ import {
   listImageThemes,
   pipelineSend,
   regenerateRunImage,
+  rebuildRunPrompt,
   resolveImageTheme,
   restoreRunPrompt,
   RunPromptConfig,
@@ -34,6 +35,8 @@ import {
   Button,
   ConfirmDialog,
   EmptyState,
+  ImagePreviewTrigger,
+  ImageViewer,
   LoadingState,
   StatusBadge,
   Toast,
@@ -57,6 +60,7 @@ const REGEN_LABELS: Record<string, string> = {
   running: "生成中",
   fallback_queued: "已转入 Codex Desktop 队列",
   ready_for_review: "新图待审核",
+  prompt_rebuilt: "Prompt 已重建，等待生图",
   failed: "重新生图失败",
   sent: "新图已发送",
 };
@@ -158,11 +162,13 @@ export default function AIImages() {
   const [runCustom, setRunCustom] = useState("");
   const [detailLoading, setDetailLoading] = useState(false);
   const [runSaving, setRunSaving] = useState(false);
+  const [rebuildingPrompt, setRebuildingPrompt] = useState(false);
   const [regenerating, setRegenerating] = useState(false);
   const [restoring, setRestoring] = useState(false);
   const [sending, setSending] = useState(false);
   const [sendConfirmOpen, setSendConfirmOpen] = useState(false);
   const [imageLoadError, setImageLoadError] = useState(false);
+  const [imageViewerOpen, setImageViewerOpen] = useState(false);
   const [imageVersion, setImageVersion] = useState(0);
   const [detailError, setDetailError] = useState("");
   const [runPromptError, setRunPromptError] = useState("");
@@ -327,6 +333,7 @@ export default function AIImages() {
     setDetailError("");
     setRunPromptError("");
     setImageLoadError(false);
+    setImageViewerOpen(false);
     Promise.allSettled([
       getRunDetail(selected.group_name, selected.run_date),
       getRunPrompt(selected.group_name, selected.run_date),
@@ -359,6 +366,9 @@ export default function AIImages() {
   }, [detailReloadVersion, runs, selectedKey, toast]);
 
   const regenStatus = String(detail?.run.image_regen_status || "idle");
+  const currentImageSrc = detail
+    ? `${getV2File(detail.run.group_name, detail.run.run_date, "daily_image.png")}?v=${imageVersion}`
+    : "";
   useEffect(() => {
     if (!detail || !["queued", "running", "fallback_queued"].includes(regenStatus)) return;
     const groupName = detail.run.group_name;
@@ -468,6 +478,30 @@ export default function AIImages() {
       toast(`恢复 Prompt 失败：${String(reason)}`);
     } finally {
       setRestoring(false);
+    }
+  };
+
+  const rebuildCurrentPrompt = async () => {
+    if (!detail) return;
+    if (runDirty) {
+      toast("当前 Prompt 有未保存修改，请先保存或恢复后再重建");
+      return;
+    }
+    setRebuildingPrompt(true);
+    try {
+      const rebuilt = await rebuildRunPrompt(detail.run.group_name, detail.run.run_date);
+      const prompt = await getRunPrompt(detail.run.group_name, detail.run.run_date);
+      setDetail((current) => current ? { ...current, run: rebuilt.run } : current);
+      setRunPrompt(prompt);
+      setRunDraft(prompt.content);
+      setRunTheme(prompt.image_theme || "random_preset");
+      setRunCustom(prompt.image_theme_custom || "");
+      loadRuns();
+      toast("已从当天 messages.json 重建 Prompt；没有重新读取微信，也没有生图");
+    } catch (reason) {
+      toast(`Prompt 重建失败：${String(reason)}`);
+    } finally {
+      setRebuildingPrompt(false);
     }
   };
 
@@ -582,7 +616,7 @@ export default function AIImages() {
           {detailLoading ? <LoadingState label="正在读取真实 Prompt 与图片…" /> : detailError && !detail ? <EmptyState title="运行详情加载失败" description={detailError} action={<Button tone="secondary" onClick={() => setDetailReloadVersion((current) => current + 1)}>重试</Button>} /> : !detail ? <EmptyState title="请选择运行记录" description="从左侧选择一条记录。" /> : (
             <>
               <div className="ai-images-detail-head"><div><span className="ai-images-eyebrow">当天真实运行</span><h2>{detail.run.group_name} · {detail.run.run_date}</h2><p><StatusPill status={detail.run.status} /> · 更新 {formatDateTime(detail.run.updated_at)}</p></div></div>
-              <div className={`ai-images-regen-state ${regenStatus}`}><strong>{REGEN_LABELS[regenStatus] || regenStatus}</strong><span>{String(detail.run.image_regen_error || detail.run.image_regen_detail || "重新生图不会重算聊天、摘要或排行榜，也不会自动发送。")}</span></div>
+              <div className={`ai-images-regen-state ${regenStatus}`}><strong>{REGEN_LABELS[regenStatus] || regenStatus}</strong><span>{String(detail.run.image_regen_error || detail.run.image_regen_detail || "messages.json 已按运行日期保存；重建 Prompt 和重新生图都不会再次读取微信，也不会自动发送。")}</span></div>
               {runPrompt?.topic_selection && <section className="ai-images-topic-score-card" aria-label="选题评分">
                 <div className="ai-images-content-heading"><div><h3>选题评分</h3><span>候选 {runPrompt.topic_selection.candidate_count} · 入选 {runPrompt.topic_selection.selected_count}</span></div><span>v{runPrompt.topic_selection.topic_selection_version}</span></div>
                 <div className="ai-images-topic-score-list">{runPrompt.topic_selection.candidates.map((topic) => <article className={`ai-images-topic-score-item ${topic.selected ? "is-selected" : ""}`} key={topic.topic_id}>
@@ -597,8 +631,8 @@ export default function AIImages() {
                 {runTheme === "custom" && <label><span>自定义主题</span><input maxLength={80} value={runCustom} onChange={(event) => { const value = event.target.value; setRunCustom(value); if (value.trim()) applyRunTheme("custom", value); }} /></label>}
               </div>}
               <div className="ai-images-asset-grid">
-                <div className="ai-images-preview-card"><div className="ai-images-content-heading"><h3>日报图片</h3><span>daily_image.png</span></div>{detail.files.includes("daily_image.png") && !imageLoadError ? <img className="ai-images-real-image" src={`${getV2File(detail.run.group_name, detail.run.run_date, "daily_image.png")}?v=${imageVersion}`} alt="真实日报图片" onError={() => setImageLoadError(true)} /> : <EmptyState title="尚无可读图片" description="重新生图失败时会保留旧图；没有旧图时这里保持为空。" />}</div>
-                {runPrompt ? <div className="ai-images-prompt-card ai-images-run-editor"><div className="ai-images-content-heading"><h3>当天生图 Prompt</h3><Button tone="ghost" className="ui-button-compact" onClick={() => copyText(runDraft, toast)} disabled={!runDraft}><Copy size={16} />复制</Button></div><textarea value={runDraft} onChange={(event) => setRunDraft(event.target.value)} /><div className="ai-images-run-actions"><Button tone="ghost" onClick={restoreCurrentPrompt} busy={restoring} disabled={!runPrompt.has_original}><ArrowCounterClockwise size={16} />恢复最初版本</Button><Button tone="secondary" onClick={saveCurrentPrompt} busy={runSaving} disabled={!runDirty}><FloppyDisk size={16} />保存 Prompt</Button><Button tone="primary" onClick={regenerate} busy={regenerating} disabled={runDirty || ["queued", "running"].includes(regenStatus)}><Play size={16} />再次生图</Button></div></div> : <div className="ai-images-prompt-card"><EmptyState title="当天 Prompt 加载失败" description={runPromptError || "当天 Prompt 暂不可用；日报图片和运行状态仍可查看。"} action={<Button tone="secondary" onClick={() => setDetailReloadVersion((current) => current + 1)}>重新读取 Prompt</Button>} /></div>}
+                <div className="ai-images-preview-card"><div className="ai-images-content-heading"><h3>日报图片</h3><span>daily_image.png</span></div>{detail.files.includes("daily_image.png") && !imageLoadError ? <ImagePreviewTrigger src={currentImageSrc} alt="真实日报图片" imageClassName="ai-images-real-image" className="ai-images-real-image-trigger" onError={() => { setImageLoadError(true); setImageViewerOpen(false); }} onOpen={() => setImageViewerOpen(true)} /> : <EmptyState title="尚无可读图片" description="重新生图失败时会保留旧图；没有旧图时这里保持为空。" />}</div>
+                {runPrompt ? <div className="ai-images-prompt-card ai-images-run-editor"><div className="ai-images-content-heading"><h3>当天生图 Prompt</h3><Button tone="ghost" className="ui-button-compact" onClick={() => copyText(runDraft, toast)} disabled={!runDraft}><Copy size={16} />复制</Button></div><textarea value={runDraft} onChange={(event) => setRunDraft(event.target.value)} /><div className="ai-images-run-actions"><Button tone="ghost" onClick={restoreCurrentPrompt} busy={restoring} disabled={!runPrompt.has_original}><ArrowCounterClockwise size={16} />恢复最初版本</Button><Button tone="secondary" onClick={saveCurrentPrompt} busy={runSaving} disabled={!runDirty}><FloppyDisk size={16} />保存 Prompt</Button><Button tone="secondary" onClick={rebuildCurrentPrompt} busy={rebuildingPrompt} disabled={runDirty || ["queued", "running"].includes(regenStatus)}><Sparkle size={16} />从当天消息重建 Prompt</Button><Button tone="primary" onClick={regenerate} busy={regenerating} disabled={runDirty || rebuildingPrompt || ["queued", "running"].includes(regenStatus)}><Play size={16} />按现有 Prompt 重画</Button></div></div> : <div className="ai-images-prompt-card"><EmptyState title="当天 Prompt 加载失败" description={runPromptError || "当天 Prompt 暂不可用；日报图片和运行状态仍可查看。"} action={<Button tone="secondary" onClick={() => setDetailReloadVersion((current) => current + 1)}>重新读取 Prompt</Button>} /></div>}
               </div>
               {regenStatus === "ready_for_review" && <div className="ai-images-review-actions"><WarningCircle size={18} /><span>请先检查新图。只有再次确认后才会发送文字和图片。</span><Button tone="primary" onClick={() => setSendConfirmOpen(true)}><PaperPlaneTilt size={17} />发送 / 重新发送</Button></div>}
               {detail.run.error && <div className="ai-images-run-error">主任务错误：{String(detail.run.error)}</div>}
@@ -606,6 +640,16 @@ export default function AIImages() {
           )}
         </section>
       </div>
+
+      <ImageViewer
+        open={imageViewerOpen && Boolean(detail)}
+        src={currentImageSrc}
+        alt="真实日报图片"
+        filename="daily_image.png"
+        title={detail ? `${detail.run.group_name} · ${detail.run.run_date} · 日报图片` : "日报图片"}
+        onClose={() => setImageViewerOpen(false)}
+        onDownloadError={toast}
+      />
 
       <ConfirmDialog open={sendConfirmOpen} title="确认发送这张新图？" description="这会立即操作本机微信，向该运行绑定的发送目标粘贴并发送文字与图片。请确认预览、群名和日期都正确。" confirmLabel="确认发送" busy={sending} onCancel={() => setSendConfirmOpen(false)} onConfirm={confirmSend} />
       <Toast message={msg} />

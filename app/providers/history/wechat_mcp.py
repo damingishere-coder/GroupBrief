@@ -13,6 +13,8 @@ import json
 import socket
 import urllib.error
 import urllib.request
+from threading import Event, Timer
+from time import monotonic
 from urllib.parse import urlsplit
 
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
@@ -22,6 +24,8 @@ DEFAULT_ALLOWED_HOSTS = frozenset()
 
 # 本机回环连接必须绕过系统/环境代理（代理会把本地请求转发出去导致 502）。
 _PROXY_FREE_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+_READ_CHUNK_SIZE = 64 * 1024
+_MAX_RESPONSE_BYTES = 128 * 1024 * 1024
 
 
 class MCPError(Exception):
@@ -92,9 +96,18 @@ class MCPClient:
             },
             method="POST",
         )
+        deadline = monotonic() + request_timeout
         try:
             with _PROXY_FREE_OPENER.open(request, timeout=request_timeout) as resp:
-                body = resp.read().decode("utf-8", errors="replace")
+                expired = Event()
+                deadline_timer = _start_response_deadline_timer(resp, deadline, expired)
+                try:
+                    body_bytes = _read_response_body(resp, deadline)
+                finally:
+                    deadline_timer.cancel()
+                if expired.is_set():
+                    raise TimeoutError("超过整次请求截止时间")
+                body = body_bytes.decode("utf-8", errors="replace")
         except urllib.error.HTTPError as e:
             if e.code == 401:
                 raise MCPError("本地服务认证失败（令牌无效或未授权）") from e
@@ -130,6 +143,81 @@ class MCPClient:
         if not isinstance(structured, dict):
             raise MCPError("本地服务响应缺少 structuredContent")
         return structured
+
+
+def _read_response_body(response, deadline: float) -> bytes:
+    """分块读取响应并执行整次请求硬截止，避免持续输出绕过 socket 超时。"""
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        remaining = deadline - monotonic()
+        if remaining <= 0:
+            raise TimeoutError("超过整次请求截止时间")
+        _set_response_socket_timeout(response, remaining)
+        try:
+            chunk = response.read(_READ_CHUNK_SIZE)
+            sized_read = True
+        except TypeError:
+            # 兼容测试假响应及少数只提供 read() 的 file-like 对象。
+            chunk = response.read()
+            sized_read = False
+        if not chunk:
+            break
+        chunks.append(chunk)
+        total += len(chunk)
+        if total > _MAX_RESPONSE_BYTES:
+            raise MCPError("本地服务响应过大，已停止读取")
+        if monotonic() >= deadline:
+            raise TimeoutError("超过整次请求截止时间")
+        if not sized_read:
+            break
+    return b"".join(chunks)
+
+
+def _start_response_deadline_timer(response, deadline: float, expired: Event) -> Timer:
+    """到达总截止时间时主动中断连接，防止小数据流不断刷新 socket 超时。"""
+    remaining = max(deadline - monotonic(), 0.001)
+
+    def _abort() -> None:
+        expired.set()
+        response_socket = _response_socket(response)
+        if response_socket is not None:
+            try:
+                response_socket.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            try:
+                response_socket.close()
+            except OSError:
+                pass
+            return
+        try:
+            response.close()
+        except (AttributeError, OSError):
+            pass
+
+    timer = Timer(remaining, _abort)
+    timer.daemon = True
+    timer.start()
+    return timer
+
+
+def _response_socket(response):
+    """获取 urllib/http.client 响应的底层 socket；假响应允许返回 None。"""
+    try:
+        return response.fp.raw._sock
+    except AttributeError:
+        return None
+
+
+def _set_response_socket_timeout(response, remaining: float) -> None:
+    """尽力把底层 socket 超时收紧为剩余总时限；假响应不要求该属性。"""
+    response_socket = _response_socket(response)
+    if response_socket is not None:
+        try:
+            response_socket.settimeout(max(remaining, 0.001))
+        except OSError:
+            pass
 
 
 def _result_error_message(result: dict) -> str:

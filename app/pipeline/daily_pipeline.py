@@ -1,7 +1,7 @@
 """V2 每日全流程流水线（P7）。
 
 生成阶段（默认 00:15，run_date 决定周期）：
-    PENDING → 取数(messages.json) → DATA_READY → 排行(ranking.json/txt)
+    PENDING → 首次取数/复用当天快照(messages.json) → DATA_READY → 排行(ranking.json/txt)
     → RANKING_READY → Codex GPT / DeepSeek 备用(image_prompt.txt) → PROMPT_READY
     → Codex 串行生图(daily_image.png) → IMAGE_READY → READY_TO_SEND
 发送阶段（每群 send_time）：
@@ -11,6 +11,7 @@
 - 每个群独立状态；某群失败不阻塞其他群；
 - 生图阶段使用全局单队列严格串行；
 - 同一群同一统计周期已到终态则跳过（force 可重跑）；
+- 同一日报日期的消息默认只读取一次；显式 refresh_messages 只覆盖当天快照，不连带重建 Prompt 或生图；
 - SENT 绝不重复发送（force_send 允许重发内容）。
 """
 
@@ -28,7 +29,7 @@ from app.ai.prompt_builder import GroupSummaryImagePromptBuilder
 from app.ai.prompt_builder_types import PromptInput
 from app.config.settings import Settings, get_settings
 from app.core.logging import get_logger
-from app.data_sources.base import WeChatDataSource
+from app.data_sources.base import V2Message, WeChatDataSource
 from app.data_sources.wechat_data_analysis import WeChatDataAnalysisSource
 from app.db import repository as repo
 from app.db.models import Group
@@ -47,6 +48,7 @@ from app.v2.constants import (
     IMAGE_READY,
     IMAGE_FILE_MISSING,
     MESSAGE_FETCH_FAILED,
+    MESSAGE_SNAPSHOT_INVALID,
     PENDING,
     PROMPT_FAILED,
     PROMPT_READY,
@@ -92,6 +94,7 @@ class DailyPipeline:
         run_date: str | None = None,
         group_ids: list[int] | None = None,
         force: bool = False,
+        refresh_messages: bool = False,
         *,
         acquire_lock: bool = True,
     ) -> list[dict]:
@@ -101,6 +104,7 @@ class DailyPipeline:
                     run_date=run_date,
                     group_ids=group_ids,
                     force=force,
+                    refresh_messages=refresh_messages,
                     acquire_lock=False,
                 )
         requested_date = parse_date(run_date)
@@ -121,34 +125,120 @@ class DailyPipeline:
             "开始并行生成：groups=%d group_limit=%d fetch_limit=%d ai_limit=%d",
             len(groups),
             group_limit,
-            normalized_limit(self.settings.wechat_fetch_concurrency, 3),
+            normalized_limit(self.settings.wechat_fetch_concurrency, 1),
             normalized_limit(self.settings.ai_request_concurrency, 6),
         )
         if len(groups) == 1:
-            result = self._generate_one_safe(groups[0], window, run_date_str, force)
-            return [self._run_image_when_ready(groups[0], result, run_date_str, force)]
+            group = groups[0]
+            try:
+                if refresh_messages:
+                    result = self._generate_one_safe(
+                        group,
+                        window,
+                        run_date_str,
+                        force,
+                        refresh_messages=True,
+                    )
+                else:
+                    # 保留历史 4 参数调用形态，兼容现有注入点与测试替身。
+                    result = self._generate_one_safe(group, window, run_date_str, force)
+            except Exception as exc:
+                logger.exception("群 %s worker 未捕获异常，已隔离", self._group_name(group))
+                result = self._record_group_failure(group, run_date_str, exc, "unexpected")
+            return [self._run_image_when_ready_safe(group, result, run_date_str, force)]
         else:
             with ThreadPoolExecutor(
                 max_workers=min(group_limit, len(groups)),
                 thread_name_prefix="groupbrief-v2-group",
             ) as executor:
-                future_indexes = {
-                    executor.submit(
-                        self._generate_one_safe, group, window, run_date_str, force
-                    ): index
-                    for index, group in enumerate(groups)
-                }
+                future_indexes = {}
+                for index, group in enumerate(groups):
+                    if refresh_messages:
+                        future = executor.submit(
+                            self._generate_one_safe,
+                            group,
+                            window,
+                            run_date_str,
+                            force,
+                            refresh_messages=True,
+                        )
+                    else:
+                        # 保留历史 4 参数调用形态，兼容现有注入点与测试替身。
+                        future = executor.submit(
+                            self._generate_one_safe,
+                            group,
+                            window,
+                            run_date_str,
+                            force,
+                        )
+                    future_indexes[future] = index
                 results_by_index: dict[int, dict] = {}
                 for future in as_completed(future_indexes):
                     result_index = future_indexes[future]
                     group = groups[result_index]
-                    result = future.result()
-                    results_by_index[result_index] = self._run_image_when_ready(
+                    try:
+                        result = future.result()
+                    except Exception as exc:
+                        logger.exception("群 %s worker 未捕获异常，已隔离", self._group_name(group))
+                        result = self._record_group_failure(
+                            group, run_date_str, exc, "unexpected"
+                        )
+                    results_by_index[result_index] = self._run_image_when_ready_safe(
                         group, result, run_date_str, force
                     )
 
         # 生图按 Prompt 完成顺序启动，API 结果仍按群配置顺序返回。
         return [results_by_index[index] for index in range(len(groups))]
+
+    @staticmethod
+    def _group_name(group: Group) -> str:
+        return group.display_name or group.wechat_group_name
+
+    def _record_group_failure(
+        self,
+        group: Group,
+        run_date: str,
+        exc: Exception,
+        failed_stage: str,
+    ) -> dict:
+        """尽力落盘单群未捕获异常；落盘本身失败也不阻塞其他群。"""
+        group_name = self._group_name(group)
+        detail = str(exc)[:300]
+        error_type = (
+            IMAGE_GENERATION_FAILED
+            if failed_stage == "image"
+            else "UNEXPECTED_GENERATION_ERROR"
+        )
+        try:
+            self.store.update(
+                group_name,
+                run_date,
+                status=FAILED,
+                failed_stage=failed_stage,
+                error=detail,
+                error_type=error_type,
+            )
+        except Exception:
+            logger.exception("群 %s 异常状态落盘失败，继续处理其他群", group_name)
+        return {
+            "group_name": group_name,
+            "status": "failed",
+            "error_type": error_type,
+            "detail": detail,
+        }
+
+    def _run_image_when_ready_safe(
+        self,
+        group: Group,
+        result: dict,
+        run_date: str,
+        force: bool,
+    ) -> dict:
+        try:
+            return self._run_image_when_ready(group, result, run_date, force)
+        except Exception as exc:
+            logger.exception("群 %s 图片阶段异常，已与其他群隔离", self._group_name(group))
+            return self._record_group_failure(group, run_date, exc, "image")
 
     def _run_image_when_ready(
         self,
@@ -165,10 +255,19 @@ class DailyPipeline:
         job = self._make_image_job(group, run_date, force)
         return self._run_image_jobs([job], run_date)[0]
 
-    def _generate_one_safe(self, group: Group, window, run_date: str, force: bool) -> dict:
+    def _generate_one_safe(
+        self,
+        group: Group,
+        window,
+        run_date: str,
+        force: bool,
+        refresh_messages: bool = False,
+    ) -> dict:
         group_name = group.display_name or group.wechat_group_name
         try:
-            return self._generate_one(group, window, run_date, force)
+            return self._generate_one(
+                group, window, run_date, force, refresh_messages=refresh_messages
+            )
         except Exception as exc:
             logger.exception("群 %s 生成异常，已与其他群隔离", group_name)
             self.store.update(
@@ -185,7 +284,15 @@ class DailyPipeline:
                 "detail": str(exc)[:300],
             }
 
-    def _generate_one(self, group: Group, window, run_date: str, force: bool) -> dict:
+    def _generate_one(
+        self,
+        group: Group,
+        window,
+        run_date: str,
+        force: bool,
+        *,
+        refresh_messages: bool = False,
+    ) -> dict:
         group_name = group.display_name or group.wechat_group_name
         store = self.store
         started_at = perf_counter()
@@ -215,7 +322,7 @@ class DailyPipeline:
 
         # 防重复：同一群同一周期已到终态
         run = store.load_run(group_name, run_date)
-        if not force and run.get("status") in (IMAGE_READY, READY_TO_SEND, SENT):
+        if not force and not refresh_messages and run.get("status") in (IMAGE_READY, READY_TO_SEND, SENT):
             logger.info("群 %s %s 已到 %s，跳过生成", group_name, run_date, run.get("status"))
             return finish({"group_name": group_name, "status": "skipped", "detail": f"已{run.get('status')}"})
 
@@ -239,50 +346,164 @@ class DailyPipeline:
         }
         store.update(group_name, run_date, status=PENDING, **base)
 
-        # ---- 1) 数据读取 ----
+        # ---- 1) 数据快照（同一日报日期默认只读取一次）----
         if not group.wechat_group_id:
             store.update(group_name, run_date, status=FAILED, failed_stage="data", error="群未绑定微信群 ID")
             return finish({"group_name": group_name, "status": "failed", "error_type": WECHAT_DATA_UNAVAILABLE})
         fetch_started = perf_counter()
-        try:
-            with bounded_slot("wechat_fetch", self.settings.wechat_fetch_concurrency):
-                fetch = self.data_source.fetch_messages(
-                    group.wechat_group_id, window.period_start, window.period_end
+        snapshot_path = store.messages_path(group_name, run_date)
+        messages: list[V2Message]
+        if snapshot_path.is_file() and not refresh_messages:
+            try:
+                messages = self._load_message_snapshot(snapshot_path)
+            except (OSError, UnicodeError, ValueError) as exc:
+                timings["fetch_ms"] = round((perf_counter() - fetch_started) * 1000)
+                detail = f"当天消息快照无法读取，已停止且不会隐式重抓：{str(exc)[:220]}"
+                store.update(
+                    group_name,
+                    run_date,
+                    status=FAILED,
+                    failed_stage="data",
+                    error=detail,
+                    error_type=MESSAGE_SNAPSHOT_INVALID,
+                    message_snapshot_reused=False,
                 )
-        except Exception as exc:
+                return finish({
+                    "group_name": group_name,
+                    "status": "failed",
+                    "error_type": MESSAGE_SNAPSHOT_INVALID,
+                    "detail": detail,
+                })
             timings["fetch_ms"] = round((perf_counter() - fetch_started) * 1000)
             store.update(
                 group_name,
                 run_date,
-                status=FAILED,
-                failed_stage="data",
-                error=str(exc)[:300],
-                error_type=MESSAGE_FETCH_FAILED,
+                status=DATA_READY,
+                message_count=len(messages),
+                message_snapshot_reused=True,
+                message_snapshot_refreshed=False,
+                message_snapshot_path=snapshot_path.name,
+            )
+            logger.info("群 %s 复用当天消息快照：%s（%d 条）", group_name, snapshot_path, len(messages))
+        else:
+            try:
+                with bounded_slot("wechat_fetch", self.settings.wechat_fetch_concurrency):
+                    fetch = self.data_source.fetch_messages(
+                        group.wechat_group_id, window.period_start, window.period_end
+                    )
+            except Exception as exc:
+                timings["fetch_ms"] = round((perf_counter() - fetch_started) * 1000)
+                store.update(
+                    group_name,
+                    run_date,
+                    status=FAILED,
+                    failed_stage="data",
+                    error=str(exc)[:300],
+                    error_type=MESSAGE_FETCH_FAILED,
+                )
+                return finish({
+                    "group_name": group_name,
+                    "status": "failed",
+                    "error_type": MESSAGE_FETCH_FAILED,
+                    "detail": str(exc)[:300],
+                })
+            timings["fetch_ms"] = round((perf_counter() - fetch_started) * 1000)
+            fetch_metrics = fetch.meta if isinstance(getattr(fetch, "meta", None), dict) else {}
+            if fetch_metrics:
+                store.update(group_name, run_date, fetch_metrics=fetch_metrics)
+            if fetch.status.value != "OK" or not fetch.messages:
+                error_type = fetch.error_type or MESSAGE_FETCH_FAILED
+                store.update(group_name, run_date, status=FAILED, failed_stage="data",
+                             error=fetch.detail or fetch.status.value, error_type=error_type)
+                return finish({"group_name": group_name, "status": "failed", "error_type": error_type,
+                        "detail": fetch.detail})
+            messages = list(fetch.messages)
+            if not refresh_messages:
+                self._save_json(snapshot_path, [m.to_dict() for m in messages])
+                store.update(
+                    group_name,
+                    run_date,
+                    status=DATA_READY,
+                    message_count=len(messages),
+                    message_snapshot_reused=False,
+                    message_snapshot_refreshed=False,
+                    message_snapshot_saved_at=datetime.now().astimezone().isoformat(),
+                    message_snapshot_path=snapshot_path.name,
+                    message_snapshot_period_start=period_start,
+                    message_snapshot_period_end=period_end,
+                )
+
+        if refresh_messages:
+            # 手动重取消息只更新消息与确定性排行榜。先在内存中完成计算和渲染，
+            # 成功后再落盘，避免留下“新消息 + 旧排行榜”的明显不一致状态。
+            ranking_started = perf_counter()
+            try:
+                ranking = self.ranking_engine.compute(
+                    messages,
+                    group_name,
+                    period_start,
+                    period_end,
+                    top_limit=10,
+                )
+                ranking_txt = self.renderer.render(
+                    ranking, template_name=group.ranking_template
+                )
+            except Exception as exc:
+                timings["ranking_ms"] = round((perf_counter() - ranking_started) * 1000)
+                store.update(
+                    group_name,
+                    run_date,
+                    status=run.get("status") or PENDING,
+                    failed_stage=run.get("failed_stage"),
+                    error=run.get("error"),
+                    message_refresh_status="failed",
+                    message_refresh_error=str(exc)[:300],
+                )
+                return finish({
+                    "group_name": group_name,
+                    "status": "failed",
+                    "error_type": RANKING_FAILED,
+                    "detail": "新消息已读取，但排行榜计算失败，旧快照未被替换",
+                })
+            timings["ranking_ms"] = round((perf_counter() - ranking_started) * 1000)
+
+            self._save_json(snapshot_path, [m.to_dict() for m in messages])
+            self._save_json(store.ranking_json_path(group_name, run_date), ranking.to_dict())
+            store.ranking_txt_path(group_name, run_date).write_text(ranking_txt, encoding="utf-8")
+            next_status = SENT if run.get("status") == SENT else RANKING_READY
+            store.update(
+                group_name,
+                run_date,
+                status=next_status,
+                failed_stage=None,
+                error=None,
+                speaker_count=ranking.speaker_count,
+                message_count=ranking.message_count,
+                message_snapshot_reused=False,
+                message_snapshot_refreshed=True,
+                message_snapshot_saved_at=datetime.now().astimezone().isoformat(),
+                message_snapshot_path=snapshot_path.name,
+                message_snapshot_period_start=period_start,
+                message_snapshot_period_end=period_end,
+                message_refresh_status="completed",
+                message_refresh_error="",
+                prompt_rebuild_status="required",
+                prompt_rebuild_error="",
+                send_hold=True,
+                send_hold_reason="MESSAGE_SNAPSHOT_REFRESHED",
+                needs_manual_send=True,
             )
             return finish({
                 "group_name": group_name,
-                "status": "failed",
-                "error_type": MESSAGE_FETCH_FAILED,
-                "detail": str(exc)[:300],
+                "status": "data_ready",
+                "detail": "当天消息快照和排行榜已更新；未重建 Prompt，未生图",
             })
-        timings["fetch_ms"] = round((perf_counter() - fetch_started) * 1000)
-        fetch_metrics = fetch.meta if isinstance(getattr(fetch, "meta", None), dict) else {}
-        if fetch_metrics:
-            store.update(group_name, run_date, fetch_metrics=fetch_metrics)
-        if fetch.status.value != "OK" or not fetch.messages:
-            error_type = fetch.error_type or MESSAGE_FETCH_FAILED
-            store.update(group_name, run_date, status=FAILED, failed_stage="data",
-                         error=fetch.detail or fetch.status.value, error_type=error_type)
-            return finish({"group_name": group_name, "status": "failed", "error_type": error_type,
-                    "detail": fetch.detail})
-        self._save_json(store.messages_path(group_name, run_date), [m.to_dict() for m in fetch.messages])
-        store.update(group_name, run_date, status=DATA_READY, message_count=len(fetch.messages))
 
         # ---- 2) 排行榜 ----
         ranking_started = perf_counter()
         try:
             ranking = self.ranking_engine.compute(
-                fetch.messages,
+                messages,
                 group_name,
                 period_start,
                 period_end,
@@ -300,7 +521,7 @@ class DailyPipeline:
                      speaker_count=ranking.speaker_count, message_count=ranking.message_count)
 
         # ---- 3) 生图 Prompt（Codex GPT 主用，DeepSeek 备用）----
-        prompt_msgs = [m for m in fetch.messages if RankingEngine._countable(m)]
+        prompt_msgs = [m for m in messages if RankingEngine._countable(m)]
         prompt_input = PromptInput(
             group_name=group_name,
             group_id=str(group.id or group.wechat_group_id or group_name),
@@ -758,12 +979,18 @@ class DailyPipeline:
         self,
         group_id: int,
         run_date: str | None = None,
+        refresh_messages: bool = False,
         *,
         acquire_lock: bool = True,
     ) -> dict:
         if acquire_lock:
             with generation_mutex():
-                return self.force_generate(group_id, run_date, acquire_lock=False)
+                return self.force_generate(
+                    group_id,
+                    run_date,
+                    refresh_messages=refresh_messages,
+                    acquire_lock=False,
+                )
         if run_date is None:
             run_date = datetime.now(ZoneInfo(self.settings.app_timezone)).date().isoformat()
         else:
@@ -779,11 +1006,114 @@ class DailyPipeline:
         if not group:
             return {"status": "failed", "error": f"群不存在 {group_id}"}
         window = self.period_resolver.resolve(run_date=parse_date(run_date), timezone=self.settings.app_timezone)
-        result = self._generate_one(group, window, run_date, force=True)
+        result = self._generate_one(
+            group,
+            window,
+            run_date,
+            force=True,
+            refresh_messages=refresh_messages,
+        )
         if not result.get("need_image"):
             return result
         job = self._make_image_job(group, run_date, force=True)
         return self._run_image_jobs([job], run_date)[0]
+
+    def rebuild_prompt_from_snapshot(
+        self,
+        group_id: int,
+        run_date: str,
+        *,
+        acquire_lock: bool = True,
+    ) -> dict:
+        """只从当天 messages.json 重建排行榜和 Prompt，不取数、不生图。"""
+        if acquire_lock:
+            with generation_mutex():
+                return self.rebuild_prompt_from_snapshot(
+                    group_id,
+                    run_date,
+                    acquire_lock=False,
+                )
+
+        parsed_run_date = parse_date(run_date)
+        if parsed_run_date is None:
+            return {
+                "status": "failed",
+                "error_type": "INVALID_RUN_DATE",
+                "detail": "run_date 必须是有效的 YYYY-MM-DD 日期",
+            }
+        run_date = parsed_run_date.isoformat()
+        group = self._get_group(group_id)
+        if not group:
+            return {"status": "failed", "detail": f"群不存在 {group_id}"}
+
+        group_name = self._group_name(group)
+        snapshot_path = self.store.messages_path(group_name, run_date)
+        if not snapshot_path.is_file():
+            return {
+                "group_name": group_name,
+                "status": "failed",
+                "error_type": "MESSAGE_SNAPSHOT_MISSING",
+                "detail": "当天 messages.json 不存在；已停止且不会临时重取微信消息",
+            }
+
+        current = self.store.load_run(group_name, run_date)
+        if current.get("image_regen_status") in {"queued", "running"}:
+            return {
+                "group_name": group_name,
+                "status": "failed",
+                "error_type": "IMAGE_REGEN_BUSY",
+                "detail": "该运行正在生图，请完成后再重建 Prompt",
+            }
+
+        keep_sent = current.get("status") == SENT
+        self.store.update(
+            group_name,
+            run_date,
+            prompt_rebuild_status="running",
+            prompt_rebuild_error="",
+            send_hold=True,
+            send_hold_reason="PROMPT_REBUILDING",
+            needs_manual_send=True,
+        )
+        window = self.period_resolver.resolve(
+            run_date=parsed_run_date,
+            timezone=self.settings.app_timezone,
+        )
+        result = self._generate_one(
+            group,
+            window,
+            run_date,
+            force=True,
+            refresh_messages=False,
+        )
+        if result.get("status") == "failed":
+            self.store.update(
+                group_name,
+                run_date,
+                prompt_rebuild_status="failed",
+                prompt_rebuild_error=str(result.get("detail") or result.get("error") or "重建失败")[:500],
+                send_hold=True,
+                needs_manual_send=True,
+            )
+            return result
+
+        self.store.update(
+            group_name,
+            run_date,
+            status=SENT if keep_sent else PROMPT_READY,
+            prompt_rebuild_status="ready_for_review",
+            prompt_rebuild_error="",
+            image_regen_status="prompt_rebuilt",
+            image_regen_error="",
+            send_hold=True,
+            send_hold_reason="PROMPT_REBUILT_REVIEW_REQUIRED",
+            needs_manual_send=True,
+        )
+        return {
+            "group_name": group_name,
+            "status": "prompt_ready",
+            "detail": "已从当天 messages.json 重建排行榜和 Prompt；未取数，未生图",
+        }
 
     def force_send(
         self,
@@ -885,6 +1215,40 @@ class DailyPipeline:
     def _save_json(self, path: Path, data) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(data, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+
+    @staticmethod
+    def _load_message_snapshot(path: Path) -> list[V2Message]:
+        """读取已落盘的日报消息；损坏时失败，不静默回源。"""
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(payload, list) or not payload:
+            raise ValueError("messages.json 必须是非空数组")
+
+        messages: list[V2Message] = []
+        for index, item in enumerate(payload, start=1):
+            if not isinstance(item, dict):
+                raise ValueError(f"第 {index} 条消息不是对象")
+            timestamp_text = str(item.get("timestamp") or "").strip()
+            try:
+                timestamp = datetime.fromisoformat(timestamp_text)
+            except ValueError as exc:
+                raise ValueError(f"第 {index} 条消息时间无效") from exc
+            message_id = str(item.get("message_id") or "").strip()
+            group_id = str(item.get("group_id") or "").strip()
+            if not message_id or not group_id:
+                raise ValueError(f"第 {index} 条消息缺少 message_id/group_id")
+            messages.append(
+                V2Message(
+                    message_id=message_id,
+                    group_id=group_id,
+                    group_name=str(item.get("group_name") or ""),
+                    sender_id=str(item.get("sender_id") or ""),
+                    sender_name=str(item.get("sender_name") or ""),
+                    timestamp=timestamp,
+                    message_type=str(item.get("message_type") or "text"),
+                    content=str(item.get("content") or ""),
+                )
+            )
+        return messages
 
 
 def parse_date(value: str | None) -> date | None:

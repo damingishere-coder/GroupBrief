@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import socket
 import urllib.error
 from datetime import datetime
 
@@ -20,9 +21,11 @@ from app.api import settings as settings_api
 from app.config.settings import Settings, get_settings
 from app.db import repository as repo
 from app.providers.history.base import ProviderStatus
+from app.providers.history import wechat_data_analysis, wechat_mcp
 from app.providers.history.mock import MockProvider
 from app.providers.history.wechat_data_analysis import (
     WeChatDataAnalysisProvider,
+    _mcp_message_type,
     _mcp_timestamp,
     _sanitize_sender_name,
 )
@@ -184,6 +187,83 @@ def test_mcp_client_sends_auth_and_parses(monkeypatch):
     assert captured["auth"] == "Bearer secret-token-1"
     assert captured["payload"]["method"] == "tools/call"
     assert captured["payload"]["params"]["name"] == "wechat.core.get_status"
+
+
+def test_mcp_client_enforces_total_response_deadline(monkeypatch):
+    class StreamingResponse:
+        def read(self, _size):
+            return b"x"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    monkeypatch.setattr(
+        "app.providers.history.wechat_mcp._PROXY_FREE_OPENER.open",
+        lambda request, timeout=None: StreamingResponse(),
+    )
+    moments = iter([0.0, 0.05, 0.1, 1.1])
+    monkeypatch.setattr(wechat_mcp, "monotonic", lambda: next(moments))
+    client = MCPClient("http://127.0.0.1:10392/mcp", "token", timeout=1)
+
+    with pytest.raises(MCPError, match="整次请求截止时间"):
+        client.call("wechat.chat.get_messages_range", {})
+
+
+def test_mcp_client_deadline_timer_interrupts_trickle_response(monkeypatch):
+    class FakeSocket:
+        def __init__(self):
+            self.shutdown_how = None
+            self.closed = False
+
+        def shutdown(self, how):
+            self.shutdown_how = how
+
+        def close(self):
+            self.closed = True
+
+        def settimeout(self, _timeout):
+            return None
+
+    class TrickleResponse:
+        def __init__(self):
+            self.fp = type("FP", (), {"raw": type("Raw", (), {"_sock": FakeSocket()})()})()
+
+        def read(self, _size):
+            return b'{}'
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    class ImmediateTimer:
+        def __init__(self, _delay, callback):
+            self.callback = callback
+            self.daemon = False
+
+        def start(self):
+            self.callback()
+
+        def cancel(self):
+            return None
+
+    response = TrickleResponse()
+    monkeypatch.setattr(
+        "app.providers.history.wechat_mcp._PROXY_FREE_OPENER.open",
+        lambda request, timeout=None: response,
+    )
+    monkeypatch.setattr(wechat_mcp, "Timer", ImmediateTimer)
+    client = MCPClient("http://127.0.0.1:10392/mcp", "token", timeout=1)
+
+    with pytest.raises(MCPError, match="整次请求截止时间"):
+        client.call("wechat.chat.get_messages_range", {})
+
+    assert response.fp.raw._sock.shutdown_how == socket.SHUT_RDWR
+    assert response.fp.raw._sock.closed is True
 
 
 def test_mcp_client_http_401_no_token_leak(monkeypatch):
@@ -386,6 +466,36 @@ def test_range_read_one_call_and_preserves_group_display_name():
     assert result.meta["server_elapsed_ms"] == 321
 
 
+def test_shared_wrong_upstream_name_uses_contact_mapping(monkeypatch):
+    fake = FakeMCPClient().on(
+        "wechat.chat.get_messages_range",
+        lambda params: {
+            "messages": [
+                _msg("m1", 1786420000, "wxid-a", "错误共享名"),
+                _msg("m2", 1786420100, "wxid-b", "错误共享名"),
+            ],
+            "hasMore": False,
+        },
+    )
+    provider = _provider(fake)
+    resolved = {"wxid-a": "Alice", "wxid-b": "Bob"}
+    monkeypatch.setattr(provider._contacts, "resolve_name", lambda sender_id: resolved.get(sender_id, ""))
+
+    result = provider.fetch_messages("group@chatroom", WINDOW_START, WINDOW_END)
+
+    assert result.status == ProviderStatus.OK
+    assert [message.sender_name for message in result.messages] == ["Alice", "Bob"]
+    assert result.meta["sender_name_collision_count"] == 1
+    assert result.meta["sender_name_collision_sender_count"] == 2
+    assert result.meta["sender_name_contact_count"] == 2
+
+
+def test_mcp_camel_case_message_types_are_normalized_but_unknown_types_remain_unknown():
+    assert _mcp_message_type("redPacket") == "red_packet"
+    assert _mcp_message_type("chatHistory") == "chat_history"
+    assert _mcp_message_type("futureWidget") == "future_widget"
+
+
 def test_range_read_pages_until_has_more_false_and_deduplicates():
     def handler(params: dict) -> dict:
         if params["offset"] == 0:
@@ -406,6 +516,29 @@ def test_range_read_pages_until_has_more_false_and_deduplicates():
     assert [item.source_message_id for item in result.messages] == ["m1", "dup", "m2"]
     assert [params["offset"] for _, params in fake.calls] == [0, 2]
     assert result.meta["range_page_count"] == 2
+
+
+def test_range_read_enforces_one_total_deadline_across_pages(monkeypatch):
+    now = [0.0]
+    monkeypatch.setattr(wechat_data_analysis, "perf_counter", lambda: now[0])
+    provider = _provider(FakeMCPClient())
+    provider.wechat_mcp_range_timeout_seconds = 60
+    provider.wechat_fetch_total_timeout_seconds = 10
+
+    def slow_page(method, params, stats, *, timeout=None):
+        assert timeout == pytest.approx(10.0)
+        now[0] = 10.1
+        return {
+            "messages": [_msg("m1", 1786420000)],
+            "hasMore": True,
+            "nextOffset": 1,
+        }
+
+    monkeypatch.setattr(provider, "_mcp_call", slow_page)
+    result = provider.fetch_messages("group@chatroom", WINDOW_START, WINDOW_END)
+
+    assert result.status == ProviderStatus.READ_FAILED
+    assert "整组总截止时间" in result.detail
 
 
 def test_range_read_failure_does_not_silently_fallback():

@@ -1,6 +1,9 @@
 import { CircleNotch, Info, X } from "@phosphor-icons/react";
 import type { ButtonHTMLAttributes, ReactNode } from "react";
 
+export { ImagePreviewTrigger, ImageViewer } from "./ImageViewer";
+export type { ImagePreviewTriggerProps, ImageViewerProps } from "./ImageViewer";
+
 export function PageHeader({ title, description, actions }: { title: string; description?: string; actions?: ReactNode }) {
   return (
     <header className="ui-page-header">

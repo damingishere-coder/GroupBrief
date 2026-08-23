@@ -197,6 +197,49 @@ def test_prompt_ready_group_starts_image_before_other_prompts_finish(tmp_path, m
     assert all(item["status"] == "ready_to_send" for item in results)
 
 
+def test_unexpected_worker_and_image_errors_are_isolated(tmp_path, monkeypatch):
+    settings = Settings(_env_file=None, generation_group_concurrency=3)
+    groups = [
+        Group(display_name="worker异常群", wechat_group_id="worker"),
+        Group(display_name="图片异常群", wechat_group_id="image"),
+        Group(display_name="正常群", wechat_group_id="ok"),
+    ]
+    pipeline = DailyPipeline(
+        settings=settings,
+        store=RunStore(tmp_path / "output"),
+        dry_run=True,
+    )
+    monkeypatch.setattr(pipeline, "_load_groups", lambda group_ids=None: groups)
+
+    def fake_generate(group, window, run_date, force):
+        if group.display_name == "worker异常群":
+            raise RuntimeError("worker boom")
+        return {
+            "group_name": group.display_name,
+            "status": "prompt_ready" if group.display_name == "图片异常群" else "ready_to_send",
+            "need_image": group.display_name == "图片异常群",
+        }
+
+    def fake_image(group, result, run_date, force):
+        if group.display_name == "图片异常群":
+            raise RuntimeError("image boom")
+        return result
+
+    monkeypatch.setattr(pipeline, "_generate_one_safe", fake_generate)
+    monkeypatch.setattr(pipeline, "_run_image_when_ready", fake_image)
+
+    results = pipeline.generate_all(run_date="2026-08-21")
+
+    assert [item["group_name"] for item in results] == [
+        "worker异常群",
+        "图片异常群",
+        "正常群",
+    ]
+    assert [item["status"] for item in results] == ["failed", "failed", "ready_to_send"]
+    assert results[0]["error_type"] == "UNEXPECTED_GENERATION_ERROR"
+    assert results[1]["error_type"] == "IMAGE_GENERATION_FAILED"
+
+
 def test_shared_generation_lock_rejects_overlapping_task():
     acquired = threading.Event()
     release = threading.Event()

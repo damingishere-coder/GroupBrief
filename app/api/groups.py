@@ -343,6 +343,7 @@ def test_read(
 ):
     from app.scheduler.calendar_rules import get_report_window
     from app.services.history_service import HistoryService
+    from app.services.message_normalizer import MessageNormalizer
 
     group = _require_active_group(session, group_id)
     if not group.wechat_group_id:
@@ -360,7 +361,10 @@ def test_read(
         "provider": outcome.provider,
         "status": outcome.status.value,
         "detail": outcome.detail,
-        "message_count": len(outcome.messages),
+        "message_count": sum(
+            1 for message in outcome.messages if MessageNormalizer.is_countable(message)
+        ),
+        "raw_message_count": len(outcome.messages),
     }
 
 

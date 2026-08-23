@@ -76,7 +76,7 @@ function TestResult({ result }: { result: TestReadResult }) {
     <div className="groups-test-result">
       <StatusBadge tone={tone}>{result.status}</StatusBadge>
       <span>Provider：{result.provider || "—"}</span>
-      <span>消息数：{result.message_count}</span>
+      <span>读取总数：{result.raw_message_count} / 计入统计：{result.message_count}</span>
       <span>{result.detail || "无详细信息"}</span>
     </div>
   );

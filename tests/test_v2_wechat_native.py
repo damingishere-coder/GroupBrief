@@ -10,6 +10,9 @@ from app.sender.wechat_native import (
     OcrLine,
     WechatNativeSender,
     WindowsWechatDriver,
+    _main_chat_horizontal_bounds,
+    _selected_header_matches,
+    _select_group_search_match,
     _title_matches,
 )
 
@@ -51,6 +54,105 @@ def test_title_match_only_accepts_exact_name_or_member_count():
     assert _title_matches("测试群 (128)", "测试群")
     assert not _title_matches("测试群公告", "测试群")
     assert not _title_matches("另一个测试群", "测试群")
+    assert _title_matches("米游涩泛二次元同好摸鱼群2．3", "米游涩泛二次元同好摸鱼群2.3")
+    assert _title_matches("Eason张UED-4群", "Eason张UED-4群🤘")
+
+
+def test_selected_header_allows_one_ocr_substitution_only_for_long_title():
+    target = "米游涩泛二次元同好摸鱼群2.3"
+
+    assert _selected_header_matches("米游涩泛一次元同好摸鱼群2．3（422）", target)
+    assert _selected_header_matches("Eason 张 lJED-4ä#", "Eason张UED-4群🤘")
+    assert not _selected_header_matches("米游涩泛二次元同好摸鱼群3.2（422）", target)
+    assert not _selected_header_matches("Grok张UED-4ä#", "Eason张UED-4群🤘")
+    assert not _selected_header_matches("测试一（10）", "测试二")
+
+
+def test_search_selects_only_group_section_match():
+    target = "米游涩泛二次元同好摸鱼群2.3"
+    lines = [
+        OcrLine(target, 160, 5, 250, 24),
+        OcrLine("搜索网络结果", 140, 56, 150, 18),
+        OcrLine(target, 140, 104, 270, 20),
+        OcrLine("群聊", 140, 210, 50, 18),
+        OcrLine("的 米游涩泛二次元同好换角群2．3", 203, 225, 315, 21),
+        OcrLine("聊天记录", 137, 300, 75, 18),
+        OcrLine(target, 203, 486, 280, 21),
+    ]
+
+    matched, detail = _select_group_search_match(lines, target)
+
+    assert detail == ""
+    assert matched is lines[4]
+
+
+def test_search_rejects_similar_group_with_different_version_suffix():
+    lines = [
+        OcrLine("搜索网络结果", 140, 56, 150, 18),
+        OcrLine("群聊", 140, 210, 50, 18),
+        OcrLine("米游涩泛二次元同好摸鱼群3.2", 203, 225, 280, 21),
+        OcrLine("聊天记录", 137, 300, 75, 18),
+    ]
+
+    matched, _ = _select_group_search_match(lines, "米游涩泛二次元同好摸鱼群2.3")
+
+    assert matched is None
+
+
+def test_search_allows_missing_second_version_digit_but_not_wrong_first_digit():
+    target = "米游涩泛二次元同好摸鱼群1.1"
+    partial = OcrLine("米游涩泛二次元同好摸鱼群1。", 203, 125, 277, 21)
+    wrong = OcrLine("米游涩泛二次元同好摸鱼群2。", 203, 125, 277, 21)
+    boundary = OcrLine("聊天记录", 137, 200, 72, 17)
+
+    matched, detail = _select_group_search_match([partial, boundary], target)
+    rejected, _ = _select_group_search_match([wrong, boundary], target)
+
+    assert detail == ""
+    assert matched is partial
+    assert rejected is None
+
+
+def test_search_allows_bounded_ocr_errors_with_stable_ascii_anchor():
+    lines = [
+        OcrLine("Grok App 交 氵 充 君 丰", 204, 125, 164, 23),
+        OcrLine("聊天记录", 137, 200, 72, 17),
+    ]
+
+    matched, detail = _select_group_search_match(lines, "Grok App 交流群")
+
+    assert detail == ""
+    assert matched is lines[0]
+
+
+def test_search_selects_exact_recent_group_before_network_section():
+    lines = [
+        OcrLine("Q 茶馆 V4.0（四周年纪念）", 131, 8, 251, 19),
+        OcrLine("最常使用", 137, 56, 71, 17),
+        OcrLine("茶馆 V4℃（四周年纪念〕可 0", 174, 125, 316, 21),
+        OcrLine("搜索网络结果", 138, 199, 146, 18),
+        OcrLine("茶馆 V4.0（四周年纪念〕 0", 170, 248, 246, 18),
+    ]
+
+    matched, detail = _select_group_search_match(lines, "茶馆V4.0（四周年纪念）🐮🐴")
+
+    assert detail == ""
+    assert matched is lines[2]
+
+
+def test_search_fails_closed_without_chat_history_boundary():
+    matched, detail = _select_group_search_match(
+        [OcrLine("目标群", 140, 104, 120, 20)],
+        "目标群",
+    )
+
+    assert matched is None
+    assert "匹配数 0" in detail
+
+
+def test_main_chat_bounds_avoid_optional_right_panel():
+    assert _main_chat_horizontal_bounds(0, 1557) == (430, 1557)
+    assert _main_chat_horizontal_bounds(0, 2223) == (555, 1400)
 
 
 def test_verify_target_fails_closed_on_ambiguous_result(tmp_path):
@@ -140,12 +242,17 @@ def test_health_report_rejects_missing_chinese_ocr(tmp_path, monkeypatch):
 def test_target_search_overwrites_stale_query_before_paste(tmp_path, monkeypatch):
     driver = WindowsWechatDriver(_settings(tmp_path))
     hotkeys: list[tuple[str, str]] = []
+    clicks: list[tuple[float, float]] = []
     screenshots = iter(
         [
             [OcrLine("其他会话", 10, 10, 100, 20)],
             [
                 OcrLine("搜索网络结果", 10, 5, 100, 20),
-                OcrLine("文件传输助手", 10, 200, 100, 20),
+                OcrLine("文件传输助手", 10, 50, 100, 20),
+                OcrLine("群聊", 10, 120, 50, 20),
+                OcrLine("文件传输助手", 80, 150, 100, 20),
+                OcrLine("聊天记录", 10, 210, 80, 20),
+                OcrLine("文件传输助手", 80, 260, 100, 20),
             ],
             [OcrLine("文件传输助手", 10, 10, 100, 20)],
         ]
@@ -157,13 +264,49 @@ def test_target_search_overwrites_stale_query_before_paste(tmp_path, monkeypatch
     monkeypatch.setattr(driver, "_set_clipboard_text", lambda text: None)
     monkeypatch.setattr(driver, "_window_rect", lambda hwnd: (0, 0, 1000, 800))
     monkeypatch.setattr(driver, "_ocr_screen", lambda box: next(screenshots))
-    monkeypatch.setattr(driver, "_click", lambda x, y: None)
+    monkeypatch.setattr(driver, "_click", lambda x, y: clicks.append((x, y)))
     monkeypatch.setattr("app.sender.wechat_native.time.sleep", lambda seconds: None)
 
     ok, _ = driver.open_and_verify("文件传输助手")
 
     assert ok is True
-    assert hotkeys[:2] == [("ctrl", "f"), ("ctrl", "a")]
+    assert hotkeys == [("ctrl", "a"), ("ctrl", "v")]
+    assert clicks[0] == (210.0, 49.6)
+    assert clicks[1] == (130.0, 200.0)
+
+
+def test_target_search_retries_transient_ocr_miss(tmp_path, monkeypatch):
+    driver = WindowsWechatDriver(_settings(tmp_path))
+    search_miss = [OcrLine("搜索网络结果", 10, 5, 100, 20)]
+    search_ready = [
+        OcrLine("搜索网络结果", 10, 5, 100, 20),
+        OcrLine("目标群", 10, 50, 100, 20),
+        OcrLine("群聊", 10, 120, 50, 20),
+        OcrLine("目标群", 80, 150, 100, 20),
+        OcrLine("聊天记录", 10, 210, 80, 20),
+    ]
+    screenshots = iter(
+        [
+            [OcrLine("其他会话", 10, 10, 100, 20)],
+            search_miss,
+            search_ready,
+            [OcrLine("目标群", 10, 10, 100, 20)],
+        ]
+    )
+    monkeypatch.setattr(driver, "health_check", lambda: (True, "ok"))
+    monkeypatch.setattr(driver, "_wechat_windows", lambda: [123])
+    monkeypatch.setattr(driver, "_activate", lambda hwnd: True)
+    monkeypatch.setattr(driver, "_hotkey", lambda modifier, key: None)
+    monkeypatch.setattr(driver, "_key", lambda key, key_up=False: None)
+    monkeypatch.setattr(driver, "_set_clipboard_text", lambda text: None)
+    monkeypatch.setattr(driver, "_window_rect", lambda hwnd: (0, 0, 1000, 800))
+    monkeypatch.setattr(driver, "_ocr_screen", lambda box: next(screenshots))
+    monkeypatch.setattr(driver, "_click", lambda x, y: None)
+    monkeypatch.setattr("app.sender.wechat_native.time.sleep", lambda seconds: None)
+
+    ok, _ = driver.open_and_verify("目标群")
+
+    assert ok is True
 
 
 def test_submission_verification_requires_composer_to_return_near_empty():

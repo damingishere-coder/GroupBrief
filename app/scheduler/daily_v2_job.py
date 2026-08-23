@@ -1,8 +1,8 @@
 """唯一的 V2 每日生成与邮件调度任务。
 
 状态写入 output/.scheduler/<run_date>.json。生成和邮件分别记录开始与完成
-时间；若进程在阶段开始后、完成标记前退出，下一次启动只报告结果未知，不自动
-重试可能产生计费或重复邮件的副作用。
+时间；生成阶段被进程中断后可以在全局生成锁保护下续跑未完成群，邮件阶段的
+结果未知保护保持不变，避免重复发送外部消息。
 """
 
 from __future__ import annotations
@@ -95,33 +95,52 @@ def _run_locked(settings: Settings, run_date: date, *, skip_email: bool) -> dict
     generation_results = state.get("generation_results") or []
     if not state.get("generation_completed_at"):
         if state.get("generation_started_at"):
+            try:
+                resume_count = int(state.get("generation_resume_count") or 0) + 1
+            except (TypeError, ValueError):
+                resume_count = 1
+            state = state_store.update(
+                run_date_text,
+                generation_status="resuming",
+                generation_hold=False,
+                generation_error="",
+                generation_resumed_at=_now_iso(),
+                generation_resume_count=resume_count,
+            )
+            logger.warning(
+                "V2 每日生成检测到中断，开始安全续跑：run_date=%s resume_count=%d",
+                run_date_text,
+                resume_count,
+            )
+        else:
+            state = state_store.update(
+                run_date_text,
+                generation_started_at=_now_iso(),
+                generation_status="running",
+                generation_hold=False,
+                generation_error="",
+            )
+        try:
+            generation_results = DailyPipeline(settings=settings).generate_all(
+                run_date=run_date_text, acquire_lock=False
+            )
+        except Exception as exc:
             state_store.update(
                 run_date_text,
-                generation_status="unknown",
-                generation_hold=True,
-                generation_error="生成阶段曾启动但没有完成标记，禁止自动重复生成",
+                generation_completed_at=_now_iso(),
+                generation_status="failed",
+                generation_hold=False,
+                generation_error=str(exc)[:300],
             )
-            return {
-                "status": "blocked",
-                "error_type": "GENERATION_RESULT_UNKNOWN",
-                "detail": "生成阶段结果未知，需人工检查",
-            }
-        state_store.update(
-            run_date_text,
-            generation_started_at=_now_iso(),
-            generation_status="running",
-            generation_hold=False,
-            generation_error="",
-        )
-        generation_results = DailyPipeline(settings=settings).generate_all(
-            run_date=run_date_text, acquire_lock=False
-        )
+            raise
         generation_status = _generation_status(generation_results)
         state = state_store.update(
             run_date_text,
             generation_completed_at=_now_iso(),
             generation_status=generation_status,
             generation_results=_compact_results(generation_results),
+            generation_hold=False,
+            generation_error="",
         )
     else:
         state = state_store.load(run_date_text)

@@ -151,6 +151,37 @@ def test_archive_group_name_is_display_only_not_an_ownership_key(archive_client)
     assert orphan["run_count"] == 1
 
 
+def test_run_detail_only_lists_downloadable_files_and_serves_original_png(archive_client):
+    client, _, output_dir = archive_client
+    group_name = "文件预览群"
+    run_date = "2026-08-22"
+    store = RunStore(output_dir)
+    _save_v2_run(store, None, group_name, run_date)
+    group_dir = store.group_dir(group_name, run_date)
+    image_bytes = b"\x89PNG\r\n\x1a\noriginal-image"
+    (group_dir / "daily_image.png").write_bytes(image_bytes)
+    (group_dir / "daily_image.previous.png").write_bytes(b"\x89PNG\r\n\x1a\nprevious-image")
+    (group_dir / "微信群日报-测试.png").write_bytes(b"\x89PNG\r\n\x1a\nextra-image")
+    (group_dir / "private.txt").write_text("not public", encoding="utf-8")
+
+    detail = client.get(f"/api/v2/runs/{group_name}/{run_date}")
+    assert detail.status_code == 200
+    assert detail.json()["files"] == [
+        "daily_image.png",
+        "daily_image.previous.png",
+        "run.json",
+    ]
+
+    image = client.get(f"/api/v2/files/{group_name}/{run_date}/daily_image.png")
+    assert image.status_code == 200
+    assert image.headers["content-type"].startswith("image/png")
+    assert "daily_image.png" in image.headers["content-disposition"]
+    assert image.content == image_bytes
+
+    assert client.get(f"/api/v2/files/{group_name}/{run_date}/微信群日报-测试.png").status_code == 400
+    assert client.get(f"/api/v2/files/{group_name}/{run_date}/..%2Fprivate.txt").status_code != 200
+
+
 def test_soft_delete_preserves_database_history_and_output_then_restores_disabled(archive_client):
     client, engine, output_dir = archive_client
     group = _save_group(

@@ -97,11 +97,11 @@ def test_daily_v2_job_persists_generation_and_email_idempotency(tmp_path, monkey
     assert state["email_completed_at"]
 
 
-def test_daily_v2_job_does_not_retry_unknown_generation(tmp_path, monkeypatch):
+def test_daily_v2_job_resumes_interrupted_generation_without_email(tmp_path, monkeypatch):
     from app.config.settings import Settings
     from app.scheduler import daily_v2_job as daily
 
-    settings = Settings(_env_file=None)
+    settings = Settings(_env_file=None, email_enabled=True, email_smtp_host="smtp.example.com")
     real_state_class = daily.DailyScheduleState
 
     class TempState(real_state_class):
@@ -110,14 +110,31 @@ def test_daily_v2_job_does_not_retry_unknown_generation(tmp_path, monkeypatch):
 
     state = TempState(tmp_path)
     state.update("2026-08-21", generation_started_at="2026-08-21T00:15:00+08:00")
+    calls = []
+
+    class FakePipeline:
+        def __init__(self, settings):
+            self.settings = settings
+
+        def generate_all(self, run_date, acquire_lock=True):
+            calls.append((run_date, acquire_lock))
+            return [{"group_name": "测试群", "status": "ready_to_send"}]
+
     monkeypatch.setattr(daily, "DailyScheduleState", TempState)
+    monkeypatch.setattr(daily, "DailyPipeline", FakePipeline)
     monkeypatch.setattr(daily.repo, "init_db", lambda settings: None)
     monkeypatch.setattr(daily.repo, "apply_db_settings", lambda settings: [])
 
-    result = daily.run_daily_v2_job("2026-08-21", settings=settings)
+    result = daily.run_daily_v2_job("2026-08-21", settings=settings, skip_email=True)
+    saved = state.load("2026-08-21")
 
-    assert result["status"] == "blocked"
-    assert result["error_type"] == "GENERATION_RESULT_UNKNOWN"
+    assert result["status"] == "success"
+    assert result["email_status"] == "skipped_by_request"
+    assert calls == [("2026-08-21", False)]
+    assert saved["generation_completed_at"]
+    assert saved["generation_resume_count"] == 1
+    assert saved["generation_hold"] is False
+    assert saved["generation_error"] == ""
 
 
 def test_startup_catchup_is_added_only_when_today_is_incomplete(monkeypatch):
@@ -149,6 +166,7 @@ def test_startup_catchup_is_added_only_when_today_is_incomplete(monkeypatch):
 
     assert added is True
     assert captured[0][1]["id"] == "daily_v2_startup_catchup"
+    assert captured[0][1]["kwargs"] == {"skip_email": True}
 
     class CompletedState(IncompleteState):
         def load(self, run_date):

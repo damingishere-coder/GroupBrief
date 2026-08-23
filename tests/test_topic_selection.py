@@ -68,7 +68,7 @@ def test_score_weights_total_100_and_log_normalization():
     assert selection["selected_count"] == 2
 
 
-def test_selection_stops_at_first_threshold_failure_and_max_five():
+def test_selection_guarantees_four_then_applies_threshold_to_fifth():
     messages = _messages(8)
     candidates = [
         _candidate(1, ["m0", "m1"], 40, 20, 20),
@@ -78,9 +78,30 @@ def test_selection_stops_at_first_threshold_failure_and_max_five():
         _candidate(5, ["m7"], 40, 20, 20),
     ]
     selection = score_and_select_topics(candidates, messages)
-    assert 2 <= selection["selected_count"] <= 5
+    assert selection["selected_count"] == 4
+    assert selection["thresholds"]["target_selected"] == 4
     selected_ranks = [item["rank"] for item in selection["candidates"] if item["selected"]]
-    assert selected_ranks == list(range(1, len(selected_ranks) + 1))
+    assert selected_ranks == [1, 2, 3, 4]
+
+
+def test_two_or_three_real_candidates_are_all_selected_without_padding():
+    selection = score_and_select_topics(
+        [_candidate(1, ["m0"]), _candidate(2, ["m1"]), _candidate(3, ["m2"], 0, 0)],
+        _messages(3),
+    )
+    assert selection["selected_count"] == 3
+    assert [item["selected"] for item in selection["candidates"]] == [True, True, True]
+
+
+def test_high_volume_chat_selects_five_real_candidates():
+    messages = _messages(205)
+    candidates = [
+        _candidate(index, [f"m{index - 1}"], comedy=40 - index * 5, visual=10, recognition=10)
+        for index in range(1, 6)
+    ]
+    selection = score_and_select_topics(candidates, messages)
+    assert selection["selected_count"] == 5
+    assert selection["thresholds"]["high_volume_message_threshold"] == 200
 
 
 def test_single_candidate_fails_instead_of_splitting_one_topic_to_fill_quota():
@@ -116,3 +137,79 @@ def test_selected_topics_json_contains_only_selected_candidates():
     payload = selected_topics_json(selection)
     assert '"selected":true' in payload
     assert '"selected":false' not in payload
+
+
+def test_visible_participants_are_derived_from_evidence_and_names_are_not_truncated():
+    start = datetime(2026, 8, 21, 9, 0)
+    messages = [
+        PromptMessage("m0", start, "很长但必须完整保留的群友姓名", "发起", "wxid-a"),
+        PromptMessage("m1", start + timedelta(minutes=1), "很长但必须完整保留的群友姓名", "继续", "wxid-a"),
+        PromptMessage("m2", start + timedelta(minutes=2), "李四", "回应", "wxid-b"),
+        PromptMessage("m3", start + timedelta(minutes=3), "王五", "补充", "wxid-c"),
+        PromptMessage("m4", start + timedelta(minutes=4), "赵六", "收尾", "wxid-d"),
+    ]
+    selection = score_and_select_topics(
+        [_candidate(1, ["m0", "m1", "m2", "m3", "m4"]), _candidate(2, ["m2"])],
+        messages,
+    )
+    first = selection["candidates"][0]
+    assert first["visible_participants"][0] == "很长但必须完整保留的群友姓名"
+    assert "很长但必须完整保留的群友姓名" in first["participant_label"]
+    assert first["participant_label"].endswith("等 4 人")
+    assert set(first["visible_participants"]).issubset(set(first["participants"]))
+
+
+def test_visible_participants_skip_an_over_budget_name_and_keep_scanning():
+    start = datetime(2026, 8, 21, 9, 0)
+    messages = [
+        PromptMessage("m0", start, "c2341298", "发起", "wxid-a"),
+        PromptMessage("m1", start + timedelta(minutes=1), "c2341298", "继续", "wxid-a"),
+        PromptMessage("m2", start + timedelta(minutes=2), "这是一个特别特别特别长的完整群友姓名", "回应", "wxid-b"),
+        PromptMessage("m3", start + timedelta(minutes=3), "这是一个特别特别特别长的完整群友姓名", "补充", "wxid-b"),
+        PromptMessage("m4", start + timedelta(minutes=4), "Max", "收尾", "wxid-c"),
+        PromptMessage("m5", start + timedelta(minutes=5), "另一位群友", "另一主题", "wxid-d"),
+    ]
+    selection = score_and_select_topics(
+        [_candidate(1, ["m0", "m1", "m2", "m3", "m4"]), _candidate(2, ["m5"])],
+        messages,
+    )
+    first = selection["candidates"][0]
+
+    assert first["visible_participants"] == ["c2341298", "Max"]
+    assert first["participant_label"] == "c2341298、Max等 3 人"
+
+
+def test_same_display_name_with_different_ids_keeps_all_participant_fields_consistent():
+    start = datetime(2026, 8, 21, 9, 0)
+    messages = [
+        PromptMessage("m0", start, "同名", "发起", "wxid-a"),
+        PromptMessage("m1", start + timedelta(minutes=1), "同名", "回应", "wxid-b"),
+        PromptMessage("m2", start + timedelta(minutes=2), "第三人", "另一主题", "wxid-c"),
+    ]
+    selection = score_and_select_topics(
+        [_candidate(1, ["m0", "m1"]), _candidate(2, ["m2"])],
+        messages,
+    )
+    first = next(item for item in selection["candidates"] if item["topic_id"] == "topic-01")
+
+    assert first["participant_count"] == 2
+    assert len(first["participants"]) == 2
+    assert len(first["visible_participants"]) == 2
+    assert all(name.startswith("同名（同名 ") for name in first["participants"])
+    assert set(first["visible_participants"]) == set(first["participants"])
+    assert "等 2 人" not in first["participant_label"]
+
+
+def test_unresolved_participant_uses_explicit_fallback_instead_of_fake_name():
+    messages = [
+        PromptMessage("m0", datetime(2026, 8, 21, 9, 0), "(未知)", "发言", "wxid-a"),
+        PromptMessage("m1", datetime(2026, 8, 21, 9, 1), "未命名成员-abcd", "回应", "wxid-b"),
+    ]
+    selection = score_and_select_topics(
+        [_candidate(1, ["m0"]), _candidate(2, ["m1"])],
+        messages,
+    )
+    assert all(
+        item["participant_label"] == "群友（昵称未识别）"
+        for item in selection["candidates"]
+    )

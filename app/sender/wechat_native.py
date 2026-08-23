@@ -15,6 +15,7 @@ import os
 import re
 import threading
 import time
+import unicodedata
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
@@ -63,7 +64,17 @@ def _now() -> str:
 
 
 def _normalized_title(value: str) -> str:
-    return re.sub(r"\s+", "", value or "").strip()
+    normalized = unicodedata.normalize("NFKC", value or "")
+    visible = []
+    for char in normalized:
+        # Windows OCR 经常省略群名末尾的 Emoji，或只保留变体选择符。
+        # 装饰符号不参与目标身份判断，其余标点（如 2.3、UED-4）仍保留。
+        if char in {"\u200d", "\ufe0e", "\ufe0f"}:
+            continue
+        if unicodedata.category(char) in {"So", "Sk"}:
+            continue
+        visible.append(char)
+    return re.sub(r"\s+", "", "".join(visible)).strip()
 
 
 def _title_matches(value: str, target: str) -> bool:
@@ -73,6 +84,136 @@ def _title_matches(value: str, target: str) -> bool:
     if value_n == target_n:
         return True
     return bool(re.fullmatch(re.escape(target_n) + r"[（(]\d+[)）]", value_n))
+
+
+def _selected_header_matches(value: str, target: str) -> bool:
+    """群聊项已选中后，对标题 OCR 做受限容错复核。"""
+    if _title_matches(value, target):
+        return True
+    value_n = re.sub(r"\(\d+\)$", "", _normalized_title(value))
+    target_n = _normalized_title(target)
+    if len(target_n) < 8 or abs(len(value_n) - len(target_n)) > 3:
+        return False
+    if value_n[:3].casefold() != target_n[:3].casefold():
+        return False
+
+    suffix_pattern = r"\d+(?:[._-]\d+)+$"
+    target_suffix = re.search(suffix_pattern, target_n)
+    if target_suffix:
+        value_suffix = re.search(suffix_pattern, value_n)
+        if value_suffix is None or value_suffix.group(0) != target_suffix.group(0):
+            return False
+    return _edit_distance(value_n, target_n) <= min(4, max(1, len(target_n) // 3))
+
+
+def _edit_distance(left: str, right: str) -> int:
+    if len(left) < len(right):
+        left, right = right, left
+    previous = list(range(len(right) + 1))
+    for left_index, left_char in enumerate(left, start=1):
+        current = [left_index]
+        for right_index, right_char in enumerate(right, start=1):
+            current.append(
+                min(
+                    current[-1] + 1,
+                    previous[right_index] + 1,
+                    previous[right_index - 1] + (left_char != right_char),
+                )
+            )
+        previous = current
+    return previous[-1]
+
+
+def _has_stable_ascii_anchor(value: str, target: str) -> bool:
+    """确认 OCR 仍保留了群名中的英文名或版本号锚点。"""
+    value_n = _normalized_title(value).casefold()
+    target_n = _normalized_title(target).casefold()
+    anchors = re.findall(r"[a-z0-9]+(?:[._-][a-z0-9]+)*", target_n)
+    return any(len(re.sub(r"[^a-z0-9]", "", anchor)) >= 3 and anchor in value_n for anchor in anchors)
+
+
+def _search_title_score(value: str, target: str, *, max_distance: int | None = None) -> int | None:
+    """返回受限 OCR 距离；版本号不同的相似群名永不匹配。"""
+    value_n = _normalized_title(value)
+    target_n = _normalized_title(target)
+    if _title_matches(value_n, target_n):
+        return 0
+    anchored = _has_stable_ascii_anchor(value_n, target_n)
+    tolerance = max_distance if max_distance is not None else (4 if anchored else 3)
+    if len(target_n) < 8 or abs(len(value_n) - len(target_n)) > tolerance:
+        return None
+
+    suffix_pattern = r"\d+(?:[._-]\d+)+$"
+    target_suffix = re.search(suffix_pattern, target_n)
+    if target_suffix:
+        value_suffix = re.search(suffix_pattern, value_n)
+        if value_suffix is None:
+            # Windows OCR 偶尔会把“1.1”群聊项的后半段识别成“1。”。
+            # 搜索阶段只容许首段数字相同的残缺版本；点击后的标题
+            # 复核仍要求完整版本，不同的 2.3/3.2 仍然不会被接受。
+            partial_suffix = re.search(r"(\d+)[。.]?$", value_n)
+            target_first = target_suffix.group(0).split(".", 1)[0].split("_", 1)[0].split("-", 1)[0]
+            if partial_suffix is None or partial_suffix.group(1) != target_first:
+                return None
+        elif value_suffix.group(0) != target_suffix.group(0):
+            return None
+
+    distance = _edit_distance(value_n, target_n)
+    return distance if distance <= tolerance else None
+
+
+def _section_label(value: str) -> str:
+    return _normalized_title(value).strip("[]【】()（）<>《》")
+
+
+def _select_group_search_match(lines: list[OcrLine], target: str) -> tuple[OcrLine | None, str]:
+    """只从搜索浮层的“群聊”分区选择目标。
+
+    微信 4.1 的绿色群名 OCR 不稳定，“群聊”标题本身也可能被误识别；
+    “聊天记录”标题较稳定，因此用它作为群聊分区的下边界。群聊结果是
+    该边界前最后一个、且紧邻边界的完整标题。网络结果和输入框中的同名
+    文本距离边界更远，不会成为候选。
+    """
+    ordered = sorted(lines, key=lambda line: (line.top, line.left))
+    chat_sections = [line for line in ordered if _section_label(line.text) == "聊天记录"]
+    candidates: list[OcrLine] = []
+    if len(chat_sections) == 1:
+        chat_top = chat_sections[0].top
+        candidates = [
+            line
+            for line in ordered
+            if line.top + line.height <= chat_top
+            and 0 <= chat_top - (line.top + line.height) <= max(line.height * 6.0, 120.0)
+        ]
+
+    scored = [(score, line) for line in candidates if (score := _search_title_score(line.text, target)) is not None]
+    if not scored:
+        # 新改名或很少在聊天中提及的群，搜索结果可能只有
+        # “最常使用”中的群聊项，没有“聊天记录”分区。此时只允许
+        # 选择“搜索网络结果”之前、且明显低于顶部输入框的唯一匹配。
+        network_sections = [line for line in ordered if "搜索网络结果" in _section_label(line.text)]
+        if network_sections:
+            network_top = min(line.top for line in network_sections)
+            before_network = [
+                line
+                for line in ordered
+                if line.top >= 55.0 and line.top + line.height <= network_top
+            ]
+            scored = [
+                (score, line)
+                for line in before_network
+                # 这个候选已被“顶部输入框之下 + 网络结果之前”
+                # 双重限定，而且点击后还要复核聊天标题，可额外容忍
+                # “V4.0”被识别成“V4℃”时产生的一个 OCR 距离。
+                if (score := _search_title_score(line.text, target, max_distance=5)) is not None
+            ]
+    if not scored:
+        return None, "群聊分区未得到可验证的目标匹配（匹配数 0）"
+    best_score = min(score for score, _ in scored)
+    best = [line for score, line in scored if score == best_score]
+    if len(best) != 1:
+        return None, f"群聊分区目标仍有歧义（最佳匹配数 {len(best)}）"
+    return best[0], ""
 
 
 def _coerce_action_result(value: tuple[bool, str] | NativeActionResult) -> NativeActionResult:
@@ -86,6 +227,16 @@ def _coerce_action_result(value: tuple[bool, str] | NativeActionResult) -> Nativ
         verification_level="ui_observed" if ok else "",
         outcome_unknown=False,
     )
+
+
+def _main_chat_horizontal_bounds(left: int, right: int) -> tuple[int, int]:
+    """返回中间聊天区的安全水平范围，避开左侧会话列表和可选右侧面板。"""
+    width = right - left
+    content_left = left + int(min(max(width * 0.25, 430.0), 580.0))
+    content_right = right if width <= 1800 else left + min(int(width * 0.65), 1400)
+    if content_right - content_left < 320:
+        content_right = right
+    return content_left, content_right
 
 
 @contextmanager
@@ -196,7 +347,16 @@ class WindowsWechatDriver:
         if not activated:
             return False, "微信窗口无法激活"
 
-        self._hotkey("ctrl", "f")
+        left, top, right, bottom = self._window_rect(self._window)
+        width, height = right - left, bottom - top
+        if width < 600 or height < 420:
+            return False, "微信窗口尺寸异常，请恢复主窗口后重试"
+
+        # 微信 4.1.x 不再保证 Ctrl+F 会聚焦全局搜索。直接点击左上角搜索框，
+        # 坐标限制在其稳定区域内，兼容不同窗口宽度与 DPI。
+        search_x = left + min(max(width * 0.21, 180.0), 360.0)
+        search_y = top + min(max(height * 0.062, 40.0), 90.0)
+        self._click(search_x, search_y)
         time.sleep(self.delay)
         # 上一次验证异常退出时搜索框可能保留旧内容；每次都覆盖输入，避免
         # 重试把目标名称重复拼接后造成误判或点错会话。
@@ -205,34 +365,37 @@ class WindowsWechatDriver:
         self._hotkey("ctrl", "v")
         time.sleep(self.delay * 1.5)
 
-        left, top, right, bottom = self._window_rect(self._window)
-        width, height = right - left, bottom - top
-        if width < 600 or height < 420:
-            return False, "微信窗口尺寸异常，请恢复主窗口后重试"
-        header_box = (left + int(width * 0.40), top, right, top + int(height * 0.16))
+        chat_left, chat_right = _main_chat_horizontal_bounds(left, right)
+        header_box = (chat_left, top, chat_right, top + int(height * 0.16))
         if any(_title_matches(line.text, target) for line in self._ocr_screen(header_box)):
             return True, f"当前聊天标题已精确验证：{target}"
 
-        # 微信可能位于带缩放的副屏；在 DPI 感知坐标下按窗口比例覆盖完整
-        # 搜索浮层（含“功能”结果），避免只截到网络建议或错位到聊天区。
+        # 覆盖完整搜索浮层，再按分区选择群聊项；不能把顶部网络结果或下方
+        # 聊天记录里的同名文本当作会话目标。
         search_box = (
             left,
-            top + int(height * 0.10),
-            left + int(width * 0.43),
-            min(bottom, top + int(height * 0.72)),
+            top + int(height * 0.05),
+            left + min(int(width * 0.50), 700),
+            min(bottom, top + int(height * 0.65)),
         )
-        lines = self._ocr_screen(search_box)
-        matches = [line for line in lines if _title_matches(line.text, target)]
-        if len(matches) != 1:
-            return False, f"搜索结果未得到唯一精确匹配（匹配数 {len(matches)}），已停止发送"
-        matched = matches[0]
+        matched = None
+        match_error = "搜索结果尚未完成识别"
+        search_attempts = max(3, min(6, int(1.5 / self.delay)))
+        for _ in range(search_attempts):
+            lines = self._ocr_screen(search_box)
+            matched, match_error = _select_group_search_match(lines, target)
+            if matched is not None:
+                break
+            time.sleep(self.delay)
+        if matched is None:
+            return False, f"{match_error}，已停止发送"
         self._click(search_box[0] + matched.left + matched.width / 2, search_box[1] + matched.top + matched.height / 2)
         time.sleep(self.delay * 1.5)
 
         header_attempts = max(3, min(10, int(2.0 / self.delay)))
         for _ in range(header_attempts):
             header_lines = self._ocr_screen(header_box)
-            if any(_title_matches(line.text, target) for line in header_lines):
+            if any(_selected_header_matches(line.text, target) for line in header_lines):
                 return True, f"已精确查找并验证目标：{target}"
             time.sleep(self.delay)
         return False, "聊天标题 OCR 校验失败，已停止发送"
@@ -280,9 +443,7 @@ class WindowsWechatDriver:
                 return NativeActionResult(False, "图片粘贴后未观察到预览，已停止发送")
             if not self._window:
                 return NativeActionResult(False, "微信窗口尚未验证")
-            left, top, right, bottom = self._window_rect(self._window)
-            width, height = right - left, bottom - top
-            self._click(left + width * 0.93, top + height * 0.95)
+            self._key("enter")
             submitted = True
             time.sleep(self.delay * 2.5)
             after_composer, after_chat = self._capture_send_regions()
@@ -429,7 +590,8 @@ class WindowsWechatDriver:
         if not self._window:
             raise RuntimeError("微信窗口尚未验证")
         left, top, right, bottom = self._window_rect(self._window)
-        self._click(left + (right - left) * 0.67, bottom - min(120, (bottom - top) * 0.18))
+        chat_left, chat_right = _main_chat_horizontal_bounds(left, right)
+        self._click((chat_left + chat_right) / 2, bottom - min(120, (bottom - top) * 0.18))
         time.sleep(self.delay)
 
     def _capture_send_regions(self):
@@ -438,15 +600,14 @@ class WindowsWechatDriver:
         from PIL import ImageGrab
 
         left, top, right, bottom = self._window_rect(self._window)
-        width = right - left
         height = bottom - top
-        content_left = left + min(350, int(width * 0.34))
+        content_left, content_right = _main_chat_horizontal_bounds(left, right)
         composer_top = bottom - min(250, int(height * 0.30))
         composer = ImageGrab.grab(
-            bbox=(content_left, composer_top, right, bottom - 35), all_screens=True
+            bbox=(content_left, composer_top, content_right, bottom - 35), all_screens=True
         ).convert("RGB")
         chat = ImageGrab.grab(
-            bbox=(content_left, top + min(100, int(height * 0.15)), right, composer_top), all_screens=True
+            bbox=(content_left, top + min(100, int(height * 0.15)), content_right, composer_top), all_screens=True
         ).convert("RGB")
         return composer, chat
 

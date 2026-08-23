@@ -184,6 +184,7 @@ def _seed_defaults(settings: Settings) -> None:
         "ai_model": settings.ai_model,
         "max_context_chars": str(settings.max_context_chars),
         "generation_group_concurrency": str(settings.generation_group_concurrency),
+        "wechat_fetch_total_timeout_seconds": str(settings.wechat_fetch_total_timeout_seconds),
         "wechat_fetch_concurrency": str(settings.wechat_fetch_concurrency),
         "ai_request_concurrency": str(settings.ai_request_concurrency),
         "codex_path": settings.codex_path,

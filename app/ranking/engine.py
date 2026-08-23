@@ -9,11 +9,9 @@
 
 from __future__ import annotations
 
-from collections import Counter
-import unicodedata
-
 from app.data_sources.base import V2Message
 from app.services.message_normalizer import COUNTABLE_TYPES, SYSTEM_KEYWORDS
+from app.services.speaker_identity import build_speaker_stats, speaker_name_sort_key
 from app.ranking.engine_types import RankingResult, TopSpeaker
 
 
@@ -28,14 +26,6 @@ class RankingEngine:
             return False
         return m.message_type in COUNTABLE_TYPES
 
-    @staticmethod
-    def _name_sort_key(name: str) -> tuple[str, str]:
-        """同分时忽略前导 Emoji/装饰符，用可见文字主体保持稳定排序。"""
-        visible_core = str(name or "").lstrip()
-        while visible_core and unicodedata.category(visible_core[0]).startswith(("P", "S", "Z")):
-            visible_core = visible_core[1:].lstrip()
-        return (visible_core or str(name or ""), str(name or ""))
-
     def compute(
         self,
         messages: list[V2Message],
@@ -47,22 +37,20 @@ class RankingEngine:
         if top_limit <= 0:
             raise ValueError("排行榜上限必须大于 0")
 
-        counter: Counter[str] = Counter()
-        for m in messages:
-            if not self._countable(m):
-                continue
-            if not m.sender_name:
-                continue
-            counter[m.sender_name] += 1
-
-        message_count = sum(counter.values())
-        speaker_count = len(counter)
+        speakers = build_speaker_stats(
+            (m.sender_id, m.sender_name) for m in messages if self._countable(m)
+        )
+        message_count = sum(item.count for item in speakers)
+        speaker_count = len(speakers)
 
         # 确定性排序：消息数降序，同数量按名称稳定升序
-        ordered = sorted(counter.items(), key=lambda kv: (-kv[1], self._name_sort_key(kv[0])))
+        ordered = sorted(
+            speakers,
+            key=lambda item: (-item.count, speaker_name_sort_key(item.name), item.key),
+        )
         top_speakers = [
-            TopSpeaker(rank=i + 1, name=name, count=count)
-            for i, (name, count) in enumerate(ordered[:top_limit])
+            TopSpeaker(rank=i + 1, name=item.name, count=item.count)
+            for i, item in enumerate(ordered[:top_limit])
         ]
 
         return RankingResult(

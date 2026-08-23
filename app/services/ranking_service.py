@@ -8,10 +8,10 @@
 
 from __future__ import annotations
 
-from collections import Counter
 from dataclasses import dataclass, field
 
 from app.services.message_normalizer import NormalizedMessage
+from app.services.speaker_identity import build_speaker_stats, speaker_name_sort_key
 
 
 @dataclass
@@ -54,19 +54,17 @@ class RankingEngine:
         range_start: str,
         range_end: str,
     ) -> RankingResult:
-        counter: Counter[str] = Counter()
-        for m in messages:
-            if not m.countable:
-                continue
-            if not m.sender_name:
-                continue
-            counter[m.sender_name] += 1
+        speaker_stats = build_speaker_stats(
+            (m.sender_id, m.sender_name) for m in messages if m.countable
+        )
+        total = sum(item.count for item in speaker_stats)
+        speakers = len(speaker_stats)
 
-        total = sum(counter.values())
-        speakers = len(counter)
-
-        ordered = sorted(counter.items(), key=lambda kv: (-kv[1], kv[0]))
-        top10 = ordered[:10]
+        ordered = sorted(
+            speaker_stats,
+            key=lambda item: (-item.count, speaker_name_sort_key(item.name), item.key),
+        )
+        top10 = [(item.name, item.count) for item in ordered[:10]]
 
         return RankingResult(
             group_name=group_name,

@@ -6,12 +6,15 @@ CodexImageGenerator health_check 不可用判定。
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
+import subprocess
 import threading
 import time
 
 import pytest
 
+from app.image import codex_generator
 from app.image.codex_generator import CodexImageGenerator
 from app.image.image_task import (
     ImageJob,
@@ -215,7 +218,7 @@ def test_codex_prompt_is_passed_via_stdin_not_command_line(tmp_path, monkeypatch
     monkeypatch.setattr(gen, "health_check", lambda: (True, "ok"))
     monkeypatch.setattr(gen, "_snapshot", lambda: {})
     monkeypatch.setattr(gen, "_scan_new", lambda before: [generated])
-    monkeypatch.setattr("app.image.codex_generator.subprocess.run", fake_run)
+    monkeypatch.setattr("app.image.codex_generator._run_codex_process", fake_run)
 
     result = gen.generate(prompt, tmp_path / "daily_image.png")
 
@@ -242,13 +245,50 @@ def test_codex_rejects_multiple_new_images_as_ambiguous(tmp_path, monkeypatch):
     monkeypatch.setattr(gen, "health_check", lambda: (True, "ok"))
     monkeypatch.setattr(gen, "_snapshot", lambda: {})
     monkeypatch.setattr(gen, "_scan_new", lambda before: [first, second])
-    monkeypatch.setattr("app.image.codex_generator.subprocess.run", lambda *a, **k: Proc())
+    monkeypatch.setattr("app.image.codex_generator._run_codex_process", lambda *a, **k: Proc())
 
     result = gen.generate(prompt, tmp_path / "daily_image.png")
 
     assert result.success is False
     assert result.detail["stage"] == "ambiguous"
     assert not (tmp_path / "daily_image.png").exists()
+
+
+def test_codex_selects_latest_image_from_same_execution(tmp_path, monkeypatch):
+    generated_root = tmp_path / "generated_images"
+    execution_dir = generated_root / "execution-1"
+    execution_dir.mkdir(parents=True)
+    first = execution_dir / "first.png"
+    second = execution_dir / "second.png"
+    first.write_bytes(_PNG_1PX)
+    second.write_bytes(_PNG_1PX + b"different-image-content")
+    os.utime(first, (1, 1))
+    os.utime(second, (2, 2))
+    prompt = tmp_path / "image_prompt.txt"
+    prompt.write_text("test", encoding="utf-8")
+
+    class Proc:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    gen = CodexImageGenerator(
+        codex_path="codex-test",
+        generated_images_dir=str(generated_root),
+    )
+    monkeypatch.setattr(gen, "health_check", lambda: (True, "ok"))
+    monkeypatch.setattr(gen, "_snapshot", lambda: {})
+    monkeypatch.setattr(gen, "_scan_new", lambda before: [first, second])
+    monkeypatch.setattr("app.image.codex_generator._run_codex_process", lambda *a, **k: Proc())
+
+    output = tmp_path / "daily_image.png"
+    result = gen.generate(prompt, output)
+
+    assert result.success is True
+    assert output.exists()
+    assert result.detail["source"] == str(second.resolve())
+    assert result.detail["candidate_count"] == 2
+    assert result.detail["candidate_selection"] == "latest_same_execution"
 
 
 def test_codex_deduplicates_identical_image_copies(tmp_path, monkeypatch):
@@ -268,7 +308,7 @@ def test_codex_deduplicates_identical_image_copies(tmp_path, monkeypatch):
     monkeypatch.setattr(gen, "health_check", lambda: (True, "ok"))
     monkeypatch.setattr(gen, "_snapshot", lambda: {})
     monkeypatch.setattr(gen, "_scan_new", lambda before: [first, second])
-    monkeypatch.setattr("app.image.codex_generator.subprocess.run", lambda *a, **k: Proc())
+    monkeypatch.setattr("app.image.codex_generator._run_codex_process", lambda *a, **k: Proc())
 
     output = tmp_path / "daily_image.png"
     result = gen.generate(prompt, output)
@@ -298,12 +338,50 @@ def test_codex_rejects_corrupt_image_without_overwriting_existing(tmp_path, monk
     monkeypatch.setattr(gen, "health_check", lambda: (True, "ok"))
     monkeypatch.setattr(gen, "_snapshot", lambda: {})
     monkeypatch.setattr(gen, "_scan_new", lambda before: [corrupt])
-    monkeypatch.setattr("app.image.codex_generator.subprocess.run", lambda *a, **k: Proc())
+    monkeypatch.setattr("app.image.codex_generator._run_codex_process", lambda *a, **k: Proc())
 
     result = gen.generate(prompt, output)
 
     assert result.success is False
     assert output.read_bytes() == original
+
+
+def test_codex_timeout_terminates_process_tree(monkeypatch):
+    class FakeProcess:
+        pid = 12345
+        returncode = None
+
+        def __init__(self):
+            self.communicate_calls = 0
+
+        def communicate(self, **kwargs):
+            self.communicate_calls += 1
+            if self.communicate_calls == 1:
+                raise subprocess.TimeoutExpired("codex", 1)
+            return ("", "")
+
+        def poll(self):
+            return None
+
+        def kill(self):
+            return None
+
+    process = FakeProcess()
+    terminated = []
+    monkeypatch.setattr(codex_generator.subprocess, "Popen", lambda *a, **k: process)
+    monkeypatch.setattr(codex_generator, "_terminate_process_tree", lambda value: terminated.append(value))
+
+    with pytest.raises(subprocess.TimeoutExpired):
+        codex_generator._run_codex_process(
+            ["codex", "exec"],
+            timeout=1,
+            cwd=".",
+            input="$imagegen test",
+            env={},
+        )
+
+    assert terminated == [process]
+    assert process.communicate_calls == 2
 
 
 def test_codex_imagegen_mutex_serializes_concurrent_requests():

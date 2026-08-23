@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+
 import pytest
 from fastapi import FastAPI
 from sqlmodel import SQLModel, Session, create_engine, select
@@ -15,9 +17,10 @@ from app.providers.history.base import (
     GroupInfo,
     ProviderHealth,
     ProviderStatus,
+    RawMessage,
 )
 from app.providers.history.mock import MockProvider
-from app.services.history_service import GroupMatch, HistoryService, normalize_name
+from app.services.history_service import FetchOutcome, GroupMatch, HistoryService, normalize_name
 
 
 class StubProvider(ChatHistoryProvider):
@@ -175,6 +178,67 @@ def test_resolve_api_returns_typed_matches(client, monkeypatch):
             "match_type": "exact",
         }
     ]
+
+
+def test_read_api_reports_raw_and_countable_message_counts(client, monkeypatch):
+    test_client, engine = client
+    with Session(engine) as session:
+        group = repo.save_group(
+            session,
+            Group(
+                display_name="测试读取群",
+                wechat_group_id="read-group@chatroom",
+                wechat_group_name="测试读取群",
+                enabled=True,
+            ),
+        )
+        group_id = group.id
+
+    messages = [
+        RawMessage(
+            group_id="read-group@chatroom",
+            group_name="测试读取群",
+            sender_id="wxid-a",
+            sender_name="Alice",
+            timestamp=datetime(2026, 8, 23, 10, 0),
+            message_type="chat_history",
+            content="聊天记录",
+        ),
+        RawMessage(
+            group_id="read-group@chatroom",
+            group_name="测试读取群",
+            sender_id="system",
+            sender_name="系统",
+            timestamp=datetime(2026, 8, 23, 10, 1),
+            message_type="system",
+            content="系统消息",
+        ),
+        RawMessage(
+            group_id="read-group@chatroom",
+            group_name="测试读取群",
+            sender_id="wxid-b",
+            sender_name="Bob",
+            timestamp=datetime(2026, 8, 23, 10, 2),
+            message_type="future_widget",
+            content="未知类型",
+        ),
+    ]
+    monkeypatch.setattr(
+        HistoryService,
+        "fetch",
+        lambda self, *args, **kwargs: FetchOutcome(
+            provider="stub_export",
+            messages=messages,
+            status=ProviderStatus.OK,
+            detail="ok",
+        ),
+    )
+
+    response = test_client.post(f"/api/groups/{group_id}/test-read")
+
+    assert response.status_code == 200
+    assert response.json()["message_count"] == 1
+    assert response.json()["raw_message_count"] == 3
 
 
 def test_from_name_single_exact_binds(client, monkeypatch):

@@ -292,6 +292,7 @@ export interface TestReadResult {
   status: string;
   detail: string;
   message_count: number;
+  raw_message_count: number;
 }
 export const discoverGroups = () => get<DiscoveredGroup[]>("/groups/discover");
 export const resolveGroups = (name: string) =>
@@ -325,7 +326,7 @@ export const getStartupChecks = () => get<StartupCheck>("/v2/system/startup");
 export const getRecoveryInfo = () => get<RecoveryInfo>("/v2/system/recovery");
 export const retryFailed = (body: { group_id?: number; run_date?: string }) =>
   post<{ results: { group_name?: string; status: string; detail?: string }[] }>("/v2/pipeline/retry-failed", body);
-export const pipelineGenerate = (body: { group_id?: number; run_date?: string; force?: boolean }) =>
+export const pipelineGenerate = (body: { group_id?: number; run_date?: string; force?: boolean; refresh_messages?: boolean }) =>
   post<{ results: { status: string; group_name?: string; error_type?: string; detail?: string }[] }>("/v2/pipeline/generate", body);
 export const pipelineSendDue = () => post<{ results: { status: string; group_name?: string }[] }>("/v2/pipeline/send-due");
 export const pipelineSend = (body: { group_id: number; run_date?: string; confirm_regenerated?: boolean; confirm_late_send?: boolean }) =>
@@ -370,6 +371,10 @@ export const saveRunPrompt = (
 ) => put<RunPromptConfig>(`/v2/runs/${encodeURIComponent(group)}/${date}/prompt`, body);
 export const restoreRunPrompt = (group: string, date: string) =>
   post<RunPromptConfig>(`/v2/runs/${encodeURIComponent(group)}/${date}/prompt/restore`);
+export const refreshRunMessages = (group: string, date: string) =>
+  post<{ result: { status: string; detail?: string }; run: V2Run }>(`/v2/runs/${encodeURIComponent(group)}/${date}/refresh-messages`);
+export const rebuildRunPrompt = (group: string, date: string) =>
+  post<{ result: { status: string; detail?: string }; run: V2Run }>(`/v2/runs/${encodeURIComponent(group)}/${date}/rebuild-prompt`);
 export const regenerateRunImage = (group: string, date: string) =>
   post<{ accepted: boolean; run: V2Run }>(`/v2/runs/${encodeURIComponent(group)}/${date}/regenerate-image`);
 

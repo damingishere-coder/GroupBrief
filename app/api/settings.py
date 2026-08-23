@@ -33,6 +33,7 @@ EDITABLE_KEYS = {
     "wechat_mcp_account",
     "wechat_mcp_timeout_seconds",
     "wechat_mcp_range_timeout_seconds",
+    "wechat_fetch_total_timeout_seconds",
     "wechat_contact_db_path",
     "summary_provider_primary",
     "summary_provider_fallback",

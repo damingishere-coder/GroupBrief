@@ -19,6 +19,8 @@ import {
   Button,
   ConfirmDialog,
   EmptyState,
+  ImagePreviewTrigger,
+  ImageViewer,
   LoadingState,
   PageHeader,
   StatusBadge,
@@ -61,14 +63,35 @@ function formatPeriod(card: DashboardCard): string {
   return `${card.period_start.slice(0, 10)} ~ ${card.period_end.slice(0, 10)}`;
 }
 
-function ImagePreview({ card }: { card: DashboardCard }) {
+interface ViewerImage {
+  src: string;
+  alt: string;
+  filename: string;
+  title: string;
+}
+
+function ImagePreview({ card, onOpen }: { card: DashboardCard; onOpen: (image: ViewerImage) => void }) {
+  const [imageBroken, setImageBroken] = useState(false);
+
   if (card.image_url) {
-    return <img className="dashboard-task-image" src={card.image_url} alt={`${card.group_name} 日报图片`} />;
+    const alt = `${card.group_name} 日报图片`;
+    if (!imageBroken) {
+      return (
+        <ImagePreviewTrigger
+          src={card.image_url}
+          alt={alt}
+          imageClassName="dashboard-task-image"
+          className="dashboard-task-image-trigger"
+          onError={() => setImageBroken(true)}
+          onOpen={() => onOpen({ src: card.image_url, alt, filename: "daily_image.png", title: alt })}
+        />
+      );
+    }
   }
   return (
     <div className="dashboard-image-empty">
       <ImageSquare size={28} aria-hidden="true" />
-      <span>暂未生成真实图片</span>
+      <span>{imageBroken ? "图片读取失败" : "暂未生成真实图片"}</span>
     </div>
   );
 }
@@ -140,6 +163,7 @@ export default function Dashboard() {
   const [generatingId, setGeneratingId] = useState<number | null>(null);
   const [sendingId, setSendingId] = useState<number | null>(null);
   const [sendCard, setSendCard] = useState<DashboardCard | null>(null);
+  const [viewerImage, setViewerImage] = useState<ViewerImage | null>(null);
 
   const refresh = () => {
     dashboard.reload();
@@ -354,7 +378,7 @@ export default function Dashboard() {
                   </div>
                   <StatusPill status={card.status} />
                 </div>
-                <ImagePreview card={card} />
+                <ImagePreview key={card.image_url || "empty"} card={card} onOpen={setViewerImage} />
                 {card.error && <p className="dashboard-task-error">{card.error}</p>}
                 <div className="dashboard-task-meta">
                   <span>消息 {Number(card.message_count || 0)}</span>
@@ -375,6 +399,16 @@ export default function Dashboard() {
           </div>
         )}
       </section>
+
+      <ImageViewer
+        open={Boolean(viewerImage)}
+        src={viewerImage?.src || ""}
+        alt={viewerImage?.alt || "日报图片"}
+        filename={viewerImage?.filename || "daily_image.png"}
+        title={viewerImage?.title || "日报图片"}
+        onClose={() => setViewerImage(null)}
+        onDownloadError={toast}
+      />
 
       <ConfirmDialog
         open={Boolean(sendCard)}

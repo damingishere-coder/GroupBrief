@@ -16,12 +16,18 @@ PERIOD_START = "2026-08-17 00:00:00"
 PERIOD_END = "2026-08-17 23:59:59"
 
 
-def _msg(sender: str, mtype: str = "text", content: str = "hi", i: int = 0) -> V2Message:
+def _msg(
+    sender: str,
+    mtype: str = "text",
+    content: str = "hi",
+    i: int = 0,
+    sender_id: str | None = None,
+) -> V2Message:
     return V2Message(
         message_id=f"m{i}",
         group_id="g1@chatroom",
         group_name="测试群",
-        sender_id=f"wxid_{sender}",
+        sender_id=sender_id or f"wxid_{sender}",
         sender_name=sender,
         timestamp=datetime(2026, 8, 17, 10, 0, 0),
         message_type=mtype,
@@ -87,6 +93,24 @@ def test_system_message_filtered():
     r = engine.compute(messages, "测试群", PERIOD_START, PERIOD_END)
     assert r.message_count == 2
     assert r.speaker_count == 2
+
+
+def test_identity_uses_sender_id_and_counts_supported_forward_types():
+    messages = [
+        _msg("同名", "red_packet", i=1, sender_id="wxid-a"),
+        _msg("同名", "chat_history", i=2, sender_id="wxid-b"),
+        _msg("改名前", i=3, sender_id="wxid-c"),
+        _msg("改名后", i=4, sender_id="wxid-c"),
+    ]
+    result = engine.compute(messages, "测试群", PERIOD_START, PERIOD_END)
+
+    assert result.message_count == 4
+    assert result.speaker_count == 3
+    same_name_entries = [item for item in result.top_speakers if item.name.startswith("同名（同名 ")]
+    assert len(same_name_entries) == 2
+    assert sum(item.count for item in same_name_entries) == 2
+    renamed = next(item for item in result.top_speakers if item.name in {"改名前", "改名后"})
+    assert renamed.count == 2
 
 
 def test_deterministic():

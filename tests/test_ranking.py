@@ -7,11 +7,17 @@ from app.services.message_normalizer import MessageNormalizer, normalize_message
 from app.services.ranking_service import RankingEngine
 
 
-def _msg(sender: str, mtype: str = "text", content: str = "hi", ts: str = "2026-08-10T10:00:00") -> RawMessage:
+def _msg(
+    sender: str,
+    mtype: str = "text",
+    content: str = "hi",
+    ts: str = "2026-08-10T10:00:00",
+    sender_id: str | None = None,
+) -> RawMessage:
     return RawMessage(
         group_id="group-a",
         group_name="测试群",
-        sender_id=f"id-{sender}",
+        sender_id=sender_id or f"id-{sender}",
         sender_name=sender,
         timestamp=datetime.fromisoformat(ts),
         message_type=mtype,
@@ -43,12 +49,13 @@ def test_all_user_types_countable():
         _msg("A", "link", "https://x.com"),
         _msg("A", "quote", "引用内容"),
         _msg("A", "red_packet", "[红包]"),
+        _msg("A", "chat_history", "[聊天记录]"),
         _msg("A", "transfer", "[转账]"),
         _msg("A", "system", "系统消息"),
     ]
     normalized = normalize_messages(msgs)
     countable = sum(1 for m in normalized if m.countable)
-    assert countable == 10
+    assert countable == 11
 
 
 def test_image_and_file_payloads_are_not_sent_to_ai():
@@ -56,6 +63,11 @@ def test_image_and_file_payloads_are_not_sent_to_ai():
     file = MessageNormalizer.normalize(_msg("A", "file", "binary-file-body"))
     assert image.ai_text == "[图片]"
     assert file.ai_text == "[文件]"
+
+    red_packet = MessageNormalizer.normalize(_msg("A", "red_packet", ""))
+    chat_history = MessageNormalizer.normalize(_msg("A", "chat_history", ""))
+    assert red_packet.ai_text == "[红包]"
+    assert chat_history.ai_text == "[聊天记录]"
 
 
 def test_consecutive_messages_not_merged():
@@ -83,6 +95,23 @@ def test_ranking_numbers():
     assert result.top10[0] == ("张三", 3)
     assert result.top10[1][0] == "李四"
     assert result.top10[2][0] == "王五"
+
+
+def test_v1_ranking_uses_sender_id_instead_of_display_name():
+    normalized = normalize_messages(
+        [
+            _msg("同名", "red_packet", sender_id="wxid-a"),
+            _msg("同名", "chat_history", sender_id="wxid-b"),
+            _msg("改名前", sender_id="wxid-c"),
+            _msg("改名后", sender_id="wxid-c"),
+        ]
+    )
+    result = RankingEngine().compute(normalized, "测试群", "start", "end")
+
+    assert result.total_messages == 4
+    assert result.speaker_count == 3
+    assert len([name for name, _ in result.top10 if name.startswith("同名（同名 ")]) == 2
+    assert next(count for name, count in result.top10 if name in {"改名前", "改名后"}) == 2
 
 
 def test_ranking_render_format():

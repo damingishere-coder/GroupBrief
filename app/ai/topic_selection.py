@@ -9,14 +9,21 @@ import math
 import re
 from typing import Any, Iterable
 
+from app.services.speaker_identity import build_speaker_stats, speaker_name_sort_key
+
 from app.ai.conversation_segments import ConversationChunk, PromptMessage
 
-TOPIC_SELECTION_VERSION = "2.0"
+TOPIC_SELECTION_VERSION = "3.0"
 MAX_CANDIDATES = 8
 MIN_SELECTED = 2
+TARGET_SELECTED = 4
 MAX_SELECTED = 5
+HIGH_VOLUME_MESSAGE_THRESHOLD = 200
 SELECTION_MIN_SCORE = 60.0
 SELECTION_MAX_GAP = 15.0
+VISIBLE_PARTICIPANT_LIMIT = 3
+VISIBLE_PARTICIPANT_CHAR_BUDGET = 24
+UNRESOLVED_PARTICIPANT_LABEL = "群友（昵称未识别）"
 
 SCORE_WEIGHTS = {
     "comedy": 40.0,
@@ -34,7 +41,8 @@ TOPIC_CANDIDATE_SYSTEM = """你是群聊日报选题编辑。只能基于给定�
 不得为了凑数把一个事件拆成“发起/回应”或重复角度。
 comedy_score 为 0～40，group_recognition_score 为 0～20，visual_score 为 0～20。
 comedy_angle 说明真实笑点，visual_gag 说明不改变事实的视觉笑点，并给出简短 score_reason。
-为避免响应截断，标题、摘要、人物和评分理由必须简洁；每个候选的 message_ids 最多保留 100 条有效证据。"""
+为避免响应截断，标题、人物和评分理由必须简洁；summary 必须是一句可直接放进图片的信息，建议不超过 48 个汉字；
+每个候选的 message_ids 最多保留 100 条有效证据。"""
 
 _CANDIDATE_SCHEMA = """返回结构：
 {
@@ -42,7 +50,7 @@ _CANDIDATE_SCHEMA = """返回结构：
     {
       "topic_id": "topic-01",
       "title": "主题短标题",
-      "summary": "基于证据的简要描述",
+      "summary": "基于证据的一句事实过程或结论",
       "people": ["真实参与者"],
       "quotes": ["1-3 条真实原话或忠实缩写"],
       "start_time": "YYYY-MM-DD HH:MM",
@@ -76,6 +84,7 @@ class TopicEvidence:
     sender_key: str
     sender_name: str
     timestamp: datetime | None
+    source_index: int
 
 
 def build_direct_candidate_prompt(chunk: ConversationChunk) -> str:
@@ -176,7 +185,7 @@ def parse_topic_candidates(raw: str, allowed_message_ids: Iterable[str]) -> list
 
 def _evidence(messages: Iterable[PromptMessage]) -> dict[str, TopicEvidence]:
     result: dict[str, TopicEvidence] = {}
-    for item in messages:
+    for source_index, item in enumerate(messages):
         if not item.message_id:
             continue
         result[item.message_id] = TopicEvidence(
@@ -184,8 +193,66 @@ def _evidence(messages: Iterable[PromptMessage]) -> dict[str, TopicEvidence]:
             sender_key=item.sender_id or item.sender_name or "(未知)",
             sender_name=item.sender_name or "(未知)",
             timestamp=item.timestamp,
+            source_index=source_index,
         )
     return result
+
+
+def _resolved_participant_name(value: str) -> bool:
+    name = (value or "").strip()
+    return bool(
+        name
+        and name not in {"(未知)", "未知"}
+        and not name.startswith("未命名成员-")
+    )
+
+
+def _participant_attribution(items: Iterable[TopicEvidence]) -> dict[str, Any]:
+    """用同一身份集合生成人数、完整名单和有限画面署名。"""
+    ordered_items = sorted(items, key=lambda item: item.source_index)
+    stats = build_speaker_stats(
+        (item.sender_key, item.sender_name) for item in ordered_items
+    )
+    ranked = sorted(
+        (item for item in stats if _resolved_participant_name(item.name)),
+        key=lambda item: (-item.count, item.first_index, speaker_name_sort_key(item.name), item.key),
+    )
+    selected: list[str] = []
+    used_chars = 0
+    for item in ranked:
+        name = item.name
+        added_chars = len(name) + (1 if selected else 0)
+        if selected and used_chars + added_chars > VISIBLE_PARTICIPANT_CHAR_BUDGET:
+            # A long full name may not fit the remaining budget while a later,
+            # shorter evidence-backed name still does. Keep scanning instead of
+            # prematurely reducing the visible participant diversity.
+            continue
+        selected.append(name)
+        used_chars += added_chars
+        if len(selected) >= VISIBLE_PARTICIPANT_LIMIT:
+            break
+
+    total_participants = len(stats)
+    participants = sorted((item.name for item in stats), key=speaker_name_sort_key)
+    if not selected:
+        return {
+            "participant_count": total_participants,
+            "participants": participants,
+            "visible_participants": [],
+            "participant_label": UNRESOLVED_PARTICIPANT_LABEL,
+            "participant_name_unresolved": True,
+        }
+
+    label = "、".join(selected)
+    if total_participants > len(selected):
+        label += f"等 {total_participants} 人"
+    return {
+        "participant_count": total_participants,
+        "participants": participants,
+        "visible_participants": selected,
+        "participant_label": label,
+        "participant_name_unresolved": False,
+    }
 
 
 def _log_normalized(value: float, maximum: float, weight: float) -> float:
@@ -215,8 +282,6 @@ def score_and_select_topics(
             )
         items = [evidence[message_id] for message_id in ids]
         timestamps = [item.timestamp for item in items if item.timestamp is not None]
-        participant_names = sorted({item.sender_name for item in items if item.sender_name})
-        participant_keys = {item.sender_key for item in items if item.sender_key}
         duration = 0.0
         if len(timestamps) >= 2:
             duration = max(0.0, (max(timestamps) - min(timestamps)).total_seconds() / 60.0)
@@ -225,8 +290,7 @@ def score_and_select_topics(
                 **candidate,
                 "message_ids": ids,
                 "evidence_message_count": len(ids),
-                "participant_count": len(participant_keys),
-                "participants": participant_names,
+                **_participant_attribution(items),
                 "duration_minutes": round(duration, 1),
                 "start_time": min(timestamps).strftime("%Y-%m-%d %H:%M") if timestamps else candidate["start_time"],
                 "end_time": max(timestamps).strftime("%Y-%m-%d %H:%M") if timestamps else candidate["end_time"],
@@ -254,9 +318,14 @@ def score_and_select_topics(
     scored.sort(key=lambda item: (-item["scores"]["total"], item["start_time"] or "", item["topic_id"]))
     selected_ids: list[str] = []
     previous_total: float | None = None
+    guaranteed_selected = (
+        MAX_SELECTED
+        if len(evidence) > HIGH_VOLUME_MESSAGE_THRESHOLD and len(scored) >= MAX_SELECTED
+        else min(TARGET_SELECTED, len(scored))
+    )
     for rank, item in enumerate(scored, start=1):
-        selected = rank <= MIN_SELECTED
-        if MIN_SELECTED < rank <= MAX_SELECTED:
+        selected = rank <= guaranteed_selected
+        if guaranteed_selected < rank <= MAX_SELECTED:
             total = item["scores"]["total"]
             gap = (previous_total - total) if previous_total is not None else 0.0
             selected = total >= SELECTION_MIN_SCORE and gap < SELECTION_MAX_GAP
@@ -285,7 +354,9 @@ def score_and_select_topics(
         "thresholds": {
             "max_candidates": MAX_CANDIDATES,
             "min_selected": MIN_SELECTED,
+            "target_selected": TARGET_SELECTED,
             "max_selected": MAX_SELECTED,
+            "high_volume_message_threshold": HIGH_VOLUME_MESSAGE_THRESHOLD,
             "additional_min_score": SELECTION_MIN_SCORE,
             "additional_max_gap": SELECTION_MAX_GAP,
         },

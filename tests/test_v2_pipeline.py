@@ -82,6 +82,7 @@ class FakeSource(WeChatDataSource):
         self.messages = messages or [_msg("张三", "今天聊了票房", i=1), _msg("李四", "《牛来》破500万", i=2)]
         self.fail = fail
         self.error_type = error_type
+        self.fetch_calls = 0
 
     def health_check(self) -> DataSourceHealth:
         return DataSourceHealth(DataSourceStatus.OK, "ok")
@@ -93,6 +94,7 @@ class FakeSource(WeChatDataSource):
         return []
 
     def fetch_messages(self, group_id, start_time, end_time) -> FetchResult:
+        self.fetch_calls += 1
         if self.fail:
             return FetchResult([], DataSourceStatus.READ_FAILED, "取数失败", self.error_type or "MESSAGE_FETCH_FAILED")
         return FetchResult(self.messages, DataSourceStatus.OK, "ok")
@@ -247,6 +249,120 @@ def test_generate_force_regenerates(tmp_path):
     pipeline2, _ = _make_pipeline(tmp_path, source=source)
     results = pipeline2.generate_all(run_date="2026-08-18", force=True)
     assert results[0]["status"] == "ready_to_send"
+    assert source.fetch_calls == 0
+    run = pipeline2.store.load_run("测试群", "2026-08-18")
+    assert run["message_snapshot_reused"] is True
+    assert run["message_snapshot_refreshed"] is False
+
+
+def test_generate_explicit_refresh_replaces_saved_snapshot(tmp_path):
+    pipeline, _ = _make_pipeline(tmp_path)
+    pipeline.generate_all(run_date="2026-08-18")
+    prompt_path = pipeline.store.prompt_path("测试群", "2026-08-18")
+    image_path = pipeline.store.image_path("测试群", "2026-08-18")
+    prompt_before = prompt_path.read_bytes()
+    image_before = image_path.read_bytes()
+    run_before = pipeline.store.load_run("测试群", "2026-08-18")
+    prompt_meta_before = run_before["prompt_meta"]
+
+    refreshed = FakeSource(messages=[_msg("王五", "这是显式刷新的消息", i=9)])
+    prompt = FakePrompt()
+    generator = FakeGenerator()
+    pipeline2, _ = _make_pipeline(tmp_path, source=refreshed, prompt=prompt, gen=generator)
+    results = pipeline2.generate_all(
+        run_date="2026-08-18",
+        refresh_messages=True,
+    )
+
+    assert results[0]["status"] == "data_ready"
+    assert refreshed.fetch_calls == 1
+    assert prompt.inputs == []
+    assert generator.calls == []
+    assert prompt_path.read_bytes() == prompt_before
+    assert image_path.read_bytes() == image_before
+    saved = json.loads(
+        pipeline2.store.messages_path("测试群", "2026-08-18").read_text(encoding="utf-8")
+    )
+    assert [item["content"] for item in saved] == ["这是显式刷新的消息"]
+    run = pipeline2.store.load_run("测试群", "2026-08-18")
+    ranking = json.loads(
+        pipeline2.store.ranking_json_path("测试群", "2026-08-18").read_text(encoding="utf-8")
+    )
+    assert run["message_snapshot_reused"] is False
+    assert run["message_snapshot_refreshed"] is True
+    assert run["message_count"] == ranking["message_count"] == 1
+    assert run["speaker_count"] == ranking["speaker_count"] == 1
+    assert run["prompt_meta"] == prompt_meta_before
+    assert run["prompt_rebuild_status"] == "required"
+    assert run["send_hold"] is True
+
+
+def test_refresh_preserves_sent_status_and_sent_at_without_prompt_image_or_send(tmp_path):
+    pipeline, _ = _make_pipeline(tmp_path)
+    pipeline.generate_all(run_date="2026-08-18")
+    sent_at = "2026-08-18T08:31:00+08:00"
+    pipeline.store.update("测试群", "2026-08-18", status=SENT, sent_at=sent_at)
+
+    refreshed = FakeSource(messages=[_msg("同名", i=1), _msg("同名", i=2)])
+    prompt = FakePrompt()
+    generator = FakeGenerator()
+    sender = FakeSender()
+    pipeline2, _ = _make_pipeline(
+        tmp_path, source=refreshed, prompt=prompt, gen=generator, sender=sender
+    )
+    result = pipeline2.generate_all(run_date="2026-08-18", refresh_messages=True)
+    run = pipeline2.store.load_run("测试群", "2026-08-18")
+
+    assert result[0]["status"] == "data_ready"
+    assert run["status"] == SENT
+    assert run["sent_at"] == sent_at
+    assert prompt.inputs == []
+    assert generator.calls == []
+    assert sender.text_calls == []
+    assert sender.image_calls == []
+
+
+def test_rebuild_prompt_uses_saved_snapshot_without_fetch_or_image(tmp_path):
+    pipeline, group = _make_pipeline(tmp_path)
+    pipeline.generate_all(run_date="2026-08-18")
+    snapshot_path = pipeline.store.messages_path("测试群", "2026-08-18")
+    image_path = pipeline.store.image_path("测试群", "2026-08-18")
+    snapshot_before = snapshot_path.read_bytes()
+    image_before = image_path.read_bytes()
+
+    source = FakeSource(fail=True)
+    prompt = FakePrompt()
+    generator = FakeGenerator()
+    pipeline2, _ = _make_pipeline(tmp_path, source=source, prompt=prompt, gen=generator)
+    result = pipeline2.rebuild_prompt_from_snapshot(group.id, "2026-08-18")
+
+    assert result["status"] == "prompt_ready"
+    assert source.fetch_calls == 0
+    assert len(prompt.inputs) == 1
+    assert generator.calls == []
+    assert snapshot_path.read_bytes() == snapshot_before
+    assert image_path.read_bytes() == image_before
+    run = pipeline2.store.load_run("测试群", "2026-08-18")
+    assert run["status"] == PROMPT_READY
+    assert run["message_snapshot_reused"] is True
+    assert run["prompt_rebuild_status"] == "ready_for_review"
+    assert run["image_regen_status"] == "prompt_rebuilt"
+    assert run["send_hold"] is True
+
+
+def test_generate_corrupt_snapshot_fails_without_hidden_refetch(tmp_path):
+    source = FakeSource()
+    pipeline, _ = _make_pipeline(tmp_path, source=source)
+    path = pipeline.store.messages_path("测试群", "2026-08-18")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("{broken", encoding="utf-8")
+
+    results = pipeline.generate_all(run_date="2026-08-18", force=True)
+
+    assert results[0]["status"] == "failed"
+    assert results[0]["error_type"] == "MESSAGE_SNAPSHOT_INVALID"
+    assert source.fetch_calls == 0
+    assert path.read_text(encoding="utf-8") == "{broken"
 
 
 def test_monday_and_tuesday_both_generate_top10(tmp_path):

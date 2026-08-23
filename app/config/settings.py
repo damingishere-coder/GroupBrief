@@ -41,8 +41,9 @@ class Settings(BaseSettings):
     wechat_mcp_token: str = ""
     wechat_mcp_account: str = ""
     wechat_mcp_timeout_seconds: int = 10
-    # 全天范围读取可能包含数千条消息，单独使用更长超时，不放大普通调用的等待。
+    # 单页范围读取允许更长超时；整组读取总时限独立控制，兼容旧分页路径。
     wechat_mcp_range_timeout_seconds: int = 60
+    wechat_fetch_total_timeout_seconds: int = 600
     # 额外允许的 MCP 主机（逗号分隔，仅 Docker 容器访问宿主机场景使用，
     # 如 host.docker.internal）。默认空：仍只允许本机回环地址。
     wechat_mcp_allowed_hosts: str = ""
@@ -70,7 +71,8 @@ class Settings(BaseSettings):
     # 典型群在此字符预算内整群一次提交；超长群才进入自然会话分段。
     max_context_chars: int = 50000
     generation_group_concurrency: int = 5
-    wechat_fetch_concurrency: int = 3
+    # WeChatDataAnalysis 旧分页接口按单请求串行最稳定；群生成仍可并发等待取数槽位。
+    wechat_fetch_concurrency: int = 1
     ai_request_concurrency: int = 6
 
     # Codex $imagegen（V2 图片生成）

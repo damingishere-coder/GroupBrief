@@ -84,7 +84,8 @@ _STRUCTURED_RETRY_INSTRUCTION = """\
 _LAYOUT_RETRY_INSTRUCTION = """\
 
 上一次版式响应不完整或不符合 JSON 约定。请重新输出完整紧凑的 JSON 对象；
-必须使用合法 layout_id，主梗和辅助 ID 必须恰好覆盖全部入选主题，且不得重复。"""
+必须使用合法 layout_id 和 structure_mode；featured_topic_ids 数量必须匹配结构模式，
+topic_order 必须恰好覆盖全部入选主题且不得重复。"""
 
 SYSTEM_BASE = """你是「群报 GroupBrief」的漫画日报海报 Prompt 设计师。
 你的唯一任务：根据给定的微信群聊内容，生成一份可以直接复制给 GPT 图片生成能力的完整中文 Prompt，
@@ -96,14 +97,17 @@ SYSTEM_BASE = """你是「群报 GroupBrief」的漫画日报海报 Prompt 设�
 3. 原话引用必须来自真实聊天，可适当缩写，但不能改写事实。
 4. 事实真实性是准入门槛；通过真实性校验后，好玩程度、群内识别度和视觉笑点是第一优化目标。
    可以使用字面化、反差、回环、误会与反转、一本正经地荒诞，但不能改变事实。
-5. 海报人物依据「聊天事件中提到的人物」，而不是发言排行榜 Top10。
+5. 海报人物依据「聊天事件中提到的人物」，而不是发言排行榜 Top10；每个话题必须清晰绘制
+   程序给定的“参与群友”署名，不得只画匿名人物或用模型自由生成的人名替代。
 6. 数据（消息数、发言人数）必须使用给定数字，禁止自行计算。
-7. 必须严格按给定的【输出结构】组织最终 Prompt；其中给定的【整体版式】控制整张图结构，不得退化为固定同权分栏。
+7. 必须严格按给定的【输出结构】组织最终 Prompt；其中给定的【整体版式】与【内容结构】共同控制整张图。
 8. 候选主题已经过证据校验和程序评分；最终只能使用给定的 2～5 个入选主题，并且每个恰好使用一次。
 9. 【大主题】是全图最高视觉约束，控制配色、画材、服装、造型、装饰、纹理、光影和画风；
-   【整体版式】只控制宏观区域、阅读路径和事件主次，不得替换或削弱【大主题】。
+   【整体版式】只控制宏观区域、阅读路径和动态内容层级，不得替换或削弱【大主题】。
 10. 每张图只能使用给定的一种整体版式；法庭、擂台、菜单、星系等只能作为视觉隐喻，不得表述为真实事件。
-11. 必须把给定的“统计日期：YYYY-MM-DD”作为清晰可见的画面文字，放在海报顶部或底部，不得省略或改写。"""
+11. 每个入选话题必须形成一张可读信息卡，至少包含短标题、参与群友和一条事实信息；
+    有真实原话时再显示一条短原话或关键细节，空间不足时优先保留姓名与事实。
+12. 必须把给定的“统计日期：YYYY-MM-DD”作为清晰可见的画面文字，放在海报顶部或底部，不得省略或改写。"""
 
 CHUNK_ANALYZE_SYSTEM = """你是群聊事件分析助手。只提取聊天中真实存在的事件/人物/原话，
 输出严格 JSON（不输出其他内容），没有事件就返回空数组。"""
@@ -117,7 +121,7 @@ CHUNK_ANALYZE_PROMPT = """以下是微信群聊记录片段（{label}）。
   ]
 }}
 
-要求：只提取真实存在的内容；没有事件就返回空数组；每个片段最多提取 5 个事件，最终必须合并为不超过 5 个话题。"""
+要求：只提取真实存在的内容；没有事件就返回空数组；每个片段最多提取 8 个事件，最终候选最多 8 个。"""
 
 _HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
 
@@ -134,6 +138,7 @@ _MEDIA_PREFIX = {
     "video": "[视频]",
     "file": "[文件]",
     "red_packet": "[红包]",
+    "chat_history": "[聊天记录]",
     "transfer": "[转账]",
 }
 
@@ -148,6 +153,58 @@ def _to_ai_text(m) -> str:
     if prefix and not content.startswith("["):
         return f"{prefix} {content}"
     return content
+
+
+def _compact_visible_text(value: object, maximum: int) -> str:
+    """把事实或原话压成单行；只截显示文本，不改变证据与完整姓名。"""
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if len(text) <= maximum:
+        return text
+    for marker in ("。", "！", "？", "；"):
+        position = text.rfind(marker, 0, maximum + 1)
+        if position >= max(12, maximum // 2):
+            return text[: position + 1]
+    return text[: maximum - 1].rstrip() + "…"
+
+
+def build_visible_topic_cards(selection: dict) -> str:
+    """生成不可被模板覆盖绕过的可见姓名与事实清单。"""
+    selected = [
+        item
+        for item in selection.get("candidates", [])
+        if isinstance(item, dict) and item.get("selected")
+    ]
+    if not selected:
+        raise ValueError("没有可生成可见信息卡的入选主题")
+
+    lines = [
+        "【必须清晰绘制的群友署名与信息卡】",
+        "以下清单由程序根据真实消息证据生成，优先级高于模板和模型自由发挥。",
+        "每个话题都必须绘制短标题、参与群友和事实信息；不得只画匿名人物或省略姓名。",
+    ]
+    for index, item in enumerate(selected, start=1):
+        topic_id = str(item.get("topic_id") or f"topic-{index:02d}")
+        title = _compact_visible_text(item.get("title"), 24) or "群聊话题"
+        participant_label = str(item.get("participant_label") or "群友（昵称未识别）").strip()
+        fact = _compact_visible_text(item.get("summary"), 72) or "（仅按该话题的真实消息证据绘制）"
+        quotes = item.get("quotes") if isinstance(item.get("quotes"), list) else []
+        quote = next((_compact_visible_text(value, 36) for value in quotes if str(value or "").strip()), "")
+        lines.extend(
+            (
+                f"{index}. {topic_id}",
+                f"- 话题短标题：{title}",
+                f"- 参与群友：{participant_label}",
+                f"- 事实信息：{fact}",
+                f"- 真实原话或关键细节：{quote or fact}",
+            )
+        )
+    lines.extend(
+        (
+            "绘制规则：参与群友姓名必须逐字清晰可见；事实和姓名优先于装饰性大标题。",
+            "不得把姓名名单集中成活跃榜，必须放在各自对应的话题卡内。",
+        )
+    )
+    return "\n".join(lines)
 
 
 class DeepSeekImagePromptBuilder:
@@ -258,6 +315,7 @@ class DeepSeekImagePromptBuilder:
             meta["topic_selection_version"] = selection["topic_selection_version"]
             meta["topic_selection"] = selection
             selected_payload = selected_topics_json(selection)
+            visible_topic_cards = build_visible_topic_cards(selection)
             topic_ids = selected_topic_ids(selection)
             recent_history = tuple(data.recent_layout_history or ())[:3]
             custom_style_text = theme.custom_text if theme.requested_key == "custom" else ""
@@ -312,6 +370,8 @@ class DeepSeekImagePromptBuilder:
                     "layout_instruction": layout_instruction,
                 },
             )
+            # 群级模板覆盖也必须服从可见姓名与事实信息卡契约。
+            structure = f"{structure}\n\n{visible_topic_cards}"
             if date_line not in structure:
                 # 兼容没有新增占位符的旧/群级模板，同时保证每个最终 Prompt 都收到日期区块。
                 structure = f"【固定画面日期】\n{date_line}\n\n{structure}"
@@ -319,16 +379,20 @@ class DeepSeekImagePromptBuilder:
             text = self._chat(
                 structure,
                 "以下主题已经过消息证据校验和喜剧优先固定评分规则选择。"
-                "最终 Prompt 只能使用 selected_topics，并按 layout_plan 分配一个主梗和全部辅助事件；"
+                "最终 Prompt 只能使用 selected_topics，并严格服从 layout_plan 的动态内容结构与话题顺序；"
                 "不得加入未入选候选、临时改选、遗漏或重复主题：\n\n"
                 + selected_payload
                 + "\n\n【已校验版式方案】\n"
-                + layout_plan_json(layout),
+                + layout_plan_json(layout)
+                + "\n\n"
+                + visible_topic_cards,
                 theme_text,
                 layout_instruction,
             )
 
             mandatory_blocks: list[str] = []
+            if visible_topic_cards not in text:
+                mandatory_blocks.append(visible_topic_cards)
             if theme_text not in text:
                 mandatory_blocks.append(
                     "【大主题】\n"
@@ -405,7 +469,7 @@ class DeepSeekImagePromptBuilder:
         return (
             "【整体版式约束｜整张图只使用一种】\n"
             + layout_prompt
-            + "\n整体版式只控制宏观区域、阅读路径和事件主次；必须服从大主题。"
+            + "\n整体版式只控制宏观区域、阅读路径和动态内容层级；必须服从大主题。"
         )
 
     def _chat(

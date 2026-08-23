@@ -42,6 +42,7 @@ class PipelineGenerateBody(BaseModel):
     group_id: int | None = None
     run_date: str | None = None
     force: bool = False
+    refresh_messages: bool = False
 
 
 class PipelineSendBody(BaseModel):
@@ -348,7 +349,11 @@ def run_detail(group: str, run_date: str, settings: Settings = Depends(get_setti
     store = _store(settings)
     run = store.load_run(group, run_date)
     group_dir = store.group_dir(group, run_date)
-    files = [p.name for p in group_dir.glob("*") if p.is_file()] if group_dir.exists() else []
+    files = (
+        sorted(p.name for p in group_dir.glob("*") if p.is_file() and p.name in ALLOWED_FILES)
+        if group_dir.exists()
+        else []
+    )
     return {"run": run, "files": files}
 
 
@@ -524,6 +529,59 @@ def regenerate_run_image(group: str, run_date: str, settings: Settings = Depends
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return {"accepted": True, "run": run}
+
+
+def _run_group_id(store: RunStore, group: str, run_date: str) -> int:
+    run = store.load_run(group, run_date)
+    try:
+        return int(run.get("group_id"))
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=409, detail="运行记录缺少可用群 ID") from exc
+
+
+@router.post("/runs/{group}/{run_date}/refresh-messages")
+def refresh_run_messages(group: str, run_date: str, settings: Settings = Depends(get_settings)):
+    """更新当天消息和确定性排行榜；不会重建 Prompt、生图或发送。"""
+    from app.pipeline.daily_pipeline import DailyPipeline
+    from app.services.generation_runtime import GenerationBusyError
+
+    _validate_run_date(run_date)
+    store = _store(settings)
+    if not store.run_path(group, run_date).exists():
+        raise HTTPException(status_code=404, detail="运行记录不存在")
+    try:
+        result = DailyPipeline(settings=settings, dry_run=False).force_generate(
+            _run_group_id(store, group, run_date),
+            run_date,
+            refresh_messages=True,
+        )
+    except GenerationBusyError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if result.get("status") == "failed":
+        raise HTTPException(status_code=409, detail=result.get("detail") or result.get("error") or "消息刷新失败")
+    return {"result": result, "run": store.load_run(group, run_date)}
+
+
+@router.post("/runs/{group}/{run_date}/rebuild-prompt")
+def rebuild_run_prompt(group: str, run_date: str, settings: Settings = Depends(get_settings)):
+    """只从已保存的 messages.json 重建排行榜和 Prompt；不会取数或生图。"""
+    from app.pipeline.daily_pipeline import DailyPipeline
+    from app.services.generation_runtime import GenerationBusyError
+
+    _validate_run_date(run_date)
+    store = _store(settings)
+    if not store.run_path(group, run_date).exists():
+        raise HTTPException(status_code=404, detail="运行记录不存在")
+    try:
+        result = DailyPipeline(settings=settings, dry_run=False).rebuild_prompt_from_snapshot(
+            _run_group_id(store, group, run_date),
+            run_date,
+        )
+    except GenerationBusyError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if result.get("status") == "failed":
+        raise HTTPException(status_code=409, detail=result.get("detail") or result.get("error") or "Prompt 重建失败")
+    return {"result": result, "run": store.load_run(group, run_date)}
 
 
 # ---------- 系统健康 ----------
@@ -708,9 +766,17 @@ def pipeline_generate(body: PipelineGenerateBody):
     pipeline = DailyPipeline(dry_run=False)
     try:
         if body.group_id:
-            result = pipeline.force_generate(body.group_id, body.run_date)
+            result = pipeline.force_generate(
+                body.group_id,
+                body.run_date,
+                refresh_messages=body.refresh_messages,
+            )
             return {"results": [result]}
-        results = pipeline.generate_all(run_date=body.run_date, force=body.force)
+        results = pipeline.generate_all(
+            run_date=body.run_date,
+            force=body.force,
+            refresh_messages=body.refresh_messages,
+        )
     except GenerationBusyError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return {"results": results}

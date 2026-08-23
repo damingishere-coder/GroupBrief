@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 import re
+import signal
 import shutil
 import subprocess
 import threading
@@ -34,6 +35,71 @@ _PROCESS_IMAGE_LOCK = threading.Lock()
 _MUTEX_NAME = "Local\\GroupBrief.CodexImagegen"
 _WAIT_OBJECT_0 = 0
 _WAIT_ABANDONED = 0x80
+
+
+def _terminate_process_tree(process: subprocess.Popen) -> None:
+    """终止 Codex 整棵进程树，避免 Windows 外层 cmd 超时后孙进程占住管道。"""
+    if os.name == "nt":
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+                timeout=15,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        except (OSError, subprocess.SubprocessError):
+            pass
+    else:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except OSError:
+            pass
+    if process.poll() is None:
+        try:
+            process.kill()
+        except OSError:
+            pass
+
+
+def _run_codex_process(
+    command: list[str],
+    *,
+    timeout: int,
+    cwd: str,
+    input: str,
+    env: dict[str, str],
+) -> subprocess.CompletedProcess:
+    """运行 Codex；超时时先杀进程树，再回收管道并抛出 TimeoutExpired。"""
+    popen_kwargs: dict = {
+        "stdin": subprocess.PIPE,
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.PIPE,
+        "text": True,
+        "encoding": "utf-8",
+        "errors": "replace",
+        "cwd": cwd,
+        "env": env,
+    }
+    if os.name == "nt":
+        popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    else:
+        popen_kwargs["start_new_session"] = True
+    process = subprocess.Popen(command, **popen_kwargs)
+    try:
+        stdout, stderr = process.communicate(input=input, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _terminate_process_tree(process)
+        try:
+            process.communicate(timeout=5)
+        except (subprocess.TimeoutExpired, OSError):
+            try:
+                process.kill()
+            except OSError:
+                pass
+        raise
+    return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
 
 
 @contextmanager
@@ -178,12 +244,8 @@ class CodexImageGenerator:
             logger.info("调用 Codex $imagegen：%s", " ".join(command)[:240])
             environment = os.environ.copy()
             environment["CODEX_HOME"] = str(self.codex_home)
-            proc = subprocess.run(
+            proc = _run_codex_process(
                 command,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
                 timeout=self.timeout,
                 cwd=str(prompt_file.parent),
                 input=f"$imagegen {prompt_text}",
@@ -218,14 +280,14 @@ class CodexImageGenerator:
                 error="codex 执行完成但未发现本次生成的新图片",
                 detail={"stage": "save"},
             )
-        if len(candidates) != 1:
+        source = self._select_same_execution_candidate(candidates)
+        if source is None:
             return ImageTaskResult(
                 False,
                 error=f"本次发现 {len(candidates)} 张新图片，无法唯一归属，已停止接管",
                 detail={"stage": "ambiguous", "candidates": [str(path) for path in candidates]},
             )
 
-        source = candidates[0]
         try:
             image_detail = self._promote_valid_image(source, output_path)
         except Exception as exc:
@@ -237,7 +299,14 @@ class CodexImageGenerator:
         return ImageTaskResult(
             True,
             image_path=output_path,
-            detail={"source": str(source), **image_detail},
+            detail={
+                "source": str(source),
+                "candidate_count": len(candidates),
+                "candidate_selection": (
+                    "latest_same_execution" if len(candidates) > 1 else "single"
+                ),
+                **image_detail,
+            },
         )
 
     # ---------- 内部 ----------
@@ -370,6 +439,41 @@ class CodexImageGenerator:
                 continue
             unique_content.setdefault(content_key, path)
         return sorted(unique_content.values(), key=lambda item: str(item).lower())
+
+    def _select_same_execution_candidate(self, candidates: list[Path]) -> Path | None:
+        """同一次 Codex 执行产出多张图时取最后一张；跨执行候选仍失败关闭。
+
+        imagegen 的一次 `codex exec` 可能先生成草稿、再生成修订图，两者会落在
+        `generated_images/<execution-id>/` 同一目录。GroupBrief 已持有跨进程生图
+        互斥锁，因此该目录内最后写入的图片可确定归属于当前任务。若候选来自
+        不同 execution 目录或目录结构异常，仍返回 None，避免误认领其他任务。
+        """
+        if not candidates:
+            return None
+        if len(candidates) == 1:
+            return candidates[0]
+
+        execution_dirs: set[str] = set()
+        resolved_candidates: list[Path] = []
+        for candidate in candidates:
+            try:
+                resolved = candidate.resolve()
+                relative = resolved.relative_to(self.generated_images_dir)
+                if len(relative.parts) < 2:
+                    return None
+                execution_dirs.add(relative.parts[0].lower())
+                resolved_candidates.append(resolved)
+            except (OSError, ValueError):
+                return None
+        if len(execution_dirs) != 1:
+            return None
+        try:
+            return max(
+                resolved_candidates,
+                key=lambda item: (item.stat().st_mtime_ns, str(item).lower()),
+            )
+        except OSError:
+            return None
 
     @staticmethod
     def _promote_valid_image(source: Path, output_path: Path) -> dict:

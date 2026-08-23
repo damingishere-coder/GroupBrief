@@ -117,6 +117,7 @@ def _schedule_startup_catchup(
         run_daily_v2_job,
         trigger=DateTrigger(run_date=now + timedelta(seconds=3), timezone=tz),
         args=[run_date],
+        kwargs={"skip_email": True},
         id="daily_v2_startup_catchup",
         name="DailyV2StartupCatchup",
         replace_existing=True,

@@ -91,7 +91,7 @@ class ReportService:
             "V1 开始并行生成：groups=%d group_limit=%d fetch_limit=%d ai_limit=%d",
             len(group_specs),
             group_limit,
-            normalized_limit(settings.wechat_fetch_concurrency, 3),
+            normalized_limit(settings.wechat_fetch_concurrency, 1),
             normalized_limit(settings.ai_request_concurrency, 6),
         )
         if len(group_specs) == 1:

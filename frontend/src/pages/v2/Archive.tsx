@@ -20,7 +20,16 @@ import {
   readV2TextFile,
   restoreGroup,
 } from "../../api";
-import { Button, EmptyState, LoadingState, PageHeader, StatusBadge, Toast } from "../../components/common";
+import {
+  Button,
+  EmptyState,
+  ImagePreviewTrigger,
+  ImageViewer,
+  LoadingState,
+  PageHeader,
+  StatusBadge,
+  Toast,
+} from "../../components/common";
 import { useToast } from "../../components/ui";
 
 type ArchiveView = "active" | "trash";
@@ -138,6 +147,10 @@ function fileLabel(file: string): string {
   return file;
 }
 
+function isArchiveImage(file: string): boolean {
+  return file === "daily_image.png" || file === "daily_image.previous.png";
+}
+
 function formatRemovedAt(value: string | null): string {
   if (!value) return "历史遗留";
   return value.replace("T", " ").slice(0, 16);
@@ -165,6 +178,7 @@ export default function Archive() {
   const [activeFile, setActiveFile] = useState("");
   const [preview, setPreview] = useState<PreviewState>({ kind: "idle" });
   const [imageBroken, setImageBroken] = useState(false);
+  const [imageViewerOpen, setImageViewerOpen] = useState(false);
   const [restoringId, setRestoringId] = useState<number | null>(null);
 
   const loadArchive = async (): Promise<ArchiveGroup[]> => {
@@ -214,6 +228,7 @@ export default function Archive() {
     setCalendarMonth(latest ? latest.slice(0, 7) : currentMonth());
     setSelectedRunKey("");
     setActiveFile("");
+    setImageViewerOpen(false);
   }, [selectedGroup?.archive_key]);
 
   const dateCounts = useMemo(() => {
@@ -270,7 +285,8 @@ export default function Archive() {
       return;
     }
     setImageBroken(false);
-    if (activeFile === "daily_image.png" || activeFile === "daily_image.previous.png") {
+    setImageViewerOpen(false);
+    if (isArchiveImage(activeFile)) {
       let active = true;
       setPreview({ kind: "loading" });
       fetch(getV2File(selectedRun.group_name, selectedRun.run_date, activeFile))
@@ -348,6 +364,9 @@ export default function Archive() {
 
   const monthDays = useMemo(() => calendarDays(calendarMonth), [calendarMonth]);
   const selectedDetailError = selectedRun ? detailErrors[runKey(selectedRun)] : "";
+  const activeImageSrc = selectedRun && isArchiveImage(activeFile)
+    ? getV2File(selectedRun.group_name, selectedRun.run_date, activeFile)
+    : "";
 
   return (
     <div className="archive-page">
@@ -494,9 +513,9 @@ export default function Archive() {
                                 {preview.kind === "missing" && <EmptyState title="文件不存在" description="归档记录存在，但该文件当前不可用。" />}
                                 {preview.kind === "empty" && <EmptyState title="文件为空" description="该文件存在，但没有可展示内容。" />}
                                 {preview.kind === "error" && <div className="archive-error" role="alert"><WarningCircle size={18} />{preview.message}</div>}
-                                {preview.kind === "ready" && activeFile.endsWith(".png") && !imageBroken && <img className="archive-preview-image" src={getV2File(selectedRun.group_name, selectedRun.run_date, activeFile)} alt={`${selectedGroup.display_name} ${selectedRun.run_date} ${fileLabel(activeFile)}`} onError={() => setImageBroken(true)} />}
-                                {preview.kind === "ready" && activeFile.endsWith(".png") && imageBroken && <EmptyState title="图片读取失败" description="图片文件不存在、为空或当前无法识别。" />}
-                                {preview.kind === "ready" && !activeFile.endsWith(".png") && <pre className="archive-preview-text">{preview.content}</pre>}
+                                {preview.kind === "ready" && isArchiveImage(activeFile) && !imageBroken && <ImagePreviewTrigger src={activeImageSrc} alt={`${selectedGroup.display_name} ${selectedRun.run_date} ${fileLabel(activeFile)}`} imageClassName="archive-preview-image" className="archive-preview-image-trigger" onError={() => { setImageBroken(true); setImageViewerOpen(false); }} onOpen={() => setImageViewerOpen(true)} />}
+                                {preview.kind === "ready" && isArchiveImage(activeFile) && imageBroken && <EmptyState title="图片读取失败" description="图片文件不存在、为空或当前无法识别。" />}
+                                {preview.kind === "ready" && !isArchiveImage(activeFile) && <pre className="archive-preview-text">{preview.content}</pre>}
                               </div>
                             </div>
                           )}
@@ -510,6 +529,15 @@ export default function Archive() {
           </div>
         </>
       )}
+      <ImageViewer
+        open={imageViewerOpen && Boolean(selectedGroup && selectedRun && activeImageSrc)}
+        src={activeImageSrc}
+        alt={selectedGroup && selectedRun ? `${selectedGroup.display_name} ${selectedRun.run_date} ${fileLabel(activeFile)}` : "归档日报图片"}
+        filename={activeFile || "daily_image.png"}
+        title={selectedGroup && selectedRun ? `${selectedGroup.display_name} · ${selectedRun.run_date} · ${fileLabel(activeFile)}` : "归档日报图片"}
+        onClose={() => setImageViewerOpen(false)}
+        onDownloadError={toast}
+      />
       <Toast message={msg} />
     </div>
   );

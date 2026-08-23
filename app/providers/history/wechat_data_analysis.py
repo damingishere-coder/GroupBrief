@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import os
 import hashlib
+import re
 from time import perf_counter
 import unicodedata
 from datetime import datetime
@@ -40,6 +41,7 @@ from app.providers.history.wechat_mcp import (
     MCPError,
     build_mcp_client,
 )
+from app.services.speaker_identity import build_speaker_stats, speaker_identity_key
 
 logger = get_logger("groupbrief.providers")
 
@@ -107,10 +109,11 @@ class WeChatDataAnalysisProvider(ChatHistoryProvider):
         self._groups_cache: list[GroupInfo] | None = None
         self.wechat_mcp_account = settings.wechat_mcp_account
         self.wechat_mcp_range_timeout_seconds = settings.wechat_mcp_range_timeout_seconds
+        self.wechat_fetch_total_timeout_seconds = settings.wechat_fetch_total_timeout_seconds
         self._range_cache_key = (settings.wechat_mcp_url or "local").strip()
         self._range_supported: bool | None = _RANGE_CAPABILITY_CACHE.get(self._range_cache_key)
         self._mcp_config_error: str | None = None
-        # 联系人解析只作为回退；群内 senderDisplayName 更接近微信界面当前显示名。
+        # 正常且唯一的群内昵称可保留；上游昵称冲突时 contact.db 是权威回退。
         self._contacts = ContactResolver(settings.wechat_contact_db_path or None)
         self._contacts.load()
         if mcp_client is not None:
@@ -307,6 +310,7 @@ class WeChatDataAnalysisProvider(ChatHistoryProvider):
             "mcp_client_ms": 0,
             "server_elapsed_ms": 0,
         }
+        fetch_deadline = perf_counter() + float(self.wechat_fetch_total_timeout_seconds)
 
         def collect(items: list) -> None:
             for item in items:
@@ -321,22 +325,15 @@ class WeChatDataAnalysisProvider(ChatHistoryProvider):
                         continue  # 翻页重叠，跳过重复
                     if raw.source_message_id:
                         seen.add(raw.source_message_id)
-                    upstream_name = _sanitize_sender_name(raw.sender_name)
-                    resolved_name = _sanitize_sender_name(
-                        self._contacts.resolve_name(raw.sender_id) if raw.sender_id else ""
-                    )
-                    if _usable_sender_name(upstream_name, raw.sender_id):
-                        raw.sender_name = upstream_name
-                    elif _usable_sender_name(resolved_name, raw.sender_id):
-                        raw.sender_name = resolved_name
-                    else:
-                        raw.sender_name = _anonymous_sender_name(raw.sender_id)
+                    raw.sender_name = _sanitize_sender_name(raw.sender_name)
                     messages.append(raw)
 
         try:
             if self._range_supported is not False:
                 try:
-                    self._fetch_messages_range(group_id, start_time, end_time, tz, collect, stats)
+                    self._fetch_messages_range(
+                        group_id, start_time, end_time, tz, collect, stats, fetch_deadline
+                    )
                     self._range_supported = True
                     _RANGE_CAPABILITY_CACHE[self._range_cache_key] = True
                 except MCPError as exc:
@@ -347,7 +344,9 @@ class WeChatDataAnalysisProvider(ChatHistoryProvider):
                     stats["read_strategy"] = "legacy_anchor"
                     stats["range_fallback_reason"] = "range_tool_unavailable"
             if self._range_supported is False:
-                self._fetch_messages_legacy(group_id, start_time, end_time, tz, collect, stats)
+                self._fetch_messages_legacy(
+                    group_id, start_time, end_time, tz, collect, stats, fetch_deadline
+                )
         except MCPError as e:
             stats["fetch_elapsed_ms"] = round((perf_counter() - started_at) * 1000)
             return FetchResult(
@@ -360,6 +359,7 @@ class WeChatDataAnalysisProvider(ChatHistoryProvider):
             )
 
         messages.sort(key=lambda item: (item.timestamp, item.source_message_id))
+        _resolve_sender_names(messages, self._contacts, stats)
         stats["fetch_elapsed_ms"] = round((perf_counter() - started_at) * 1000)
         stats["message_count"] = len(messages)
         if not messages:
@@ -388,11 +388,16 @@ class WeChatDataAnalysisProvider(ChatHistoryProvider):
         tz,
         collect,
         stats: dict,
+        fetch_deadline: float,
     ) -> None:
         offset = 0
         pages = 0
         account = self.wechat_mcp_account.strip()
         while pages < _MCP_MAX_PAGES:
+            remaining = min(
+                _remaining_fetch_timeout(fetch_deadline),
+                float(self.wechat_mcp_range_timeout_seconds),
+            )
             params = {
                 "username": group_id,
                 "start_time": int(start_time.replace(tzinfo=tz).timestamp()),
@@ -407,8 +412,9 @@ class WeChatDataAnalysisProvider(ChatHistoryProvider):
                 _MCP_RANGE_TOOL,
                 params,
                 stats,
-                timeout=float(self.wechat_mcp_range_timeout_seconds),
+                timeout=remaining,
             )
+            _remaining_fetch_timeout(fetch_deadline)
             pages += 1
             items = _extract_message_items(structured)
             collect(items)
@@ -436,16 +442,21 @@ class WeChatDataAnalysisProvider(ChatHistoryProvider):
         tz,
         collect,
         stats: dict,
+        fetch_deadline: float,
     ) -> None:
         day = start_time.date()
         last_day = end_time.date()
         while day <= last_day:
-            anchor = self._anchor_for_day(group_id, day, tz, stats)
+            anchor = self._anchor_for_day(group_id, day, tz, stats, fetch_deadline)
             if anchor:
-                self._drain_around(group_id, anchor, start_time, end_time, collect, stats)
+                self._drain_around(
+                    group_id, anchor, start_time, end_time, collect, stats, fetch_deadline
+                )
             day = day.fromordinal(day.toordinal() + 1)
 
-    def _anchor_for_day(self, group_id: str, day: object, tz, stats: dict) -> str | None:
+    def _anchor_for_day(
+        self, group_id: str, day: object, tz, stats: dict, fetch_deadline: float
+    ) -> str | None:
         """获取某天第一条消息的锚点 ID；当天无消息返回 None。"""
         structured = self._mcp_call(
             "wechat.chat.get_message_anchor",
@@ -456,7 +467,12 @@ class WeChatDataAnalysisProvider(ChatHistoryProvider):
                 "source": "auto",
             },
             stats,
+            timeout=min(
+                _remaining_fetch_timeout(fetch_deadline),
+                float(self.wechat_mcp_range_timeout_seconds),
+            ),
         )
+        _remaining_fetch_timeout(fetch_deadline)
         return structured.get("anchorId") or None
 
     def _drain_around(
@@ -467,6 +483,7 @@ class WeChatDataAnalysisProvider(ChatHistoryProvider):
         end_time: datetime,
         collect,
         stats: dict,
+        fetch_deadline: float,
     ) -> None:
         """从锚点向前后翻页读取，直到完全越过时间窗。
 
@@ -488,7 +505,12 @@ class WeChatDataAnalysisProvider(ChatHistoryProvider):
                     "source": "auto",
                 },
                 stats,
+                timeout=min(
+                    _remaining_fetch_timeout(fetch_deadline),
+                    float(self.wechat_mcp_range_timeout_seconds),
+                ),
             )
+            _remaining_fetch_timeout(fetch_deadline)
             items = structured.get("messages") or []
             if not items:
                 break
@@ -516,7 +538,12 @@ class WeChatDataAnalysisProvider(ChatHistoryProvider):
                     "source": "auto",
                 },
                 stats,
+                timeout=min(
+                    _remaining_fetch_timeout(fetch_deadline),
+                    float(self.wechat_mcp_range_timeout_seconds),
+                ),
             )
+            _remaining_fetch_timeout(fetch_deadline)
             items = structured.get("messages") or []
             if not items:
                 break
@@ -548,6 +575,14 @@ _INVISIBLE_NAME_CHARS = frozenset(
 )
 
 
+def _remaining_fetch_timeout(fetch_deadline: float) -> float:
+    """返回整组读取的剩余时间，确保范围接口与旧版回退共用一个总时限。"""
+    remaining = fetch_deadline - perf_counter()
+    if remaining <= 0:
+        raise MCPError("消息读取超过整组总截止时间")
+    return remaining
+
+
 def _sanitize_sender_name(value: object) -> str:
     """移除微信中常见的隐形昵称字符，保留中文、Emoji 与普通字母。"""
     if value is None:
@@ -571,6 +606,62 @@ def _usable_sender_name(name: str, sender_id: str) -> bool:
 def _anonymous_sender_name(sender_id: str) -> str:
     digest = hashlib.sha256((sender_id or "unknown").encode("utf-8")).hexdigest()[:4]
     return f"未命名成员-{digest}"
+
+
+def _resolve_sender_names(
+    messages: list[RawMessage], contacts: ContactResolver, stats: dict | None = None
+) -> None:
+    """拆分上游错误共享昵称，并为所有身份生成唯一、稳定的展示名。"""
+    upstream_ids: dict[str, set[str]] = {}
+    for message in messages:
+        sender_id = (message.sender_id or "").strip()
+        upstream_name = _sanitize_sender_name(message.sender_name)
+        message.sender_name = upstream_name
+        if sender_id and _usable_sender_name(upstream_name, sender_id):
+            upstream_ids.setdefault(upstream_name.casefold(), set()).add(sender_id)
+
+    collision_names = {
+        normalized_name for normalized_name, sender_ids in upstream_ids.items() if len(sender_ids) > 1
+    }
+    contact_identities: set[str] = set()
+    anonymous_identities: set[str] = set()
+    for message in messages:
+        sender_id = (message.sender_id or "").strip()
+        upstream_name = _sanitize_sender_name(message.sender_name)
+        upstream_usable = _usable_sender_name(upstream_name, sender_id)
+        upstream_conflicted = bool(
+            sender_id and upstream_usable and upstream_name.casefold() in collision_names
+        )
+        resolved_name = ""
+        if sender_id and (upstream_conflicted or not upstream_usable):
+            resolved_name = _sanitize_sender_name(contacts.resolve_name(sender_id))
+
+        if _usable_sender_name(resolved_name, sender_id):
+            message.sender_name = resolved_name
+            contact_identities.add(sender_id)
+        elif upstream_usable and not upstream_conflicted:
+            message.sender_name = upstream_name
+        else:
+            message.sender_name = _anonymous_sender_name(sender_id or upstream_name)
+            anonymous_identities.add(sender_id or upstream_name or message.sender_name)
+
+    # 即便 contact.db 中存在真实同名，最终展示也必须保持一身份一名称。
+    labels = {
+        item.key: item.name
+        for item in build_speaker_stats((message.sender_id, message.sender_name) for message in messages)
+    }
+    for message in messages:
+        key = speaker_identity_key(message.sender_id, message.sender_name)
+        if key is not None:
+            message.sender_name = labels[key]
+
+    if stats is not None:
+        stats["sender_name_collision_count"] = len(collision_names)
+        stats["sender_name_collision_sender_count"] = sum(
+            len(upstream_ids[name]) for name in collision_names
+        )
+        stats["sender_name_contact_count"] = len(contact_identities)
+        stats["sender_name_anonymous_count"] = len(anonymous_identities)
 
 
 def _is_unknown_range_tool(error: Exception) -> bool:
@@ -742,7 +833,11 @@ def _mcp_message_type(render_type) -> str:
     if isinstance(render_type, int):
         return _RENDER_TYPE_MAP.get(render_type, f"render_{render_type}")
     if isinstance(render_type, str) and render_type.strip():
-        return render_type
+        text = render_type.strip()
+        if text.isascii():
+            text = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", text)
+            text = re.sub(r"[^A-Za-z0-9]+", "_", text).strip("_").lower()
+        return text or "text"
     return "text"
 
 
