@@ -1,0 +1,48 @@
+{
+  "server": "SonarQube Community Build 26.8.0.126808",
+  "projectKey": "groupbrief-v1-local-audit",
+  "analysisId": "1a07a159-5e1b-41b1-a74b-f68ee6dfe58a",
+  "ceTaskId": "02a52972-25c5-4dcc-8493-1bf7f0d9c2dd",
+  "status": "SUCCESS",
+  "warnings": 0,
+  "metrics": {
+    "ncloc": 23570,
+    "files": 120,
+    "bugs": 5,
+    "vulnerabilities": 12,
+    "securityHotspots": 0,
+    "codeSmells": 295,
+    "duplicatedBlocks": 5,
+    "duplicatedLines": 68,
+    "duplicatedLinesDensity": 0.2,
+    "coverage": 63.9,
+    "lineCoverage": 63.9,
+    "linesToCover": 10145,
+    "uncoveredLines": 3664,
+    "cognitiveComplexity": 3703,
+    "cyclomaticComplexity": 4368,
+    "maintainabilityRating": "A",
+    "reliabilityRating": "D",
+    "securityRating": "D",
+    "technicalDebtMinutes": 2141,
+    "technicalDebtRatioPercent": 0.3
+  },
+  "humanReview": {
+    "confirmedSonarBugs": 0,
+    "sonarBugCandidatesNeedingLowPriorityReview": 5,
+    "sonarVulnerabilitiesClassifiedLowValue": 12,
+    "reason": "Vulnerability findings are non-cryptographic random selection and deterministic fixture hashes; source review found more material authentication and path-boundary risks not detected by SonarQube."
+  },
+  "validation": {
+    "pythonTestsPassed": 413,
+    "pythonTestsFailed": 1,
+    "pythonWarnings": 1,
+    "pythonStatementCoveragePercent": 74.7,
+    "frontendAutomatedTests": 0,
+    "frontendBuild": "PASS",
+    "frontendMainJsBytes": 451300,
+    "frontendMainJsGzipBytes": 131500,
+    "npmAudit": {"moderate": 1, "high": 1, "critical": 0},
+    "pipAuditKnownVulnerabilities": 0
+  }
+}

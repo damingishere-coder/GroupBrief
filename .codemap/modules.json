@@ -1,0 +1,1225 @@
+{
+ "meta": {
+  "project": "GroupBrief V1",
+  "lang": "zh",
+  "subtitle": "本地微信群报生成与安全发送系统工程体检",
+  "generatedAt": "2026-08-24",
+  "htmlPath": ".codemap/codemap.html",
+  "mdPath": ".codemap/codemap.md",
+  "spineDesc": "管理界面发起或调度器触发任务，经 API/Pipeline 读取群配置和微信数据，生成排行榜、提示词与图片，以 run.json/SQLite 持久化状态，最后在安全认领后发送。",
+  "tracked_loc": 28149,
+  "tracked_files": 116,
+  "rev": "cf29e2decf5ae74e5a7037531edb0218dc4bdcea"
+ },
+ "excludes": [
+  "__pycache__",
+  "/node_modules/",
+  "/frontend/dist/",
+  "/frontend/.vite/",
+  "/.git/",
+  "/.venv/",
+  "/data/",
+  "/output/",
+  "/logs/",
+  "/fixtures/",
+  "/tests/",
+  "/.codemap/"
+ ],
+ "bands": [
+  {
+   "id": "frontend",
+   "tier": "fe",
+   "t": "前端 · 管理界面",
+   "d": "页面、交互状态与 API 客户端"
+  },
+  {
+   "id": "wire",
+   "wire": true,
+   "t": "HTTP / JSON"
+  },
+  {
+   "id": "entry",
+   "tier": "be",
+   "t": "后端 · 入口与 API",
+   "d": "FastAPI 生命周期、配置、路由"
+  },
+  {
+   "id": "orchestration",
+   "tier": "be",
+   "t": "编排 · 调度与状态机",
+   "d": "每日生成、恢复、发送窗口"
+  },
+  {
+   "id": "domain",
+   "tier": "be",
+   "t": "领域 · 数据到内容",
+   "d": "微信数据、排行、AI、图片、交付"
+  },
+  {
+   "id": "storage",
+   "tier": "db",
+   "t": "持久化 · SQLite 与工件",
+   "d": "关系数据、run.json、恢复状态"
+  },
+  {
+   "id": "ops",
+   "tier": "ops",
+   "t": "运维 · 脚本",
+   "d": "Windows 计划任务、手工检查与恢复入口"
+  }
+ ],
+ "spine": [
+  "frontend_ui",
+  "frontend_api",
+  "runtime_api",
+  "pipeline_scheduler",
+  "history_ingestion",
+  "ranking",
+  "ai_prompting",
+  "image_generation",
+  "persistence_state",
+  "delivery"
+ ],
+ "reportThemes": [
+  [
+   "V1/V2 双协议是最广泛的系统性债务",
+   "运行状态、持久化、排行榜、Prompt、文件 API、调度与前端契约都保留两套可触达路径；它解释了项目为何兼容旧数据，也放大了状态分叉和维护成本。"
+  ],
+  [
+   "数据约束债务已经产生真实后果",
+   "SQLite 关系主要靠应用代码维持，当前只读检查发现 224 条 group_runs 中 192 条已失去群组关联；缺少 FK/唯一约束不再只是理论风险。"
+  ],
+  [
+   "复杂度集中在少数高 Blast Radius 模块",
+   "DailyPipeline、V2 API、PromptBuilder、CodexImageGenerator、WDA Provider、WechatNativeSender 与 AIImages 页面同时承担多个阶段，任何局部变化都需要跨链路回归。"
+  ],
+  [
+   "失败安全已有正确骨架，但状态损坏仍会被误解释",
+   "V2 的发送 claim、result_unknown、手工 hold 和图片 staging 值得保留；相反，损坏 run.json/scheduler JSON 的静默重置可能把未知结果当成未开始。"
+  ],
+  [
+   "配置存在可保存但未进入真实执行链的漂移",
+   "群级 schedule_rule、summary_model、prompt_model、provider_preference 已进入模型与 UI，但主 Pipeline 没有完整消费；设置 API 的宽松转换又可能造成数据库、运行时和 UI 三方不一致。"
+  ],
+  [
+   "外部副作用的幂等边界不一致",
+   "微信 V2 发送偏向 fail-closed，但 SMTP 重试、Legacy CLI 退出码、人工图片 adopt 与部分运维脚本仍可能重复执行、误报成功或覆盖状态。"
+  ]
+ ],
+ "modules": [
+  {
+   "id": "frontend_ui",
+   "label": "前端界面",
+   "band": "frontend",
+   "path": "frontend/src/**/*.tsx + styles.css",
+   "paths": [
+    "frontend/src/**/*.tsx",
+    "frontend/src/styles.css",
+    "frontend/src/navigation.ts"
+   ],
+   "coupling": "high",
+   "deps": [
+    "frontend_api"
+   ],
+   "desc": "React 管理界面、页面状态、轮询、图片查看与操作入口。",
+   "tests": [],
+   "loc": 10683,
+   "contentHash": "d9c0dc23e2932bdececb0f7a3aad82bf53f2d7c32f6cffb9a47f6ed2590c7572",
+   "score": 62,
+   "grade": "C",
+   "tags": [
+    "god-component",
+    "silent-except",
+    "fallback",
+    "duplication",
+    "dual-format",
+    "legacy",
+    "bloat",
+    "glue",
+    "stub",
+    "placeholder"
+   ],
+   "findings": [
+    {
+     "sev": "HIGH",
+     "loc": "frontend/src/pages/v2/AIImages.tsx:130",
+     "text": "单一 AIImages 组件从 130 行延伸至文件末尾约 696 行，132-177 行集中维护约 40 个 state/ref，同时承载运行列表、群级与运行级 Prompt、主题解析、图片再生、恢复、发送确认和轮询，是核心流程 God Component。"
+    },
+    {
+     "sev": "MED",
+     "loc": "frontend/src/pages/v2/AIImages.tsx:376",
+     "text": "图片再生状态通过每 2 秒或 5 秒 setInterval 轮询；请求失败在 388 行以 catch(() => undefined) 静默丢弃，既无用户错误状态也无退避，网络/API 异常时会持续轮询并隐藏失败。"
+    },
+    {
+     "sev": "MED",
+     "loc": "frontend/src/pages/v2/Tasks.tsx:113",
+     "text": "任务页先读取全部 runs，再对每个 run 调用 getRunDetail，形成无分页/批量接口保护的线性 N+1 请求扇出；历史记录增多时请求数和页面等待时间同步增长。"
+    },
+    {
+     "sev": "MED",
+     "loc": "frontend/src/pages/v2/AIImages.tsx:47",
+     "text": "STATUS_LABELS、runKey、statusTone 等展示与身份逻辑在 AIImages 47/74/98、Archive 46/98/112、ChatRecords 26/48/52、Ranking 25/60/119、Tasks 29/47/51 多处重复，状态协议和标签容易出现页面间漂移。"
+    },
+    {
+     "sev": "MED",
+     "loc": "frontend/src/pages/v2/Settings.tsx:28",
+     "text": "前端手工维护 SENSITIVE_KEYS、BOOLEAN_KEYS、NUMBER_KEYS、LABELS、SETTING_GROUPS 多套设置契约；61-72 与 110-115 行还混有 V1 兼容邮件字段和 Provider fallback 字段，后端设置变更可能造成控件、类型或序列化不一致。"
+    },
+    {
+     "sev": "MED",
+     "loc": "frontend/src/styles.css:1197",
+     "text": "全局样式存在明确的‘旧页面兼容与窄屏布局’区域，3803 行开始仍有 archive-legacy 样式；5939 行单文件同时容纳新旧页面级联规则，增加跨页面回归和未使用 CSS 累积风险。"
+    },
+    {
+     "sev": "LOW",
+     "loc": "frontend/src/components/ui.tsx:39",
+     "text": "useFetch 接收 caller 自行提供的 unknown[] 依赖，内部却省略 loader 依赖并在 67 行关闭 exhaustive-deps 检查；未来传入捕获筛选条件的 inline loader 时可能保留旧闭包，且失去静态提示。"
+    },
+    {
+     "sev": "LOW",
+     "loc": "frontend/src/pages/v2/History.tsx:3",
+     "text": "History 仅包装 Archive，System.tsx:3 仅包装 Settings；navigation.ts:61-66 已将 history/system 归一到 archive/settings，App.tsx 也直接渲染 Archive/Settings，两个 wrapper 当前未被引用，属于 legacy/stub 死代码候选。"
+    },
+    {
+     "sev": "LOW",
+     "loc": "frontend/src/components/layout/AppShell.tsx:108",
+     "text": "通知按钮只有图标和 aria-label，没有 onClick、状态或目标路由，当前是可点击外观但无行为的 placeholder UI。"
+    }
+   ],
+   "auditedHash": "d9c0dc23e2932bdececb0f7a3aad82bf53f2d7c32f6cffb9a47f6ed2590c7572",
+   "auditedAt": "2026-08-24",
+   "auditedRev": "1d326e2"
+  },
+  {
+   "id": "frontend_api",
+   "label": "前端 API 客户端",
+   "band": "frontend",
+   "path": "frontend/src/api.ts",
+   "paths": [
+    "frontend/src/api.ts"
+   ],
+   "coupling": "high",
+   "deps": [
+    "runtime_api"
+   ],
+   "desc": "前端全部 HTTP 类型、请求封装与后端契约集中点。",
+   "tests": [],
+   "loc": 427,
+   "contentHash": "338a3903e576b08ebcd2283087254f9637bc75c09aab03c6871370edaa07832c",
+   "score": 72,
+   "grade": "C",
+   "tags": [
+    "dual-format",
+    "duplication",
+    "glue",
+    "any-escape"
+   ],
+   "findings": [
+    {
+     "sev": "MED",
+     "loc": "frontend/src/api.ts:3",
+     "text": "request 仅调用 fetch，没有 AbortSignal 超时、取消、重试或网络错误分类；AI 生图、刷新、发送等长任务请求可能长期悬挂，页面无法主动结束旧请求或恢复瞬时网络失败。"
+    },
+    {
+     "sev": "MED",
+     "loc": "frontend/src/api.ts:8",
+     "text": "HTTP 错误只读取原始 response.text() 并构造普通 Error（8-11 行），没有统一解析后端结构化错误字段、error_type、状态码或可恢复性；调用页面只能按字符串处理失败。"
+    },
+    {
+     "sev": "MED",
+     "loc": "frontend/src/api.ts:22",
+     "text": "文件同时保留 V1 的 Group/Run/LatestReport 类型和接口，以及 65 行之后的 GroupV2/V2Run/Archive 与 V2 pipeline 接口；同一前端客户端维护两套后端协议，形成 dual-format/duplication。"
+    },
+    {
+     "sev": "LOW",
+     "loc": "frontend/src/api.ts:367",
+     "text": "readV2TextFile 直接重新实现 fetch、状态码检查和错误文本处理，绕过 3-16 行的 request 通用封装；它与其他请求的 headers、错误格式和未来超时策略容易发生漂移。"
+    },
+    {
+     "sev": "LOW",
+     "loc": "frontend/src/api.ts:146",
+     "text": "V2Run 使用 [key: string]: unknown 放开任意字段，削弱 run 状态、发送字段和恢复字段的静态类型约束；调用方访问动态字段只能运行时判断。"
+    },
+    {
+     "sev": "LOW",
+     "loc": "frontend/src/api.ts:364",
+     "text": "getV2File 只对 group 做 encodeURIComponent，date/file 直接拼接 URL（364-365 行）；当前日期和白名单文件名通常安全，但通用客户端边界没有统一的路径参数编码/校验策略。"
+    }
+   ],
+   "auditedHash": "338a3903e576b08ebcd2283087254f9637bc75c09aab03c6871370edaa07832c",
+   "auditedAt": "2026-08-24",
+   "auditedRev": "1d326e2"
+  },
+  {
+   "id": "runtime_api",
+   "label": "运行时与 HTTP API",
+   "band": "entry",
+   "path": "app/main.py, app/config, app/core, app/api",
+   "paths": [
+    "app/main.py",
+    "app/config/**/*.py",
+    "app/core/**/*.py",
+    "app/api/**/*.py"
+   ],
+   "coupling": "core",
+   "deps": [
+    "pipeline_scheduler",
+    "persistence_state",
+    "v1_reporting",
+    "history_ingestion",
+    "ai_prompting",
+    "delivery"
+   ],
+   "desc": "FastAPI 生命周期、设置加载、健康检查、V1/V2 路由与文件接口。",
+   "tests": [
+    "tests/test_ui_api.py",
+    "tests/test_v2_archive_api.py",
+    "tests/test_v2_group_prompt_api.py"
+   ],
+   "loc": 2419,
+   "contentHash": "855c2a0150a138f15c34bfe3e6c4b76562f02873cf3810546b7f7ed632c8a5d0",
+   "score": 58,
+   "grade": "D",
+   "tags": [
+    "god-component",
+    "bloat",
+    "silent-except",
+    "fallback",
+    "legacy",
+    "dual-format",
+    "duplication",
+    "fake-output",
+    "glue"
+   ],
+   "findings": [
+    {
+     "sev": "HIGH",
+     "loc": "app/api/files.py:25",
+     "text": "路径安全检查使用字符串 startswith；report_date、group_dir、filename 均未规范化。可用 sibling-prefix 绕过目录边界，例如 output/2026-08-1/../2026-08-10/ranking.txt 解析后仍满足 startswith，存在跨日期目录读取风险。"
+    },
+    {
+     "sev": "HIGH",
+     "loc": "app/api/v2_ui.py:84",
+     "text": "单文件 833 行同时承担 Dashboard、归档聚合、Prompt 编辑、图片重生成、恢复、健康检查、Pipeline 控制和文件读取等多个边界，包含约 20 个路由与大量内嵌业务逻辑，属于高耦合 God Component。"
+    },
+    {
+     "sev": "MED",
+     "loc": "app/main.py:29",
+     "text": "FastAPI lifespan 在 yield 前同步执行 WeChat、Codex、模板和本地环境检查；外部依赖不可用时可能拖慢服务启动，且 app/main.py:34-35 捕获 Exception 后直接置空 startup_checks，没有日志或失败原因。"
+    },
+    {
+     "sev": "MED",
+     "loc": "app/main.py:48",
+     "text": "所有设置、删除、生成、发送和日志路由均直接挂载，没有认证/授权依赖。默认 host 是本机回环，但一旦通过 APP_HOST 或容器暴露到网络，管理和发送接口即无身份边界。"
+    },
+    {
+     "sev": "MED",
+     "loc": "app/api/settings.py:99",
+     "text": "设置 API 接收任意字符串并先持久化；app/config/settings.py:163-166 对类型转换异常静默跳过，接口仍返回 ok=true，导致数据库值、运行时值和 UI 成功提示可能不一致。"
+    },
+    {
+     "sev": "MED",
+     "loc": "app/config/settings.py:177",
+     "text": "布尔配置遇到非标准字符串时执行 return bool(text)，例如 'falsee' 会被静默转换为 True；错误配置不会被拒绝，可能改变发送、邮件或 Mock Provider 行为。"
+    },
+    {
+     "sev": "MED",
+     "loc": "app/api/system.py:92",
+     "text": "status 接口直接对可由设置 API 写入的 schedule_generate_time 执行 split/int，未捕获格式错误；非法配置会让状态接口返回 500，而调度器自身另有回退规则，形成配置行为分裂。"
+    },
+    {
+     "sev": "MED",
+     "loc": "app/api/v2_ui.py:98",
+     "text": "Dashboard 用 display_name 作为 RunStore 的运行目录键；同一文件后续 archive_groups 使用稳定 group_id/wechat_group_id 匹配，而 retry_failed 在 app/api/v2_ui.py:724-735 又按 display_name 查询，改名或重名时可能显示 Pending、找不到任务或恢复错误群。"
+    },
+    {
+     "sev": "MED",
+     "loc": "app/core/logging.py:68",
+     "text": "setup_logging 在 root.handlers 已存在时立即 return，导致 uvicorn/宿主已预配置 root handler 时不会执行 app/provider/ai/scheduler/email 文件 handler 配置，日志可能只进宿主输出而不进入声明的分类日志。"
+    },
+    {
+     "sev": "MED",
+     "loc": "app/config/settings.py:30",
+     "text": "V1/V2 和主备 Provider 配置同时存在：history_provider_primary/fallback/mock_enabled、summary_provider_primary/fallback 与旧 ai_provider/ai_model/ai_api_key 并列；app/api/settings.py:24-75 又手工复制一套可编辑键，配置来源和行为边界容易漂移。"
+    },
+    {
+     "sev": "LOW",
+     "loc": "app/api/system.py:58",
+     "text": "旧 API stats 只接受 Run.status 为 success/partial；V2 运行状态使用独立的大写状态协议并由 /api/v2/dashboard 读取，V1/V2 双格式并存，旧统计接口可能长期返回空或过期数据。"
+    },
+    {
+     "sev": "LOW",
+     "loc": "app/api/v2_ui.py:759",
+     "text": "pipeline/generate、pipeline/send-due、pipeline/send 在 HTTP 请求内同步构造 DailyPipeline 并执行长耗时取数、AI、生图或桌面发送，API 层承担任务编排和外部副作用，易阻塞请求线程并扩大重复点击的影响面。"
+    }
+   ],
+   "auditedHash": "855c2a0150a138f15c34bfe3e6c4b76562f02873cf3810546b7f7ed632c8a5d0",
+   "auditedAt": "2026-08-24",
+   "auditedRev": "1d326e2"
+  },
+  {
+   "id": "pipeline_scheduler",
+   "label": "Pipeline 与调度",
+   "band": "orchestration",
+   "path": "app/pipeline, app/scheduler, generation runtime",
+   "paths": [
+    "app/pipeline/**/*.py",
+    "app/scheduler/**/*.py",
+    "app/services/generation_runtime.py",
+    "app/services/group_name_sync.py"
+   ],
+   "coupling": "core",
+   "deps": [
+    "persistence_state",
+    "history_ingestion",
+    "ranking",
+    "ai_prompting",
+    "image_generation",
+    "delivery"
+   ],
+   "desc": "每日任务编排、并发隔离、阶段状态、调度恢复与发送窗口。",
+   "tests": [
+    "tests/test_v2_pipeline.py",
+    "tests/test_scheduler.py",
+    "tests/test_daily_auto.py",
+    "tests/test_generation_concurrency.py"
+   ],
+   "loc": 2160,
+   "contentHash": "27298f50129acd93b946ff31d176f3912e39faea0f52e686daf041051ff5439d",
+   "score": 54,
+   "grade": "D",
+   "tags": [
+    "god-component",
+    "bloat",
+    "glue",
+    "fallback",
+    "silent-except",
+    "legacy",
+    "dual-format",
+    "duplication",
+    "placeholder"
+   ],
+   "findings": [
+    {
+     "sev": "HIGH",
+     "loc": "app/pipeline/daily_pipeline.py:72",
+     "text": "DailyPipeline 文件共约 1358 行，单类同时编排配置、群名同步、数据源、排行榜、Prompt、图片生成、RunStore、发送、恢复与人工确认；构造函数在 85-95 行直接连接多个外部子系统，职责和 blast radius 过大。"
+    },
+    {
+     "sev": "HIGH",
+     "loc": "app/pipeline/daily_pipeline.py:124",
+     "text": "PeriodResolver 支持 schedule_rule（app/scheduler/period.py:35-47），但 generate_all、force_generate、rebuild_prompt_from_snapshot 均未传入 Group.schedule_rule（本行及 1045、1115 行），群级周期配置会被静默按 weekday_default 执行。"
+    },
+    {
+     "sev": "HIGH",
+     "loc": "app/pipeline/daily_pipeline.py:1304",
+     "text": "_save_json 在 1304-1306 行直接 write_text；messages/ranking 等工件与 run.json 分步写入。加载损坏快照时 1310-1313 行直接失败且明确不回源，进程中断可能留下不可恢复的半成品状态。"
+    },
+    {
+     "sev": "HIGH",
+     "loc": "app/scheduler/daily_v2_job.py:40",
+     "text": "DailyScheduleState.load 在 42-48 行将 OSError/JSONDecodeError 直接吞掉并返回仅含 run_date 的新状态；若已有状态文件损坏，_run_locked 可能把已完成的邮件阶段当成未开始，失去去重依据并触发重复外部发送。"
+    },
+    {
+     "sev": "MED",
+     "loc": "app/scheduler/send_job.py:12",
+     "text": "run_send_due_job 在 14-19 行捕获所有 Exception，只记录日志且返回 None；APScheduler 调度层无法得到失败状态，分钟级发送异常可能表现为任务成功但无人感知。"
+    },
+    {
+     "sev": "MED",
+     "loc": "app/scheduler/daily_v2_job.py:232",
+     "text": "邮件阶段只用 proc.returncode 判定 email_status=sent/failed（232-245 行），不解析子进程输出中的逐群结果或工件状态，存在子任务部分失败却被记录为 sent 的协议缺口。"
+    },
+    {
+     "sev": "MED",
+     "loc": "app/scheduler/generate_job.py:1",
+     "text": "generate_job.py 与 email_job.py 仍保留 V1 ReportService/EmailService 任务（generate_job.py:15-24、email_job.py:14-22），而 manager.py:44-65 只注册 V2 任务；两套调度/状态格式仍可被外部调用，形成 legacy/dual-format 维护面。"
+    },
+    {
+     "sev": "MED",
+     "loc": "app/scheduler/calendar_rules.py:11",
+     "text": "V1 仍定义 ReportWindow/get_report_window（11-35 行），V2 又定义独立 PeriodWindow/PeriodResolver（app/scheduler/period.py:14-57）；两套日期窗口模型实现相同的前一自然日逻辑，增加跨版本语义漂移和 duplication 风险。"
+    },
+    {
+     "sev": "MED",
+     "loc": "app/services/group_name_sync.py:81",
+     "text": "健康检查、群列表读取异常或空结果在 81-94 行统一转为 unavailable，157-165 行只标记 skipped 并保留本地旧名称；DailyPipeline 在 126、682 行继续生成/发送，数据源不可用时可能继续使用过期自动发送目标。"
+    },
+    {
+     "sev": "MED",
+     "loc": "app/pipeline/daily_pipeline.py:205",
+     "text": "_record_group_failure 仅尽力写 FAILED；220-230 行再次捕获状态落盘异常并继续，导致返回结果显示 failed 但 run.json 可能没有失败状态，恢复与人工排查依赖日志而非持久化状态。"
+    },
+    {
+     "sev": "LOW",
+     "loc": "app/scheduler/manager.py:23",
+     "text": "无效 schedule_generate_time 在 23-33 行静默回退到 00:15；虽然有 warning，但配置错误不会阻止启动，运行顺序依赖日志才能发现实际调度时间。"
+    },
+    {
+     "sev": "LOW",
+     "loc": "app/scheduler/period.py:45",
+     "text": "PeriodResolver 对除 weekday_default 外的规则直接抛出 NotImplementedError（45-47 行），而 Group.schedule_rule 已暴露为可配置字段，属于已接入界面但未完成执行语义的 placeholder。"
+    }
+   ],
+   "auditedHash": "27298f50129acd93b946ff31d176f3912e39faea0f52e686daf041051ff5439d",
+   "auditedAt": "2026-08-24",
+   "auditedRev": "1d326e2"
+  },
+  {
+   "id": "history_ingestion",
+   "label": "微信数据接入",
+   "band": "domain",
+   "path": "app/data_sources, app/providers/history, history services",
+   "paths": [
+    "app/data_sources/**/*.py",
+    "app/providers/history/**/*.py",
+    "app/services/history_service.py",
+    "app/services/message_normalizer.py",
+    "app/services/speaker_identity.py"
+   ],
+   "coupling": "core",
+   "deps": [
+    "persistence_state"
+   ],
+   "desc": "WDA/MCP/CLI/Mock 数据源、联系人解析、消息归一化与身份聚合。",
+   "tests": [
+    "tests/test_wechat_mcp.py",
+    "tests/test_v2_data_source.py",
+    "tests/test_contact_resolver.py"
+   ],
+   "loc": 2334,
+   "contentHash": "2d7391184024b7dec08adc33cb71ad3fd0715ecab177058cfe4ee364738eb8b0",
+   "score": 64,
+   "grade": "C",
+   "tags": [
+    "god-component",
+    "bloat",
+    "fallback",
+    "fake-output",
+    "duplication",
+    "dual-format",
+    "glue",
+    "silent-except",
+    "legacy"
+   ],
+   "findings": [
+    {
+     "sev": "HIGH",
+     "loc": "app/providers/history/wechat_data_analysis.py:92",
+     "text": "WeChatDataAnalysisProvider 文件约 858 行，单个 Provider 同时负责 MCP 配置与健康检查、JSON 导出、群发现/解析、范围分页、旧锚点分页、响应解析、联系人映射、发送人冲突修复和消息转换，属于历史接入 God Component，修改任一上游协议都可能影响整条取数链。"
+    },
+    {
+     "sev": "HIGH",
+     "loc": "app/data_sources/wechat_data_analysis.py:41",
+     "text": "V2 WeChatDataAnalysisSource 在 46-54 行只构造 WeChatDataAnalysisProvider，没有接入 app.providers.history.registry 的 wechat-cli/Mock fallback；文档虽然称 MCP/导出为回退路线，但 V2 真实数据源不可用时不会自动切换到 CLI 或 Mock，和 V1 provider registry 的契约不一致。"
+    },
+    {
+     "sev": "HIGH",
+     "loc": "app/providers/history/registry.py:33",
+     "text": "build_providers 在 33-34 行会在 history_provider_mock_enabled 开启时自动追加 MockProvider；HistoryService.fetch 在 99-116 行把第一个 OK/EMPTY_RESULT 当作有效结果返回。真实 Provider 失败时，fixtures 可能被当成真实日报输入，形成 fake-output 风险。"
+    },
+    {
+     "sev": "MED",
+     "loc": "app/data_sources/base.py:20",
+     "text": "V2 定义 V2Message、FetchResult、DataSourceStatus、WeChatDataSource（20-115 行），V1 又定义 RawMessage、FetchResult、ProviderStatus、ChatHistoryProvider（app/providers/history/base.py:15-85）；V2 wrapper 在 app/data_sources/wechat_data_analysis.py:100-134 反复做两套模型转换，存在 dual-format/duplication 和额外 glue 层。"
+    },
+    {
+     "sev": "MED",
+     "loc": "app/data_sources/wechat_data_analysis.py:82",
+     "text": "_group_exists 在 84-90 行捕获所有异常并直接返回 False；当上游 list_groups 临时失败且消息结果为空时，fetch_messages 在 114-123 行会把暂时不可用误判为 GROUP_NOT_FOUND，而不是数据源异常。"
+    },
+    {
+     "sev": "MED",
+     "loc": "app/services/history_service.py:130",
+     "text": "discover_groups 在 133-143 行对 Provider 健康检查或 list_groups 的所有异常直接 continue 且不记录日志；所有 Provider 同时异常时调用方只得到空群列表，缺少可诊断的失败原因。"
+    },
+    {
+     "sev": "MED",
+     "loc": "app/providers/history/contact_resolver.py:37",
+     "text": "find_contact_db 在 37-43 行按目录排序后返回第一个账号的 contact.db；WeChatDataAnalysisProvider 虽保存 wechat_mcp_account（app/providers/history/wechat_data_analysis.py:110），构造 ContactResolver 时并未按账号选择数据库（117-118 行），多账号环境可能把联系人显示名映射到错误账号。"
+    },
+    {
+     "sev": "MED",
+     "loc": "app/providers/history/wechat_data_analysis.py:267",
+     "text": "JSON 导出路径在 284-287 行直接读取 item['timestamp']，并由 _to_raw 在 693 行直接读取 item['group_id']；单条导出记录缺字段或格式损坏会使整个群取数异常，没有逐条隔离或明确 INVALID_RESULT 状态。"
+    },
+    {
+     "sev": "LOW",
+     "loc": "app/providers/history/wechat_cli.py:65",
+     "text": "wechat-cli 的 list-groups 在 65-80 行对非零退出、JSON 解析失败和任意异常均返回空列表；作为 fallback 时会把命令故障表现为无群，且没有保留错误上下文。"
+    },
+    {
+     "sev": "LOW",
+     "loc": "app/providers/history/base.py:68",
+     "text": "ChatHistoryProvider 的接口方法在 73-85 行仅抛出 NotImplementedError，属于未使用 ABC 的 placeholder 接口；目前不影响已接入实现，但错误实例化基类时才会暴露，类型边界约束较弱。"
+    }
+   ],
+   "auditedHash": "2d7391184024b7dec08adc33cb71ad3fd0715ecab177058cfe4ee364738eb8b0",
+   "auditedAt": "2026-08-24",
+   "auditedRev": "1d326e2"
+  },
+  {
+   "id": "ranking",
+   "label": "排行榜与统计",
+   "band": "domain",
+   "path": "app/ranking + ranking_service",
+   "paths": [
+    "app/ranking/**/*.py",
+    "app/services/ranking_service.py"
+   ],
+   "coupling": "med",
+   "deps": [],
+   "desc": "消息统计、人物榜单、模板渲染与 V1 兼容排行。",
+   "tests": [
+    "tests/test_ranking.py",
+    "tests/test_v2_ranking.py",
+    "tests/test_v2_ranking_template.py"
+   ],
+   "loc": 376,
+   "contentHash": "ba5462ebaf26b376b09b83cf3b77fc096bee391083fa0dabe9c3a7c2ffaafac8",
+   "score": 64,
+   "grade": "C",
+   "tags": [
+    "legacy",
+    "dual-format",
+    "duplication",
+    "bloat",
+    "glue",
+    "over-fit"
+   ],
+   "findings": [
+    {
+     "sev": "HIGH",
+     "loc": "app/ranking/engine.py:18-64; app/services/ranking_service.py:17-76",
+     "text": "项目同时维护两套 RankingEngine/RankingResult：V2 处理 V2Message 并输出结构化 JSON，V1 service 处理 NormalizedMessage 并内置 Top10 文本渲染。两套实现都做发言统计和确定性排序，但过滤入口、字段协议、上限和输出格式不同，规则修改容易发生语义漂移。"
+    },
+    {
+     "sev": "MED",
+     "loc": "app/ranking/renderer.py:22-70; app/services/ranking_service.py:26-46",
+     "text": "排行榜渲染存在两条路径：V2 使用模板变量渲染，V1 RankingResult.render 直接拼接固定文本。相同统计数据可能产生不同的标题、字段和格式，邮件/报告与 V2 ranking.txt 的展示契约不统一。"
+    },
+    {
+     "sev": "MED",
+     "loc": "app/ranking/template_service.py:17-20,64-75,105-110",
+     "text": "默认模板同时以内嵌 DEFAULT_RANKING_TEMPLATE 和磁盘 default.txt 形式存在；_ensure_default 与 reset 都从代码常量写回文件。模板文件可被编辑而代码常量不会同步，恢复默认或重新初始化可能覆盖文件侧修改。"
+    },
+    {
+     "sev": "MED",
+     "loc": "app/ranking/engine_types.py:31-33; app/ranking/renderer.py:35-38,66-70",
+     "text": "V2 数据结构和渲染器保留多处旧协议兼容：top_limit 被追加到字段末尾以维持位置参数，top10_lines 作为旧变量别名，render_simple 继续保留无模板调用点。兼容层已进入核心类型/渲染路径，增加长期 dual-format/legacy 维护成本。"
+    },
+    {
+     "sev": "MED",
+     "loc": "app/ranking/engine.py:21-27,40-54; app/services/ranking_service.py:49-67",
+     "text": "两套引擎的可计数判定来源不同：V2 自己检查 message_type 与 SYSTEM_KEYWORDS，V1 依赖 NormalizedMessage.countable；同一原始数据经过不同标准化链路时，消息数、发言人数和 Top 排名可能不一致。"
+    },
+    {
+     "sev": "LOW",
+     "loc": "app/ranking/engine.py:29-38; app/ranking/engine_types.py:23-43",
+     "text": "V2 支持可配置 top_limit，但只校验大于 0；没有上限范围或非整数输入边界，结果结构也不校验 rank/count 非负。当前调用方通常传固定值，属于低影响输入约束缺口。"
+    },
+    {
+     "sev": "LOW",
+     "loc": "app/ranking/renderer.py:41-45",
+     "text": "模板替换对无法匹配正则的占位符保持原文，对未知/畸形占位符没有渲染后残留检查；虽然 validate_template 能拦截常规未知变量，但最终输出仍可能含未替换模板标记。"
+    },
+    {
+     "sev": "LOW",
+     "loc": "app/ranking/renderer.py:66-70",
+     "text": "render_simple 通过函数内动态导入 DEFAULT_RANKING_TEMPLATE 保留旧调用点，属于 glue 兼容实现；未直接造成错误，但继续扩大了 V1/V2 渲染边界。"
+    },
+    {
+     "sev": "LOW",
+     "loc": "app/ranking/engine.py:1-7,46-64",
+     "text": "排行榜核心本身是确定性、无 LLM、按消息数和稳定名称排序的纯计算路径，职责清晰且复杂度低；主要问题集中在 V1/V2 双实现与输出协议分裂，而非算法本身。"
+    }
+   ],
+   "auditedHash": "ba5462ebaf26b376b09b83cf3b77fc096bee391083fa0dabe9c3a7c2ffaafac8",
+   "auditedAt": "2026-08-24",
+   "auditedRev": "1d326e2"
+  },
+  {
+   "id": "ai_prompting",
+   "label": "AI 摘要与生图提示词",
+   "band": "domain",
+   "path": "app/ai, app/providers/ai, templates/image_prompt",
+   "paths": [
+    "app/ai/**/*.py",
+    "app/providers/ai/**/*.py",
+    "templates/image_prompt/**/*.md"
+   ],
+   "coupling": "high",
+   "deps": [],
+   "desc": "Codex/DeepSeek 调用、事件提取、分块、主题与布局选择、提示词生成。",
+   "tests": [
+    "tests/test_v2_prompt_builder.py",
+    "tests/test_codex_summary_provider.py",
+    "tests/test_topic_selection.py"
+   ],
+   "loc": 3601,
+   "contentHash": "5f58c145a3bbe60705954bbefd164c3412bede327740708bd7f70826499c1b07",
+   "score": 58,
+   "grade": "D",
+   "tags": [
+    "fallback",
+    "silent-except",
+    "legacy",
+    "dual-format",
+    "duplication",
+    "bloat",
+    "god-component",
+    "glue",
+    "any-escape",
+    "over-fit"
+   ],
+   "findings": [
+    {
+     "sev": "HIGH",
+     "loc": "app/ai/prompt_builder.py:76-80,558-673; app/providers/ai/codex.py:131-152,159-221; app/providers/ai/deepseek.py:227-259",
+     "text": "存在多层重试与回退叠加：Builder 的事件、候选主题、版式和最终 Prompt 各自重试，Codex/DeepSeek Provider 内部再次重试，Codex 任意异常还会切换 DeepSeek。一次超时、空响应或已被服务端接受但客户端断连的请求可能产生多次模型调用、延迟放大和重复计费。"
+    },
+    {
+     "sev": "HIGH",
+     "loc": "app/ai/prompt_builder.py:225-460,512-673",
+     "text": "DeepSeekImagePromptBuilder 是明显 god-component：同一类同时负责模板读取、主题解析、消息分块、事件提取、候选选题、证据回查、版式导演、最终 Prompt 拼接、敏感字段检查、元数据和 Provider 调用，约 677 行且跨越多个业务阶段，修改一个阶段容易影响整条链路。"
+    },
+    {
+     "sev": "MED",
+     "loc": "app/providers/ai/deepseek.py:227-259",
+     "text": "_chat 将 retryable 初始设为 True，并在 except Exception 中保留可重试状态；JSON 解析异常、字段缺失、空内容、非瞬态网络/协议错误都会进入重试路径，未区分瞬态错误和确定性输入/响应错误。"
+    },
+    {
+     "sev": "MED",
+     "loc": "app/providers/ai/codex.py:42-65,123-152",
+     "text": "CodexGPTProvider 继承 DeepSeekV4FlashProvider 却绕过父类 __init__，复用父类内部编排并自行覆盖关键方法；这是对实现细节的 over-fit 耦合，父类初始化或分块协议变化时容易产生隐蔽回归。"
+    },
+    {
+     "sev": "MED",
+     "loc": "app/ai/prompt_templates.py:16-96,124-165; templates/image_prompt/default.md:1-98",
+     "text": "默认 Prompt 模板存在两份来源：Python 内嵌 DEFAULT_IMAGE_PROMPT_TEMPLATE 与可编辑 default.md。_ensure_default 只在缺失时写入，reset 又把内嵌版本写回，两个文件可独立漂移，模板修改和恢复行为不一致。"
+    },
+    {
+     "sev": "MED",
+     "loc": "app/ai/prompt_builder.py:97-124,393-447; app/ai/prompt_templates.py:17-96; app/providers/ai/deepseek.py:37-67; app/ai/layouts.py:222-233",
+     "text": "事实约束、输出结构、主题/版式规则和禁止词分散在多个 Python 常量及 Markdown 模板中，存在重复 Prompt 契约；规则变更需要同步多处，容易出现主模型、备用模型、模板和最终检查器不一致。"
+    },
+    {
+     "sev": "MED",
+     "loc": "app/providers/ai/base.py:19-20; app/providers/ai/deepseek.py:84-91; app/ai/prompt_builder.py:225-226,480-491,676-677",
+     "text": "同时维护新 message_items 与旧 messages_text 两套输入格式，并通过 legacy-* 合成消息 ID；Builder 还保留旧类名 DeepSeekImagePromptBuilder 并导出 GroupSummaryImagePromptBuilder 别名，说明 V1/V2 兼容层仍渗透核心路径，存在 dual-format/legacy 维护成本。"
+    },
+    {
+     "sev": "MED",
+     "loc": "app/ai/prompt_builder.py:453-455; app/ai/topic_selection.py:177-184",
+     "text": "元数据和候选字段保留旧字段（deepseek_ms、interestingness_score）以兼容历史读取；代码虽能运行，但新旧协议长期并存，字段语义和版本边界不清晰。"
+    },
+    {
+     "sev": "MED",
+     "loc": "app/ai/prompt_builder.py:415-447",
+     "text": "最终 Prompt 约束主要依赖 forbidden term 的字符串包含检查和若干必需块的字符串包含检查，无法验证语义上的事实一致性、每段文字是否真正只出现一次或模型是否改写了证据；校验容易出现误报和漏报。"
+    },
+    {
+     "sev": "LOW",
+     "loc": "app/ai/prompt_builder.py:456-461",
+     "text": "build 使用宽泛 except Exception 统一记录并返回失败结果；异常不会静默丢失，但错误类型边界被压平，调用方只能依据截断后的字符串判断 Provider、模板还是验证失败。"
+    },
+    {
+     "sev": "LOW",
+     "loc": "app/ai/image_themes.py:351-368; app/ai/prompt_builder_types.py:9,21,30; app/ai/layouts.py:13",
+     "text": "多个核心数据入口使用 Any（主题 rng、消息列表、持久化元数据、布局定义），降低了 Prompt 协议的静态约束，属于低影响 any-escape。"
+    },
+    {
+     "sev": "LOW",
+     "loc": "app/ai/layouts.py:478-547; app/ai/prompt_builder.py:612-622",
+     "text": "版式导演失败两次后使用确定性 fallback_layout_plan；该回退不编造聊天事实且有稳定 seed，属于有界安全兼容，但会掩盖模型版式能力或协议问题并降低输出丰富度。"
+    }
+   ],
+   "auditedHash": "5f58c145a3bbe60705954bbefd164c3412bede327740708bd7f70826499c1b07",
+   "auditedAt": "2026-08-24",
+   "auditedRev": "1d326e2"
+  },
+  {
+   "id": "image_generation",
+   "label": "图片生成与恢复",
+   "band": "domain",
+   "path": "app/image + Codex image automation",
+   "paths": [
+    "app/image/**/*.py",
+    "scripts/codex_image_automation.py",
+    "scripts/test_image_generation.py"
+   ],
+   "coupling": "high",
+   "deps": [
+    "ai_prompting",
+    "persistence_state"
+   ],
+   "desc": "Codex ImageGen 子进程、串行队列、图片校验、暂存、重生成与人工恢复。",
+   "tests": [
+    "tests/test_codex_image_automation.py",
+    "tests/test_v2_image_task.py",
+    "tests/test_v2_image_regeneration.py"
+   ],
+   "loc": 1951,
+   "contentHash": "2d9181c0f9b013bf8ec7ff7a3878e4ee34733093a0444ffe6d960dc3cca5799d",
+   "score": 61,
+   "grade": "C",
+   "tags": [
+    "god-component",
+    "bloat",
+    "fallback",
+    "silent-except",
+    "legacy",
+    "dual-format",
+    "duplication",
+    "any-escape",
+    "glue"
+   ],
+   "findings": [
+    {
+     "sev": "HIGH",
+     "loc": "app/image/codex_generator.py:143",
+     "text": "CodexImageGenerator 所在文件约 892 行，单类同时负责 CLI 健康检查、跨进程互斥、子进程树终止、超时恢复、attempt manifest、候选扫描、哈希去重、图片验证、原子提升和 smoke 状态，属于高 blast-radius God Component。"
+    },
+    {
+     "sev": "MED",
+     "loc": "app/image/image_task.py:67",
+     "text": "verify_image 在 67-77 行只检查文件存在、大小和魔数签名，没有真正解码图片；app/image/regeneration.py:106-115 直接用该结果决定替换正式图片，损坏但带合法 PNG/JPEG 头的文件可能被接受。函数文档所称的可解析校验与实现不一致。"
+    },
+    {
+     "sev": "HIGH",
+     "loc": "scripts/codex_image_automation.py:449",
+     "text": "人工 adopt 流程在 449-458 行按共享 generated_images 目录的快照增量选择唯一 PNG，但 begin/adopt 没有跨进程互斥；两个并行人工任务各自产生单个候选时，候选可能被错误群任务认领并写入错误 run.json。"
+    },
+    {
+     "sev": "HIGH",
+     "loc": "scripts/codex_image_automation.py:336",
+     "text": "_sync_scheduler_result 在 336-379 行对 output/.scheduler/<date>.json 做无锁 read-modify-write。它与 DailyScheduleState 的进程内锁不共享，可能覆盖同时写入的 generation/email 字段，造成调度状态丢失或重复阶段判断。"
+    },
+    {
+     "sev": "MED",
+     "loc": "app/image/codex_generator.py:1",
+     "text": "主链路使用 Codex CLI 自有 attempt manifest（文件头及 236-430 行），同时 scripts/codex_image_automation.py:1-18 保留 Desktop begin/adopt/verify marker 工作流；两套图片认领、候选发现和 run 状态同步协议并存，属于 legacy/dual-format duplication。"
+    },
+    {
+     "sev": "MED",
+     "loc": "app/image/regeneration.py:46",
+     "text": "enqueue_regeneration 在 46-51 行先把任务 key 加入全局 _ACTIVE，随后 53-68 行才执行状态写入、生成器构造和线程提交；任一更新或 submit 异常都没有回滚 _ACTIVE，后续同一群/日期会永久被判定为正在队列中，直到进程重启。"
+    },
+    {
+     "sev": "MED",
+     "loc": "app/image/image_task.py:169",
+     "text": "SerialImageQueue 在 169-173 行吞掉 run_hook 的全部异常并继续返回图片结果；如果 hook 的 run.json 更新失败，调用方仍可能看到成功图片但持久化状态未进入 IMAGE_READY/READY_TO_SEND。"
+    },
+    {
+     "sev": "LOW",
+     "loc": "app/image/regeneration.py:38",
+     "text": "重新生图入口的 generator 参数使用 Any，app/image/image_task.py:94 也以 Any 接收生成器，没有统一协议或结构化能力检查；生成器异常只能在运行时被捕获，属于 glue/any-escape。"
+    },
+    {
+     "sev": "LOW",
+     "loc": "app/image/codex_generator.py:865",
+     "text": "_load_last_smoke 在 865-872 行只要 smoke JSON 能解析就返回 ok=True，不验证记录中的 source/output 文件仍存在；健康页可能继续展示过期的最近实测成功状态。"
+    }
+   ],
+   "auditedHash": "2d9181c0f9b013bf8ec7ff7a3878e4ee34733093a0444ffe6d960dc3cca5799d",
+   "auditedAt": "2026-08-24",
+   "auditedRev": "1d326e2"
+  },
+  {
+   "id": "delivery",
+   "label": "微信与邮件交付",
+   "band": "domain",
+   "path": "app/sender, email service, send scripts",
+   "paths": [
+    "app/sender/**/*.py",
+    "app/services/email_service.py",
+    "scripts/send_daily_email.py",
+    "scripts/test_wechat_send.py"
+   ],
+   "coupling": "core",
+   "deps": [
+    "persistence_state"
+   ],
+   "desc": "微信桌面/OCR 目标验证、安全发送认领、邮件交付与结果未知保护。",
+   "tests": [
+    "tests/test_v2_wechat_sender.py",
+    "tests/test_v2_wechat_native.py",
+    "tests/test_email.py"
+   ],
+   "loc": 1725,
+   "contentHash": "56d8a864de2706eaebbe8194ebfb4baa2cb0acfcce915fcc60f9dae136a6196f",
+   "score": 61,
+   "grade": "C",
+   "tags": [
+    "fallback",
+    "silent-except",
+    "legacy",
+    "dual-format",
+    "duplication",
+    "bloat",
+    "god-component",
+    "glue",
+    "over-fit"
+   ],
+   "findings": [
+    {
+     "sev": "HIGH",
+     "loc": "app/services/email_service.py:200-243; scripts/send_daily_email.py:203-243",
+     "text": "SMTP 发送失败后直接重试同一 EmailMessage；如果 SMTP 服务端已经接收邮件但客户端在响应阶段断开，第二次尝试可能造成重复邮件。代码没有幂等键、Message-ID 去重或提交状态确认。"
+    },
+    {
+     "sev": "HIGH",
+     "loc": "app/services/email_service.py:111-154",
+     "text": "EmailService.send 只返回汇总结果，不写入每群 email_status、发送批次或幂等记录；同一 run 被 scheduler、手动脚本或恢复流程再次调用时，已成功群仍可能重新发送。"
+    },
+    {
+     "sev": "MED",
+     "loc": "app/services/email_service.py:156-243; scripts/send_daily_email.py:82-243",
+     "text": "生产 EmailService 与手动脚本重复实现邮件构造、图片附件校验、SMTP 连接和重试逻辑；两套实现的降级语义不同（服务侧无效图片降级为纯排行榜，脚本侧直接跳过/失败），修复容易出现行为漂移。"
+    },
+    {
+     "sev": "MED",
+     "loc": "app/sender/wechat_automation.py:131-143",
+     "text": "legacy CLI 的 JSON 解析失败时回退为 proc.returncode == 0；CLI 可能退出码为 0 但没有可验证成功响应，此处仍返回 success，存在把未确认发送报告为成功的风险。"
+    },
+    {
+     "sev": "MED",
+     "loc": "app/sender/wechat_automation.py:104-117",
+     "text": "日志将完整命令拼接输出，命令包含 --to 目标和 --content 消息正文；真实发送时群名、接收目标及部分聊天内容可能进入日志，属于敏感数据泄漏风险。"
+    },
+    {
+     "sev": "MED",
+     "loc": "app/sender/wechat_native.py:37-745",
+     "text": "WindowsWechatDriver 集中实现 OCR、窗口激活、坐标点击、剪贴板、图片转换、提交后截图差异验证和发送互斥，文件 868 行、约 55 个定义，属于高复杂度 god-component；桌面版本、DPI 或 OCR 变化时 Blast Radius 很大。"
+    },
+    {
+     "sev": "MED",
+     "loc": "app/sender/wechat_automation.py:7-13,31-56; app/sender/wechat_native.py:862-868; scripts/test_wechat_send.py:23-25,68-76",
+     "text": "旧 wechat-automation 路径文档已明确当前微信版本 UIA 不兼容并会返回 WECHAT_WINDOW_NOT_FOUND，但配置为 legacy_cli 时仍会选择该 Provider，手动真实发送测试脚本也固定使用它；存在 legacy/stub 路径继续被误用的风险。"
+    },
+    {
+     "sev": "LOW",
+     "loc": "scripts/send_daily_email.py:132-140,246-278",
+     "text": "手动邮件脚本把未验证的 run_date 直接拼接到 output/{group}/{run_date} 路径；run_date 没有 YYYY-MM-DD 校验，虽然通常由本机操作者输入，仍缺少与 V2 RunStore 一致的路径边界。"
+    },
+    {
+     "sev": "LOW",
+     "loc": "app/sender/base.py:41-46; app/sender/wechat_native.py:823-857",
+     "text": "文字和图片按顺序提交，不具备原子 bundle；文字成功后图片可能失败或结果未知，调用方必须正确处理部分成功。SendResult 已保留 submitted、verification_level 和 outcome_unknown 字段，这是当前较好的 fail-closed 兼容设计。"
+    },
+    {
+     "sev": "LOW",
+     "loc": "scripts/test_wechat_send.py:60-66; app/sender/wechat_automation.py:96-102",
+     "text": "dry-run 测试把 ranking_demo_group_2026-08-17.txt 作为图片路径，而 legacy send_image 只检查文件存在、不验证图片格式；测试可能显示‘图片发送’成功但实际输入不是图片。"
+    }
+   ],
+   "auditedHash": "56d8a864de2706eaebbe8194ebfb4baa2cb0acfcce915fcc60f9dae136a6196f",
+   "auditedAt": "2026-08-24",
+   "auditedRev": "1d326e2"
+  },
+  {
+   "id": "v1_reporting",
+   "label": "V1 报告兼容链",
+   "band": "domain",
+   "path": "legacy report/prompt/handoff services",
+   "paths": [
+    "app/services/report_service.py",
+    "app/services/prompt_service.py",
+    "app/services/handoff_service.py",
+    "scripts/run_daily_pipeline.py"
+   ],
+   "coupling": "high",
+   "deps": [
+    "persistence_state",
+    "history_ingestion",
+    "ranking",
+    "ai_prompting",
+    "delivery"
+   ],
+   "desc": "仍可触达的 V1 数据库报告、Prompt fallback、工件交接与 CLI 流程。",
+   "tests": [
+    "tests/test_ui_api.py",
+    "tests/test_handoff.py",
+    "tests/test_prompt.py"
+   ],
+   "loc": 696,
+   "contentHash": "af44a66794ab4fa97b307e1452bdb5ab97c4855397a690df9c6754f4a27b9e4d",
+   "score": 52,
+   "grade": "D",
+   "tags": [
+    "fake-output",
+    "silent-except",
+    "legacy",
+    "dual-format",
+    "duplication",
+    "glue",
+    "bloat"
+   ],
+   "findings": [
+    {
+     "sev": "HIGH",
+     "loc": "app/services/report_service.py:247",
+     "text": "Prompt 失败时仍继续保存 Report 并调用 HandoffService；handoff_service.py:82-90 无条件写入 status=prompt_ready、poster_file=null，可能把空 Prompt 暴露为可交接产物。另在 268-271 行捕获文件输出异常只写 error_message，145-147 行仅检查 ranking_status/prompt_status，文件缺失仍可能被判定为成功。"
+    },
+    {
+     "sev": "HIGH",
+     "loc": "app/services/report_service.py:317",
+     "text": "_find_success_group_run 只查询 GroupRun.ranking_status == success，没有要求 prompt_status == success。此前排行榜成功但 Prompt 失败的记录会在 175-177 行被当作已完成，非 force 重试无法修复，只会再次返回失败。"
+    },
+    {
+     "sev": "HIGH",
+     "loc": "app/services/report_service.py:148",
+     "text": "GroupRun 初始 running/pending 状态在 179-187 行先提交；后续异常在 148-159 行通过新增一条 failed GroupRun 处理，原记录会遗留为 running/pending。父 Run 只有在 118-126 行全部 worker 返回后才收口，进程或 worker 异常可留下孤儿状态。"
+    },
+    {
+     "sev": "HIGH",
+     "loc": "app/services/handoff_service.py:34",
+     "text": "safe_dir_name 仅替换字符并截断 display_name，不加入稳定 group_id，也不拒绝 '.'、'..' 或 Windows 保留名；save_outputs 在 52-61 行直接使用该目录并覆盖写文件。不同群名可能碰撞覆盖，'.'/'..' 还可把写入指向日期目录或 output 根目录。"
+    },
+    {
+     "sev": "HIGH",
+     "loc": "app/services/handoff_service.py:105",
+     "text": "list_group_outputs 将未经格式校验的 report_date 直接拼入 output_dir 路径；文件接口把用户路径参数直接传入，绝对路径或 '..' 可突破预期日期目录并列出其他目录，同时返回完整本地 filesystem path。"
+    },
+    {
+     "sev": "HIGH",
+     "loc": "scripts/run_daily_pipeline.py:35",
+     "text": "_print_results 只打印每群状态；generate、send、force-generate、rebuild-prompt、force-send 分支分别在 99、105、114、119、124 行无条件 return 0。即使结果为 failed/partial，调度器仍会收到成功退出码。"
+    },
+    {
+     "sev": "MED",
+     "loc": "app/services/handoff_service.py:116",
+     "text": "handoff.json 通过 json.loads 无保护读取；save_outputs 在 57-92 行顺序写入多个文件且非原子，进程中断或部分文件损坏时，归档列表接口会直接抛异常而不是返回明确的不完整状态。"
+    },
+    {
+     "sev": "MED",
+     "loc": "scripts/run_daily_pipeline.py:28",
+     "text": "_pipeline 每次都执行 repo.init_db 和 repo.apply_db_settings；status 分支在 83-89 行也经过该初始化路径，因此看似只读的状态查询可能创建或修改数据库设置。"
+    },
+    {
+     "sev": "MED",
+     "loc": "app/services/report_service.py:1",
+     "text": "ReportService 明确是 V1 生成链路，而 scripts/run_daily_pipeline.py:1 使用独立 V2 DailyPipeline；handoff_service.py:11-12 又同时维护 V1/V2 状态语义。两套生成、状态和输出协议并存，后续修复容易发生 legacy/dual-format 漂移。"
+    },
+    {
+     "sev": "MED",
+     "loc": "scripts/run_daily_pipeline.py:72",
+     "text": "send 命令提供 --dry-run，但 force-send 子命令没有该选项；91 行通过 getattr 缺省为 False，因此 force-send 无法在 CLI 层进行 dry-run，误调用会直接进入真实发送路径。"
+    },
+    {
+     "sev": "LOW",
+     "loc": "app/services/prompt_service.py:89",
+     "text": "_build_context_text 明确标注为兼容旧调用，ranking 参数未使用，且仓库内没有实际调用；它与 _build_message_items/新 provider message_items 路径重复构造完整上下文，属于 legacy 兼容代码候选。"
+    }
+   ],
+   "auditedHash": "af44a66794ab4fa97b307e1452bdb5ab97c4855397a690df9c6754f4a27b9e4d",
+   "auditedAt": "2026-08-24",
+   "auditedRev": "1d326e2"
+  },
+  {
+   "id": "persistence_state",
+   "label": "数据库与运行状态",
+   "band": "storage",
+   "path": "app/db + app/v2",
+   "paths": [
+    "app/db/**/*.py",
+    "app/v2/**/*.py"
+   ],
+   "coupling": "core",
+   "deps": [
+    "v1_reporting"
+   ],
+   "desc": "SQLModel/SQLite、启动迁移、V2 run.json 状态、发送 lease 与恢复。",
+   "tests": [
+    "tests/test_v2_recovery.py",
+    "tests/test_v2_group_migration.py",
+    "tests/test_v2_period.py"
+   ],
+   "loc": 1125,
+   "contentHash": "f6293bb537b00804adedf91e75ec40c2f5c913bb5688887009da44baddb2f533",
+   "score": 62,
+   "grade": "C",
+   "tags": [
+    "silent-except",
+    "fallback",
+    "legacy",
+    "dual-format",
+    "duplication",
+    "bloat",
+    "god-component",
+    "glue",
+    "any-escape"
+   ],
+   "findings": [
+    {
+     "sev": "HIGH",
+     "loc": "app/db/models.py:10-79",
+     "text": "持久化模型缺少关系约束：wechat_group_id 仅普通索引，GroupRun.run_id/group_id 与 Report.group_run_id 都是无 ForeignKey 的裸整数，也没有复合唯一约束；重复群组、重复运行和孤儿记录只能依赖业务层避免。"
+    },
+    {
+     "sev": "HIGH",
+     "loc": "app/db/models.py:38-79; app/v2/run_store.py:1-7",
+     "text": "存在双持久化格式：V1 将 Run/GroupRun/Report 写入 SQLite，V2 将同一类运行状态和输出元数据写入每群每日 run.json；当前模块没有统一同步或一致性边界，状态可能分叉。"
+    },
+    {
+     "sev": "HIGH",
+     "loc": "app/v2/run_store.py:153-162",
+     "text": "load_run 对 JSONDecodeError/OSError 静默 pass，并回退为全新的 PENDING 状态；损坏或部分写入的状态会被当成未执行任务，可能触发重复生成或重复后续操作。"
+    },
+    {
+     "sev": "MED",
+     "loc": "app/db/repository.py:34-184",
+     "text": "迁移由多个手写 _migrate_* 函数组成，重复使用 marker 查询、更新、插入和 commit；没有版本表、统一迁移注册或全局迁移事务，属于明显 legacy/bloat/duplication。"
+    },
+    {
+     "sev": "MED",
+     "loc": "app/db/repository.py:187-206",
+     "text": "init_db 每次启动按固定顺序执行 create_all、补列、种默认值和多轮数据迁移；多个进程并发启动或中途异常时可能出现部分迁移，且旧 schema 默认值与模型默认值容易漂移。"
+    },
+    {
+     "sev": "MED",
+     "loc": "app/db/repository.py:331-425",
+     "text": "Repository 的 save_group、delete_group、restore_group、create_run、save_report、set_setting_value 等操作都立即 commit，缺少跨实体事务边界；核心流程的多阶段写入无法由该层保证原子性。"
+    },
+    {
+     "sev": "MED",
+     "loc": "app/v2/run_store.py:164-181",
+     "text": "普通 save_run/update 只使用进程内 RLock，临时文件名固定为 run.json.tmp；跨进程写同一 run 时仍可能互相覆盖临时文件或丢失更新，跨进程互斥只在发送 claim 路径启用。"
+    },
+    {
+     "sev": "MED",
+     "loc": "app/v2/recovery.py:85-105",
+     "text": "verify_output 只检查文件存在且 size>0，不校验 JSON schema、内容可解析性、图片实际解码或状态字段一致性；损坏文件可能被判定为完整。"
+    },
+    {
+     "sev": "MED",
+     "loc": "app/v2/recovery.py:113-153",
+     "text": "recover_incomplete 通过 display_name 查询 group_id，而不是使用持久化稳定 ID；重名群组时可能恢复到错误群组，且动态导入 DailyPipeline/DB，形成较强 glue 耦合。"
+    },
+    {
+     "sev": "MED",
+     "loc": "app/v2/run_store.py:119-121",
+     "text": "运行目录以 safe_dir_name(group_name)/run_date 定位，没有稳定 group_id；名称清洗、特殊字符归一化或截断会造成不同群组目录碰撞并覆盖状态/输出。"
+    },
+    {
+     "sev": "MED",
+     "loc": "app/v2/constants.py:19-32",
+     "text": "STATUS_FLOW 只声明状态顺序，is_terminal 只做终态集合判断，没有统一的合法状态转移校验；状态推进规则仍分散在上层 pipeline，状态机约定容易被绕过。"
+    },
+    {
+     "sev": "LOW",
+     "loc": "app/v2/run_store.py:339-364",
+     "text": "list_runs 对损坏 run.json 直接静默跳过，调用方无法区分“没有运行”和“状态文件损坏”，导致恢复/审计列表不完整。"
+    },
+    {
+     "sev": "LOW",
+     "loc": "app/v2/recovery.py:38-52",
+     "text": "旧 run 缺少 image_enabled 或值未知时固定回退为 True；这是兼容性 fallback，但会把旧格式或异常数据强制解释为需要图片。"
+    },
+    {
+     "sev": "LOW",
+     "loc": "app/db/repository.py:13,428-431",
+     "text": "全局 engine 使用 Any，_now 返回 Any，削弱了 persistence 边界的静态类型约束，属于低影响 any-escape。"
+    },
+    {
+     "sev": "MED",
+     "loc": "app/v2/run_store.py:113-365",
+     "text": "RunStore 同时承担路径生成、JSON 状态读写、历史布局读取、跨进程发送锁、发送租约和运行枚举，职责集中度偏高，已接近 persistence god-component；后续修改发送状态时容易影响文件状态逻辑。"
+    }
+   ],
+   "auditedHash": "f6293bb537b00804adedf91e75ec40c2f5c913bb5688887009da44baddb2f533",
+   "auditedAt": "2026-08-24",
+   "auditedRev": "1d326e2"
+  },
+  {
+   "id": "operations_scripts",
+   "label": "运维与计划任务脚本",
+   "band": "ops",
+   "path": "scripts/daily_auto.py 等",
+   "paths": [
+    "scripts/daily_auto.py",
+    "scripts/generate_fixtures.py",
+    "scripts/install_autostart.py",
+    "scripts/install_daily_task.py",
+    "scripts/test_wechat_data.py"
+   ],
+   "coupling": "med",
+   "deps": [
+    "pipeline_scheduler",
+    "history_ingestion"
+   ],
+   "desc": "Windows 自动启动/计划任务、每日监控入口、fixture 与数据源手工检查。",
+   "tests": [
+    "tests/test_daily_auto.py",
+    "tests/test_install_daily_task.py"
+   ],
+   "loc": 652,
+   "contentHash": "ec805b9b5f228de0522b1755d42b5bfa244b32cf5c2202ca4a900b428c3737ee",
+   "score": 58,
+   "grade": "D",
+   "tags": [
+    "legacy",
+    "dual-format",
+    "fake-output",
+    "glue",
+    "over-fit",
+    "bloat"
+   ],
+   "findings": [
+    {
+     "sev": "HIGH",
+     "loc": "scripts/test_wechat_data.py:31",
+     "text": "脚本声明只读取微信数据，但每个命令在 138 行都会先调用 _load_settings；该函数执行 repo.init_db 和 repo.apply_db_settings，初始化过程包含建表、默认值写入和迁移，健康检查/列群等只读操作可能修改生产数据库。"
+    },
+    {
+     "sev": "HIGH",
+     "loc": "scripts/test_wechat_data.py:177",
+     "text": "main 无论 health、list-groups、resolve 或 fetch 返回什么状态都固定 return 0；数据源不可用、读取失败或空结果仍会被自动化环境视为成功，脚本没有把 Provider 状态映射为退出码。"
+    },
+    {
+     "sev": "MED",
+     "loc": "scripts/daily_auto.py:69",
+     "text": "already_running 被纳入成功退出集合。任务实际没有执行任何生成或发送时仍返回 0，计划任务监控无法区分‘已完成’和‘被并发锁跳过’。"
+    },
+    {
+     "sev": "MED",
+     "loc": "scripts/install_daily_task.py:114",
+     "text": "安装、卸载和状态命令的 main 固定 return 0；_install 即使 schtasks 返回失败也只打印字符串，调用方无法通过退出码发现任务安装失败。install_autostart.py:64-74 存在同样问题。"
+    },
+    {
+     "sev": "MED",
+     "loc": "scripts/install_daily_task.py:44",
+     "text": "两阶段安装先创建生成任务，再创建发送任务；发送任务创建失败时 55-71 行只返回警告，不回滚已创建的生成任务，系统会留下半安装状态。"
+    },
+    {
+     "sev": "MED",
+     "loc": "scripts/test_wechat_data.py:45",
+     "text": "fetch 结果会把完整 messages、消息详情和 Provider 错误写入 output/test-data，固定文件名会覆盖旧证据，且没有脱敏、保留期限或显式清理边界；真实聊天验证可能留下敏感数据。"
+    },
+    {
+     "sev": "MED",
+     "loc": "scripts/install_daily_task.py:35",
+     "text": "计划任务的生成阶段调用 daily_auto.py，发送阶段调用另一套 run_daily_pipeline.py；两个入口拥有不同的状态文件、失败语义和退出码，调度链路存在 dual-format/glue 漂移风险。"
+    },
+    {
+     "sev": "LOW",
+     "loc": "scripts/generate_fixtures.py:170",
+     "text": "生成器按当前 date.today() 滚动生成最近 8 天 fixtures，并在 171-183 行直接覆盖 groups.json 和消息文件；没有 --output、日期或确认参数，容易覆盖手工 fixture，且输出结果随执行日期变化。"
+    },
+    {
+     "sev": "LOW",
+     "loc": "scripts/generate_fixtures.py:24",
+     "text": "groups.json 声明 member_count 为 48/112，但实际生成的 MEMBERS_A/MEMBERS_B 只有 15/8 人；这是 mock_fixture 的不一致数据契约，可能让 UI 或测试展示错误人数。"
+    },
+    {
+     "sev": "LOW",
+     "loc": "scripts/install_autostart.py:24",
+     "text": "开机自启注释仍称启动 V1 脚本，_START_CMD 通过 start_windows.bat 启动旧入口；该兼容包装与当前 V2 调度入口并存，版本边界和实际启动流程不清晰。"
+    }
+   ],
+   "auditedHash": "ec805b9b5f228de0522b1755d42b5bfa244b32cf5c2202ca4a900b428c3737ee",
+   "auditedAt": "2026-08-24",
+   "auditedRev": "1d326e2"
+  }
+ ]
+}
