@@ -74,7 +74,10 @@ def _normalized_title(value: str) -> str:
         if unicodedata.category(char) in {"So", "Sk"}:
             continue
         visible.append(char)
-    return re.sub(r"\s+", "", "".join(visible)).strip()
+    compact = re.sub(r"\s+", "", "".join(visible)).strip()
+    # Windows OCR 会稳定地把版本号中的点识别成逗号（例如 1.1 → 1，1）。
+    # 仅在两个数字之间归一化，避免改变普通群名标点的身份含义。
+    return re.sub(r"(?<=\d)[,，、。·](?=\d)", ".", compact)
 
 
 def _title_matches(value: str, target: str) -> bool:
@@ -101,7 +104,12 @@ def _selected_header_matches(value: str, target: str) -> bool:
     target_suffix = re.search(suffix_pattern, target_n)
     if target_suffix:
         value_suffix = re.search(suffix_pattern, value_n)
-        if value_suffix is None or value_suffix.group(0) != target_suffix.group(0):
+        if value_suffix is None:
+            target_digits = re.sub(r"[._-]", "", target_suffix.group(0))
+            compact_suffix = re.search(r"(\d+)$", value_n)
+            if compact_suffix is None or compact_suffix.group(1) != target_digits:
+                return False
+        elif value_suffix.group(0) != target_suffix.group(0):
             return False
     return _edit_distance(value_n, target_n) <= min(4, max(1, len(target_n) // 3))
 
@@ -148,12 +156,17 @@ def _search_title_score(value: str, target: str, *, max_distance: int | None = N
     if target_suffix:
         value_suffix = re.search(suffix_pattern, value_n)
         if value_suffix is None:
+            target_digits = re.sub(r"[._-]", "", target_suffix.group(0))
+            compact_suffix = re.search(r"(\d+)$", value_n)
             # Windows OCR 偶尔会把“1.1”群聊项的后半段识别成“1。”。
-            # 搜索阶段只容许首段数字相同的残缺版本；点击后的标题
-            # 复核仍要求完整版本，不同的 2.3/3.2 仍然不会被接受。
+            # 也可能直接吞掉分隔点，把“2.3”识别成“23”。搜索阶段
+            # 只接受完整数字序列一致或首段数字一致的残缺版本；点击后的
+            # 标题复核仍要求数字序列一致，不同的 2.3/3.2 永远不会被接受。
             partial_suffix = re.search(r"(\d+)[。.]?$", value_n)
             target_first = target_suffix.group(0).split(".", 1)[0].split("_", 1)[0].split("-", 1)[0]
-            if partial_suffix is None or partial_suffix.group(1) != target_first:
+            compact_matches = compact_suffix is not None and compact_suffix.group(1) == target_digits
+            partial_matches = partial_suffix is not None and partial_suffix.group(1) == target_first
+            if not compact_matches and not partial_matches:
                 return None
         elif value_suffix.group(0) != target_suffix.group(0):
             return None
@@ -187,7 +200,7 @@ def _select_group_search_match(lines: list[OcrLine], target: str) -> tuple[OcrLi
         ]
 
     scored = [(score, line) for line in candidates if (score := _search_title_score(line.text, target)) is not None]
-    if not scored:
+    if not scored and not chat_sections:
         # 新改名或很少在聊天中提及的群，搜索结果可能只有
         # “最常使用”中的群聊项，没有“聊天记录”分区。此时只允许
         # 选择“搜索网络结果”之前、且明显低于顶部输入框的唯一匹配。

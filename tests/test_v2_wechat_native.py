@@ -55,6 +55,7 @@ def test_title_match_only_accepts_exact_name_or_member_count():
     assert not _title_matches("测试群公告", "测试群")
     assert not _title_matches("另一个测试群", "测试群")
     assert _title_matches("米游涩泛二次元同好摸鱼群2．3", "米游涩泛二次元同好摸鱼群2.3")
+    assert _title_matches("米 游 涩 泛 二 次 元 同 好 摸 鱼 群 1，1（439）", "米游涩泛二次元同好摸鱼群1.1")
     assert _title_matches("Eason张UED-4群", "Eason张UED-4群🤘")
 
 
@@ -62,8 +63,10 @@ def test_selected_header_allows_one_ocr_substitution_only_for_long_title():
     target = "米游涩泛二次元同好摸鱼群2.3"
 
     assert _selected_header_matches("米游涩泛一次元同好摸鱼群2．3（422）", target)
+    assert _selected_header_matches("米 游 涩 泛 二 次 元 同 好 摸 鱼 群 23（422）", target)
     assert _selected_header_matches("Eason 张 lJED-4ä#", "Eason张UED-4群🤘")
     assert not _selected_header_matches("米游涩泛二次元同好摸鱼群3.2（422）", target)
+    assert not _selected_header_matches("米游涩泛二次元同好摸鱼群32（422）", target)
     assert not _selected_header_matches("Grok张UED-4ä#", "Eason张UED-4群🤘")
     assert not _selected_header_matches("测试一（10）", "测试二")
 
@@ -111,6 +114,40 @@ def test_search_allows_missing_second_version_digit_but_not_wrong_first_digit():
     assert detail == ""
     assert matched is partial
     assert rejected is None
+
+
+def test_search_accepts_collapsed_version_digits_with_leading_ocr_noise():
+    target = "米游涩泛二次元同好摸鱼群2.3"
+    noisy_group_result = OcrLine("孙睿 米游涩泛二次元同好摸鱼群23", 10, 95, 320, 24)
+    boundary = OcrLine("聊天记录", 10, 150, 90, 24)
+
+    matched, detail = _select_group_search_match([noisy_group_result, boundary], target)
+
+    assert matched == noisy_group_result
+    assert detail == ""
+
+
+def test_search_rejects_different_collapsed_version_digits():
+    target = "米游涩泛二次元同好摸鱼群2.3"
+    wrong_group_result = OcrLine("孙睿 米游涩泛二次元同好摸鱼群32", 10, 95, 320, 24)
+    boundary = OcrLine("聊天记录", 10, 150, 90, 24)
+
+    matched, detail = _select_group_search_match([wrong_group_result, boundary], target)
+
+    assert matched is None
+    assert "匹配数 0" in detail
+
+
+def test_search_does_not_fallback_to_chat_record_when_group_section_exists():
+    target = "米游涩泛二次元同好摸鱼群2.3"
+    boundary = OcrLine("聊天记录", 10, 150, 90, 24)
+    chat_record = OcrLine(target, 10, 210, 320, 24)
+    network = OcrLine("搜索网络结果", 10, 300, 150, 24)
+
+    matched, detail = _select_group_search_match([boundary, chat_record, network], target)
+
+    assert matched is None
+    assert "匹配数 0" in detail
 
 
 def test_search_allows_bounded_ocr_errors_with_stable_ascii_anchor():
