@@ -9,8 +9,16 @@
 """
 
 import os
+import tempfile
+import uuid
+from pathlib import Path
 
-os.environ["DATABASE_URL"] = "sqlite:///data/test_groupbrief.db"
+_TEST_DB_PATH = (
+    Path(tempfile.gettempdir())
+    / f"groupbrief-pytest-{os.getpid()}-{uuid.uuid4().hex}.db"
+)
+
+os.environ["DATABASE_URL"] = f"sqlite:///{_TEST_DB_PATH.as_posix()}"
 os.environ["GROUPBRIEF_NO_SCHEDULER"] = "1"
 # 测试不读取真实微信联系人库（避免本机 APPDATA 下的 contact.db 影响断言）
 os.environ["GROUPBRIEF_NO_CONTACT_DB"] = "1"
@@ -21,3 +29,27 @@ os.environ["WECHAT_MCP_ACCOUNT"] = ""
 os.environ["AI_API_KEY"] = ""
 # 默认集成测试强制使用无需外部调用的旧兼容分支；Codex 主备路由由专门单测覆盖。
 os.environ["SUMMARY_PROVIDER_PRIMARY"] = "deepseek"
+
+
+def pytest_sessionfinish(session, exitstatus) -> None:
+    """释放并删除本次 pytest 独占的临时 SQLite 文件。"""
+    del session, exitstatus
+    try:
+        from app.db import repository as repo
+
+        if repo.engine is not None:
+            repo.engine.dispose()
+    except Exception:
+        # 测试收尾不能覆盖更早、更有价值的失败信息。
+        pass
+
+    for candidate in (
+        _TEST_DB_PATH,
+        Path(f"{_TEST_DB_PATH}-wal"),
+        Path(f"{_TEST_DB_PATH}-shm"),
+        Path(f"{_TEST_DB_PATH}-journal"),
+    ):
+        try:
+            candidate.unlink(missing_ok=True)
+        except OSError:
+            pass

@@ -17,6 +17,20 @@ settings.ensure_dirs()
 repo.init_db(settings)
 
 
+def _get_or_create_group(session: Session, display_name: str, wechat_group_id: str) -> Group:
+    group = repo.find_group_by_wechat_id(
+        session,
+        wechat_group_id,
+        include_deleted=False,
+    )
+    if group is not None:
+        return group
+    return repo.save_group(
+        session,
+        Group(display_name=display_name, wechat_group_id=wechat_group_id),
+    )
+
+
 def test_safe_dir_name():
     assert safe_dir_name("示例UED-4群") == "示例UED-4群"
     assert ":" not in safe_dir_name("a:b/c*d?e")
@@ -28,10 +42,7 @@ def test_safe_dir_name():
 
 def test_generate_writes_files():
     with Session(repo.engine) as session:
-        group = repo.save_group(
-            session,
-            Group(display_name="示例UED-4群", wechat_group_id="group-a"),
-        )
+        group = _get_or_create_group(session, "示例UED-4群", "group-a")
         service = ReportService()
         run = service.generate(session, group=group, report_date="2026-08-13", force=True)
         assert run.status == "success"
@@ -77,10 +88,7 @@ def test_generate_writes_files():
 
 def test_two_groups_isolated():
     with Session(repo.engine) as session:
-        repo.save_group(
-            session,
-            Group(display_name="产品经理交流群", wechat_group_id="group-b"),
-        )
+        _get_or_create_group(session, "产品经理交流群", "group-b")
         service = ReportService()
         run = service.generate(session, report_date="2026-08-13", trigger_type="auto", force=True)
         assert run.status == "success"

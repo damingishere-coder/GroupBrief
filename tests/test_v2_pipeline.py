@@ -24,7 +24,7 @@ from app.data_sources.base import (
 from sqlmodel import Session
 
 from app.db import repository as repo
-from app.db.models import Group
+from app.db.models import Group, GroupRun, Report
 from app.pipeline.daily_pipeline import DailyPipeline
 from app.v2.constants import (
     FAILED,
@@ -40,9 +40,10 @@ from app.v2.run_store import RunStore
 
 def _clear_groups() -> None:
     with Session(repo.engine) as session:
-        # 测试数据库需要真正清空；产品 delete_group 已改为保留历史的软删除。
-        for g in repo.list_groups(session, include_deleted=True):
-            session.delete(g)
+        # 测试数据库需要真正清空；先按外键依赖顺序删除历史关系。
+        session.exec(Report.__table__.delete())
+        session.exec(GroupRun.__table__.delete())
+        session.exec(Group.__table__.delete())
         session.commit()
 
 

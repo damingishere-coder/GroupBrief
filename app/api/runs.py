@@ -27,14 +27,21 @@ def run_detail(run_id: int, session: Session = Depends(repo.get_session)):
     ).all()
     details = []
     for gr in group_runs:
-        group = session.get(Group, gr.group_id)
+        group = session.get(Group, gr.group_id) if gr.group_id is not None else None
+        if group:
+            group_name = group.display_name or group.wechat_group_name
+        elif gr.identity_state == "orphaned":
+            group_name = f"历史群（旧 ID {gr.legacy_group_id}）"
+        else:
+            group_name = "未知群"
         details.append(
             {
                 "id": gr.id,
                 "group_id": gr.group_id,
-                "group_name": (group.display_name or group.wechat_group_name)
-                if group
-                else f"群 {gr.group_id}",
+                "legacy_group_id": gr.legacy_group_id,
+                "identity_state": gr.identity_state,
+                "orphan_reason": gr.orphan_reason,
+                "group_name": group_name,
                 "provider_used": gr.provider_used,
                 "message_count": gr.message_count,
                 "speaker_count": gr.speaker_count,

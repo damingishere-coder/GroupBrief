@@ -68,6 +68,11 @@ class EmailService:
 
             group_runs = session.exec(select(GroupRun).where(GroupRun.run_id == run.id)).all()
             for gr in group_runs:
+                if gr.identity_state != "linked" or gr.group_id is None:
+                    missing.append(
+                        f"历史群（旧 ID {gr.legacy_group_id}）：关联已归档，不发送"
+                    )
+                    continue
                 if gr.ranking_status != "success":
                     missing.append(f"群 {gr.group_id}：排行榜未生成（{gr.ranking_status}）")
                     continue

@@ -65,7 +65,10 @@ def stats(session: Session = Depends(repo.get_session)):
             "run_id": None,
         }
     rows = session.exec(
-        select(GroupRun).where(GroupRun.run_id == latest.id)
+        select(GroupRun).where(
+            GroupRun.run_id == latest.id,
+            GroupRun.identity_state == "linked",
+        )
     ).all()
     return {
         "total_messages": sum(r.message_count for r in rows),
