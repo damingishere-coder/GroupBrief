@@ -182,6 +182,36 @@ def test_run_detail_only_lists_downloadable_files_and_serves_original_png(archiv
     assert client.get(f"/api/v2/files/{group_name}/{run_date}/..%2Fprivate.txt").status_code != 200
 
 
+def test_v2_file_and_run_routes_reject_unsafe_group_paths(archive_client):
+    client, _, _ = archive_client
+    run_date = "2026-08-24"
+
+    for encoded_group in ("..%5Clogs", "C:%5CWindows", "%5C%5Cserver%5Cshare"):
+        assert client.get(f"/api/v2/runs/{encoded_group}/{run_date}").status_code == 400
+        assert client.get(f"/api/v2/files/{encoded_group}/{run_date}/ranking.txt").status_code == 400
+        assert (
+            client.put(
+                f"/api/v2/runs/{encoded_group}/{run_date}/prompt",
+                json={
+                    "content": "安全 Prompt",
+                    "expected_revision": "missing",
+                    "image_theme": "random_preset",
+                },
+            ).status_code
+            == 400
+        )
+
+    response = client.post(
+        "/api/v2/image-themes/resolve",
+        json={
+            "image_theme": "random_preset",
+            "group_id": r"..\logs",
+            "run_date": "2026-08-24",
+        },
+    )
+    assert response.status_code == 400
+
+
 def test_soft_delete_preserves_database_history_and_output_then_restores_disabled(archive_client):
     client, engine, output_dir = archive_client
     group = _save_group(

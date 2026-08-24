@@ -13,7 +13,8 @@ services:
     image: groupbrief-v2:latest
     container_name: groupbrief-v2
     ports:
-      - "8766:8766"
+      # 管理与发送 API 没有远程认证；默认只发布到宿主机回环地址。
+      - "127.0.0.1:8766:8766"
     volumes:
       # 数据持久化（SQLite / 日报输出 / 日志）挂载到宿主机当前目录
       - ./data:/app/data

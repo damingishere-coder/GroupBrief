@@ -78,6 +78,14 @@ def _store(settings: Settings) -> RunStore:
     return RunStore(settings.output_dir)
 
 
+def _safe_group_dir(store: RunStore, group: str, run_date: str) -> Path:
+    """把 RunStore 的路径拒绝统一转换成明确的客户端错误。"""
+    try:
+        return store.group_dir(group, run_date)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 # ---------- Dashboard ----------
 
 
@@ -347,8 +355,8 @@ def archive_groups(
 def run_detail(group: str, run_date: str, settings: Settings = Depends(get_settings)):
     _validate_run_date(run_date)
     store = _store(settings)
+    group_dir = _safe_group_dir(store, group, run_date)
     run = store.load_run(group, run_date)
-    group_dir = store.group_dir(group, run_date)
     files = (
         sorted(p.name for p in group_dir.glob("*") if p.is_file() and p.name in ALLOWED_FILES)
         if group_dir.exists()
@@ -399,6 +407,8 @@ def resolve_theme_preview(
         )
     except ImageThemeError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {
         "requested_key": theme.requested_key,
         "actual_key": theme.actual_key,
@@ -411,6 +421,7 @@ def resolve_theme_preview(
 
 
 def _read_run_prompt(store: RunStore, group: str, run_date: str) -> tuple[str, dict]:
+    _safe_group_dir(store, group, run_date)
     if not store.run_path(group, run_date).exists():
         raise HTTPException(status_code=404, detail="运行记录不存在")
     path = store.prompt_path(group, run_date)
@@ -500,6 +511,7 @@ def update_run_prompt(
 def restore_run_prompt(group: str, run_date: str, settings: Settings = Depends(get_settings)):
     _validate_run_date(run_date)
     store = _store(settings)
+    _safe_group_dir(store, group, run_date)
     if not store.run_path(group, run_date).exists():
         raise HTTPException(status_code=404, detail="运行记录不存在")
     original = store.original_prompt_path(group, run_date)
@@ -522,6 +534,7 @@ def regenerate_run_image(group: str, run_date: str, settings: Settings = Depends
     from app.image.regeneration import enqueue_regeneration
 
     _validate_run_date(run_date)
+    _safe_group_dir(_store(settings), group, run_date)
     try:
         run = enqueue_regeneration(settings, group, run_date)
     except FileNotFoundError as exc:
@@ -547,6 +560,7 @@ def refresh_run_messages(group: str, run_date: str, settings: Settings = Depends
 
     _validate_run_date(run_date)
     store = _store(settings)
+    _safe_group_dir(store, group, run_date)
     if not store.run_path(group, run_date).exists():
         raise HTTPException(status_code=404, detail="运行记录不存在")
     try:
@@ -570,6 +584,7 @@ def rebuild_run_prompt(group: str, run_date: str, settings: Settings = Depends(g
 
     _validate_run_date(run_date)
     store = _store(settings)
+    _safe_group_dir(store, group, run_date)
     if not store.run_path(group, run_date).exists():
         raise HTTPException(status_code=404, detail="运行记录不存在")
     try:
@@ -820,7 +835,7 @@ def read_output_file(
     _validate_run_date(run_date)
     if file_name not in ALLOWED_FILES:
         raise HTTPException(400, f"不允许访问的文件：{file_name}")
-    path = _store(settings).group_dir(group, run_date) / file_name
+    path = _safe_group_dir(_store(settings), group, run_date) / file_name
     if not path.exists():
         raise HTTPException(404, "文件不存在")
     return FileResponse(path, filename=file_name)

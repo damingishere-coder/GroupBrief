@@ -77,6 +77,13 @@ def test_v2_invalid_dates_return_400(bad_date):
         assert client.get(f"/api/v2/files/test-group/{bad_date}/ranking.txt").status_code == 400
 
 
+def test_group_create_rejects_unsafe_output_names():
+    with client:
+        for bad_name in ("..", "../logs", r"..\logs", r"C:\Windows", r"\\server\share"):
+            response = client.post("/api/groups", json={"display_name": bad_name})
+            assert response.status_code == 422
+
+
 def test_group_image_theme_roundtrip_and_validation():
     display_name = "主题配置测试群"
     with client:

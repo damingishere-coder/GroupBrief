@@ -6,8 +6,12 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlmodel import Session, select
 
-from app.config.settings import Settings, get_settings
-from app.ai.image_themes import DEFAULT_IMAGE_THEME, ImageThemeError, resolve_image_theme, validate_image_theme_config
+from app.ai.image_themes import (
+    DEFAULT_IMAGE_THEME,
+    ImageThemeError,
+    resolve_image_theme,
+    validate_image_theme_config,
+)
 from app.ai.prompt_builder import _strip_html_comments
 from app.ai.prompt_editing import prompt_revision, resolved_theme_text
 from app.ai.prompt_templates import (
@@ -16,6 +20,8 @@ from app.ai.prompt_templates import (
     render_image_prompt_template,
     validate_image_prompt_template,
 )
+from app.config.settings import Settings, get_settings
+from app.core.path_security import PathBoundaryError, validate_path_label
 from app.db import repository as repo
 from app.db.models import Group
 from app.data_sources.wechat_data_analysis import WeChatDataAnalysisSource
@@ -88,6 +94,15 @@ def _validate_group_theme(theme: object, custom: object = "") -> tuple[str, str]
     try:
         return validate_image_theme_config(theme, custom)
     except ImageThemeError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+def _validate_output_group_name(value: object, *, field_name: str) -> str:
+    """拒绝会被当作文件路径的群名称，同时保留普通显示名标点。"""
+    text = str(value or "")
+    try:
+        return validate_path_label(text, field_name=field_name)
+    except PathBoundaryError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
@@ -182,6 +197,13 @@ def list_groups(session: Session = Depends(repo.get_session)):
 @router.post("")
 def create_group(payload: GroupCreate, session: Session = Depends(repo.get_session)):
     values = payload.model_dump()
+    values["display_name"] = _validate_output_group_name(
+        values.get("display_name"), field_name="display_name"
+    )
+    if values.get("wechat_group_name"):
+        values["wechat_group_name"] = _validate_output_group_name(
+            values["wechat_group_name"], field_name="wechat_group_name"
+        )
     values["send_target"] = str(values.get("send_target") or "").strip()
     values["image_theme"], values["image_theme_custom"] = _validate_group_theme(
         values.get("image_theme", "random_preset"), values.get("image_theme_custom", "")
@@ -209,6 +231,11 @@ def update_group(
 ):
     group = _require_active_group(session, group_id)
     updates = payload.model_dump(exclude_unset=True)
+    for field_name in ("display_name", "wechat_group_name"):
+        if updates.get(field_name):
+            updates[field_name] = _validate_output_group_name(
+                updates[field_name], field_name=field_name
+            )
     if "image_theme" in updates or "image_theme_custom" in updates:
         theme, custom = _validate_group_theme(
             updates.get("image_theme", group.image_theme),
@@ -330,14 +357,17 @@ def bind_group_from_name(
             },
         )
 
+    selected_name = selected.group_name or name
+    _validate_output_group_name(selected_name, field_name="group_name")
+
     existing = session.exec(
         select(Group).where(Group.wechat_group_id == selected.group_id)
     ).first()
     if existing:
         if existing.deleted_at is not None:
-            existing.wechat_group_name = selected.group_name or existing.wechat_group_name
+            existing.wechat_group_name = selected_name or existing.wechat_group_name
             if not existing.display_name:
-                existing.display_name = selected.group_name or name
+                existing.display_name = selected_name
             restored = repo.restore_group(session, existing.id)
             return {
                 "id": restored.id,
@@ -349,9 +379,9 @@ def bind_group_from_name(
         return {"id": existing.id, "bound": True, "already_existed": True}
 
     group = Group(
-        display_name=selected.group_name or name,
+        display_name=selected_name,
         wechat_group_id=selected.group_id,
-        wechat_group_name=selected.group_name,
+        wechat_group_name=selected_name,
     )
     group = repo.save_group(session, group)
     return {"id": group.id, "bound": True, "already_existed": False}

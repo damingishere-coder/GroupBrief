@@ -22,6 +22,8 @@ def test_safe_dir_name():
     assert ":" not in safe_dir_name("a:b/c*d?e")
     assert "/" not in safe_dir_name("a/b")
     assert safe_dir_name("") == "group"
+    assert safe_dir_name(".") == "group"
+    assert safe_dir_name("..") == "group"
 
 
 def test_generate_writes_files():
