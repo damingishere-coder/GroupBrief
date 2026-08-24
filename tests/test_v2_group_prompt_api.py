@@ -79,3 +79,24 @@ def test_group_prompt_revision_conflict_returns_409():
             assert response.status_code == 409
         finally:
             client.delete(f"/api/groups/{group_id}")
+
+
+def test_named_theme_preview_only_replaces_canonical_theme_section():
+    original = "【大主题】\n旧主题\n\n【固定画面日期】\n统计日期：2026-08-23\n\n【事件】\n张三说今天完成 3 项工作。\n"
+    with client:
+        response = client.post(
+            "/api/v2/image-themes/resolve",
+            json={
+                "image_theme": "gouache_editorial",
+                "prompt": original,
+                "group_id": "group-1",
+                "run_date": "2026-08-24",
+            },
+        )
+        assert response.status_code == 200
+        resolved = response.json()
+        assert resolved["actual_key"] == "gouache_editorial"
+        assert "不透明水粉社论" in resolved["prompt"]
+        assert "统计日期：2026-08-23" in resolved["prompt"]
+        assert "张三说今天完成 3 项工作。" in resolved["prompt"]
+        assert "旧主题" not in resolved["prompt"]

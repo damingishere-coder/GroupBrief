@@ -210,6 +210,10 @@ export interface ImageThemeOption {
   key: string;
   label: string;
   description: string;
+  kind: "mode" | "preset";
+  category: string;
+  swatches: string[];
+  variation_count: number;
 }
 
 export interface ResolvedImageTheme {
@@ -249,7 +253,8 @@ export interface RunPromptConfig {
 export interface TopicScores {
   discussion: number;
   participation: number;
-  interestingness: number;
+  comedy: number;
+  group_recognition: number;
   visual: number;
   continuity: number;
   total: number;

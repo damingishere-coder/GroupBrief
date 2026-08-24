@@ -12,13 +12,15 @@ import re
 
 import pytest
 
-from app.ai.prompt_builder import DeepSeekImagePromptBuilder
+from app.ai.prompt_builder import DeepSeekImagePromptBuilder, build_grounded_story_material
 from app.ai.prompt_builder_types import PromptInput
+from app.ai.image_themes import STYLE_FAMILY_KEYS
 from app.ai.prompt_templates import (
     DEFAULT_IMAGE_PROMPT_TEMPLATE,
     ImagePromptTemplateError,
     ImagePromptTemplateService,
 )
+from app.config.settings import PROJECT_ROOT
 from app.data_sources.base import V2Message
 
 
@@ -326,16 +328,69 @@ def test_all_concrete_themes_are_supported():
         assert out.meta["resolved_theme"] == key
 
 
+def test_all_public_style_families_build_with_fixed_family_keys():
+    for key in STYLE_FAMILY_KEYS:
+        out = _builder().build(_input(image_theme=key))
+        assert out.success, key
+        assert out.meta["requested_theme"] == key
+        assert out.meta["resolved_theme"] == key
+        assert out.meta["style_catalog_version"] == "daily-style-v3"
+
+
 def test_random_theme_records_daily_reproducible_theme():
     b = _builder()
     out = b.build(_input(image_theme="random_preset"))
     assert out.success
     assert out.meta["requested_theme"] == "random_preset"
-    assert out.meta["resolved_theme"] == "daily_random"
+    assert out.meta["resolved_theme"] in STYLE_FAMILY_KEYS
     assert out.meta["style_signature"]
     assert out.meta["style_seed"]
     second = _builder().build(_input(image_theme="random_preset"))
     assert second.meta["style_signature"] == out.meta["style_signature"]
+
+
+def test_default_file_and_builtin_prompt_contract_are_synchronized():
+    file_text = (PROJECT_ROOT / "templates" / "image_prompt" / "default.md").read_text(encoding="utf-8")
+    file_body = re.sub(r"<!--.*?-->", "", file_text, flags=re.DOTALL).strip()
+    assert file_body == DEFAULT_IMAGE_PROMPT_TEMPLATE.strip()
+    for required in (
+        "【使用场景与画布】",
+        "1024×1536",
+        "【逐话题可见文字合同】",
+        "不超过 12 个汉字",
+        "不超过 24 个汉字",
+        "不超过 22 个汉字",
+        "景别 + 人物动作 + 群友反应或道具特写 + 逐字气泡",
+        "装饰 → 底部总结 → 副标题 → 次要气泡",
+        "【重新生图不变量】",
+        "逐字且恰好出现一次",
+    ):
+        assert required in DEFAULT_IMAGE_PROMPT_TEMPLATE
+
+
+def test_grounded_story_material_enforces_visible_text_budgets_and_shot_contract():
+    material = build_grounded_story_material(
+        {
+            "candidates": [{
+                "topic_id": "topic-01",
+                "selected": True,
+                "title": "这是一个明显超过十二个汉字的话题标题",
+                "summary": "这是一句明显超过二十四个汉字而且仍然继续延伸的真实事实摘要",
+                "visible_participants": ["张三完整昵称"],
+                "quotes": ["这是一句明显超过二十二个汉字而且仍然继续延伸的真实原话"],
+            }],
+        },
+        ("topic-01",),
+    )
+    title = re.search(r"短标题逐字写《([^》]+)》", material).group(1)
+    fact = re.search(r"事实短句逐字写“([^”]+)”", material).group(1)
+    quote = re.search(r"主气泡逐字写“([^”]+)”", material).group(1)
+    assert len(title) <= 12
+    assert len(fact) <= 24
+    assert len(quote) <= 22
+    assert "完整姓名逐字写“张三完整昵称”" in material
+    assert "景别、该人物的具体动作" in material
+    assert "恰好出现一次" in material
 
 
 def test_custom_theme_and_ai_free_theme_are_explicitly_injected():

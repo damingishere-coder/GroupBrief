@@ -41,6 +41,7 @@ import {
   StatusBadge,
   Toast,
 } from "../../components/common";
+import { ImageThemePicker } from "../../components/ImageThemePicker";
 import { copyText, useToast } from "../../components/ui";
 
 const STATUS_LABELS: Record<string, string> = {
@@ -145,6 +146,7 @@ export default function AIImages() {
   const [defaultConfig, setDefaultConfig] = useState<GroupImagePromptConfig | null>(null);
   const [globalDefaultPrompt, setGlobalDefaultPrompt] = useState("");
   const [defaultTemplateError, setDefaultTemplateError] = useState("");
+  const [defaultTheme, setDefaultTheme] = useState("random_preset");
   const [defaultCustom, setDefaultCustom] = useState("");
   const [defaultThemeText, setDefaultThemeText] = useState("");
   const [defaultThemeError, setDefaultThemeError] = useState("");
@@ -254,9 +256,10 @@ export default function AIImages() {
         if (cancelled) return;
         setDefaultConfig(config);
         if (!defaultStyleTouchedRef.current) {
+          setDefaultTheme(config.image_theme || "random_preset");
           const savedCustom = config.image_theme === "custom" ? config.image_theme_custom || "" : "";
           setDefaultCustom(savedCustom);
-          setDefaultThemeText(savedCustom ? config.resolved_theme?.theme_text || "" : "");
+          setDefaultThemeText(config.resolved_theme?.theme_text || "");
         }
       })
       .catch((reason: unknown) => {
@@ -274,6 +277,7 @@ export default function AIImages() {
   }, [defaultGroupId, defaultReloadVersion, toast]);
 
   useEffect(() => {
+    if (defaultTheme !== "custom") return;
     const custom = defaultCustom.trim();
     if (!custom) {
       setDefaultThemeText("");
@@ -300,7 +304,7 @@ export default function AIImages() {
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [defaultCustom, defaultGroupId]);
+  }, [defaultCustom, defaultGroupId, defaultTheme]);
 
   const filteredRuns = runs.filter((run) => {
     const query = groupFilter.trim().toLocaleLowerCase();
@@ -388,37 +392,64 @@ export default function AIImages() {
   }, [detail?.run.group_name, detail?.run.run_date, regenStatus]);
 
   const selectedDefaultGroup = groups.find((group) => group.id === defaultGroupId);
+  const savedDefaultTheme = defaultConfig?.image_theme || "random_preset";
   const savedDefaultCustom = defaultConfig?.image_theme === "custom"
     ? defaultConfig.image_theme_custom.trim()
     : "";
-  const defaultDirty = Boolean(defaultConfig) && defaultCustom.trim() !== savedDefaultCustom;
-  const defaultPreviewTheme = defaultCustom.trim()
-    ? defaultThemeText || `指定风格「${defaultCustom.trim()}」（正在生成完整约束）`
-    : "";
+  const currentDefaultCustom = defaultTheme === "custom" ? defaultCustom.trim() : "";
+  const defaultDirty = Boolean(defaultConfig)
+    && (defaultTheme !== savedDefaultTheme || currentDefaultCustom !== savedDefaultCustom);
+  const defaultPreviewTheme = defaultTheme === "custom" && currentDefaultCustom
+    ? defaultThemeText || `指定风格「${currentDefaultCustom}」（正在生成完整约束）`
+    : defaultThemeText;
   const defaultPreview = useMemo(
     () => renderGroupPreview(defaultConfig?.content || globalDefaultPrompt, selectedDefaultGroup, defaultPreviewTheme),
     [defaultConfig?.content, defaultPreviewTheme, globalDefaultPrompt, selectedDefaultGroup],
   );
   const runDirty = Boolean(runPrompt) && runDraft !== runPrompt?.content;
 
+  const applyDefaultTheme = async (key: string) => {
+    defaultStyleTouchedRef.current = true;
+    setDefaultStyleTouched(true);
+    setDefaultTheme(key);
+    setDefaultThemeError("");
+    if (key === "custom") {
+      setDefaultThemeText("");
+      return;
+    }
+    setDefaultCustom("");
+    try {
+      const resolved = await resolveImageTheme({
+        image_theme: key,
+        group_id: defaultGroupId ?? undefined,
+      });
+      setDefaultThemeText(resolved.theme_text);
+    } catch (reason) {
+      setDefaultThemeText("");
+      setDefaultThemeError(`风格预览失败：${String(reason)}`);
+    }
+  };
+
   const saveDefaultStyle = async () => {
     if (!defaultConfig || defaultGroupId === null) return;
     setDefaultSaving(true);
     try {
-      const custom = defaultCustom.trim();
+      const custom = defaultTheme === "custom" ? defaultCustom.trim() : "";
       await updateGroup(defaultGroupId, {
-        image_theme: custom ? "custom" : "random_preset",
+        image_theme: defaultTheme,
         image_theme_custom: custom,
       });
       const refreshed = await getGroupImagePrompt(defaultGroupId);
       setDefaultConfig(refreshed);
+      setDefaultTheme(refreshed.image_theme || "random_preset");
       setDefaultCustom(refreshed.image_theme === "custom" ? refreshed.image_theme_custom || "" : "");
-      setDefaultThemeText(refreshed.image_theme === "custom" ? refreshed.resolved_theme?.theme_text || "" : "");
+      setDefaultThemeText(refreshed.resolved_theme?.theme_text || "");
       defaultStyleTouchedRef.current = false;
       setDefaultStyleTouched(false);
-      toast(custom ? `已把指定风格保存到「${selectedDefaultGroup?.display_name || selectedDefaultGroup?.wechat_group_name || `群 ${defaultGroupId}`}」` : "已清除该群的指定风格");
+      const selectedThemeLabel = themes.find((theme) => theme.key === defaultTheme)?.label || "生图风格";
+      toast(`已把「${selectedThemeLabel}」保存到「${selectedDefaultGroup?.display_name || selectedDefaultGroup?.wechat_group_name || `群 ${defaultGroupId}`}」`);
     } catch (reason) {
-      toast(`指定风格保存失败：${String(reason)}`);
+      toast(`生图风格保存失败：${String(reason)}`);
     } finally {
       setDefaultSaving(false);
     }
@@ -426,10 +457,12 @@ export default function AIImages() {
 
   const applyRunTheme = async (key: string, custom = runCustom) => {
     setRunTheme(key);
+    if (key !== "custom") setRunCustom("");
+    if (key === "custom" && !custom.trim()) return;
     try {
       const resolved = await resolveImageTheme({
         image_theme: key,
-        image_theme_custom: custom,
+        image_theme_custom: key === "custom" ? custom : "",
         prompt: runDraft,
         group_id: typeof detail?.run.group_id === "number" || typeof detail?.run.group_id === "string"
           ? detail.run.group_id
@@ -439,6 +472,7 @@ export default function AIImages() {
       setRunTheme(key);
       setRunDraft(resolved.prompt);
       if (key === "random_preset") toast(`该群当天随机风格已固定为：${resolved.display_name}`);
+      else if (key !== "custom") toast(`当天风格已替换为：${resolved.display_name}`);
     } catch (reason) {
       toast(`当天主题替换失败：${String(reason)}`);
     }
@@ -452,7 +486,7 @@ export default function AIImages() {
         content: runDraft,
         expected_revision: runPrompt.revision,
         image_theme: runTheme,
-        image_theme_custom: runCustom.trim(),
+        image_theme_custom: runTheme === "custom" ? runCustom.trim() : "",
       });
       setRunPrompt(saved);
       setRunDraft(saved.content);
@@ -551,25 +585,29 @@ export default function AIImages() {
     <div className="ai-images-page">
       <section className="ai-images-theme-card" aria-label="群聊指定风格">
         <div className="ai-images-theme-heading">
-          <div><h2>设置群聊生图风格</h2><p>先输入风格并确认 Prompt，再选择要保存到的群聊。</p></div>
+          <div><h2>设置群聊生图风格</h2><p>可每日随机，也可固定一个风格家族并保留每天的细微变化。</p></div>
           <Sparkle size={22} />
         </div>
         {catalogLoading && !groups.length ? <LoadingState label="正在读取群配置与主题目录…" /> : groupsError && !groups.length ? <EmptyState title="群配置加载失败" description={groupsError} action={<Button tone="secondary" onClick={loadCatalogs}>重新加载</Button>} /> : !groups.length ? <EmptyState title="暂无群配置" description="当前数据库中确实没有群，请先在群聊配置中创建群。" /> : (
           <>
-            <label className="ai-images-theme-custom-field">
-              <span><b>指定风格</b><small>{defaultCustom.length} / 80</small></span>
-              <input
-                maxLength={80}
-                value={defaultCustom}
-                placeholder="例如：复古港漫、黏土定格、宋代工笔长卷"
-                onChange={(event) => {
-                  defaultStyleTouchedRef.current = true;
-                  setDefaultStyleTouched(true);
-                  setDefaultThemeText("");
-                  setDefaultCustom(event.target.value);
-                }}
-              />
-            </label>
+            <ImageThemePicker
+              themes={themes}
+              value={defaultTheme}
+              onChange={(key) => { void applyDefaultTheme(key); }}
+              label="风格模式"
+              loading={catalogLoading}
+              error={themesError}
+              disabled={defaultSaving}
+            />
+            {defaultTheme === "custom" && <label className="ai-images-theme-custom-field">
+              <span><b>指定风格描述</b><small>{defaultCustom.length} / 80</small></span>
+              <input maxLength={80} value={defaultCustom} placeholder="例如：低饱和黏土摄影、宋代工笔设色" onChange={(event) => {
+                defaultStyleTouchedRef.current = true;
+                setDefaultStyleTouched(true);
+                setDefaultThemeText("");
+                setDefaultCustom(event.target.value);
+              }} />
+            </label>}
             <div className="ai-images-prompt-preview ai-images-default-preview">
               <span>生成时使用的 Prompt 预览</span>
               <pre aria-live="polite">{defaultPreview || "Prompt 预览暂不可用"}</pre>
@@ -586,9 +624,9 @@ export default function AIImages() {
                   {groups.map((group) => <option key={group.id} value={group.id}>{group.display_name || group.wechat_group_name || `群 ${group.id}`} · ID {group.id}</option>)}
                 </select>
               </label>
-              <Button tone="primary" onClick={saveDefaultStyle} busy={defaultSaving} disabled={defaultGroupId === null || defaultLoading || !defaultConfig || !defaultDirty || Boolean(defaultThemeError)}><FloppyDisk size={16} />保存到目标群</Button>
+              <Button tone="primary" onClick={saveDefaultStyle} busy={defaultSaving} disabled={defaultGroupId === null || defaultLoading || !defaultConfig || !defaultDirty || Boolean(defaultThemeError) || (defaultTheme === "custom" && !defaultCustom.trim())}><FloppyDisk size={16} />保存到目标群</Button>
             </div>
-            {defaultStyleTouched && defaultGroupId !== null && defaultDirty && <div className="ai-images-style-draft-note">已保留你刚输入的风格，保存后才会应用到当前目标群。</div>}
+            {defaultStyleTouched && defaultGroupId !== null && defaultDirty && <div className="ai-images-style-draft-note">风格草稿已保留，切换目标群不会覆盖；明确保存后才会应用。</div>}
             {groupsError && <div className="ai-images-run-error">{groupsError}</div>}
             {themesError && <div className="ai-images-run-error">{themesError} <Button tone="ghost" className="ui-button-compact" onClick={loadCatalogs}>重新加载</Button></div>}
             {defaultTemplateError && <div className="ai-images-run-error">{defaultTemplateError}</div>}
@@ -622,12 +660,12 @@ export default function AIImages() {
                 <div className="ai-images-topic-score-list">{runPrompt.topic_selection.candidates.map((topic) => <article className={`ai-images-topic-score-item ${topic.selected ? "is-selected" : ""}`} key={topic.topic_id}>
                   <div className="ai-images-topic-score-title"><span>#{topic.rank}</span><strong>{topic.title}</strong><StatusBadge tone={topic.selected ? "success" : "neutral"}>{topic.selected ? "已入选" : "候选"}</StatusBadge><b>{topic.scores.total.toFixed(1)}</b></div>
                   <p>{topic.summary}</p>
-                  <div className="ai-images-topic-score-grid"><span>讨论 {topic.scores.discussion}</span><span>参与 {topic.scores.participation}</span><span>有趣 {topic.scores.interestingness}</span><span>画面 {topic.scores.visual}</span><span>持续 {topic.scores.continuity}</span></div>
+                  <div className="ai-images-topic-score-grid"><span>讨论 {topic.scores.discussion}</span><span>参与 {topic.scores.participation}</span><span>有趣 {topic.scores.comedy}</span><span>群内感 {topic.scores.group_recognition}</span><span>画面 {topic.scores.visual}</span><span>持续 {topic.scores.continuity}</span></div>
                   <small>{topic.evidence_message_count} 条证据 · {topic.participant_count} 人 · {topic.duration_minutes} 分钟{topic.score_reason ? ` · ${topic.score_reason}` : ""}</small>
                 </article>)}</div>
               </section>}
               {runPrompt && <div className="ai-images-run-theme-row">
-                <label><span>替换当天大主题</span><select value={runTheme} onChange={(event) => applyRunTheme(event.target.value)}>{themes.map((theme) => <option key={theme.key} value={theme.key}>{theme.label}</option>)}</select></label>
+                <ImageThemePicker themes={themes} value={runTheme} onChange={(key) => { void applyRunTheme(key); }} label="替换当天大主题" loading={catalogLoading} error={themesError} disabled={runSaving} />
                 {runTheme === "custom" && <label><span>自定义主题</span><input maxLength={80} value={runCustom} onChange={(event) => { const value = event.target.value; setRunCustom(value); if (value.trim()) applyRunTheme("custom", value); }} /></label>}
               </div>}
               <div className="ai-images-asset-grid">

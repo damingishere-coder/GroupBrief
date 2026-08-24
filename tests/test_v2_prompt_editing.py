@@ -21,10 +21,13 @@ def test_theme_replacement_preserves_facts_and_other_manual_content():
 【手工补充】
 这句话必须保留。
 """
-    updated = replace_theme_section(original, resolve_image_theme("pink"))
+    updated = replace_theme_section(
+        original,
+        resolve_image_theme("ink_wash_editorial", group_key="group-1", run_date="2026-08-24"),
+    )
 
     assert updated.count("【大主题】") == 1
-    assert "粉红色" in updated
+    assert "水墨留白漫画" in updated
     assert "小王发布 3 个版本，金额 128 元。" in updated
     assert "这句话必须保留。" in updated
     assert "旧主题" not in updated

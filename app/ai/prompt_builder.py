@@ -91,8 +91,8 @@ topic_order 与 panel_beats 必须恰好覆盖全部入选主题；至少一个�
 _FINAL_PROMPT_RETRY_INSTRUCTION = """\
 
 上一次最终 Prompt 暴露了内部字段名、主题 ID，或退化成等大模块列表。请完整重写：
-只用自然短标题、事实旁白、人物姓名和逐字气泡；保留全部已选话题、指定画风、统计日期与漫画分镜；
-不要输出任何数据字段式栏目名，不要输出 topic ID，不要把一个话题机械装进一个等大的矩形区域。"""
+按“景别 + 人物动作 + 群友反应或道具特写 + 逐字气泡”写每个话题；保留全部已选话题、指定画风、统计日期与漫画分镜；
+每段指定文字只出现一次，不要输出任何数据字段式栏目名、英文装饰词、Logo、网址或 topic ID，也不要把一个话题机械装进一个等大的矩形区域。"""
 
 SYSTEM_BASE = """你是「群报 GroupBrief」的漫画日报海报 Prompt 设计师。
 你的唯一任务：根据给定的微信群聊内容，生成一份可以直接复制给 GPT 图片生成能力的完整中文 Prompt，
@@ -111,11 +111,17 @@ SYSTEM_BASE = """你是「群报 GroupBrief」的漫画日报海报 Prompt 设�
 9. 【大主题】是全图最高视觉约束，控制配色、画材、服装、造型、装饰、纹理、光影和画风；
    漫画分镜只控制格子几何、阅读路径和镜头节拍，不得替换或削弱【大主题】。
 10. 一个话题不等于一个矩形模块；5～7 个话题可以展开为 7～12 个镜头，至少一个话题使用连续镜头。
-11. 每段内容用自然短标题、一句事实旁白、真实人物姓名和至少一句逐字气泡呈现；
-    禁止输出内部字段名、topic ID、表格栏目或说明性标签。
-12. 格子必须有明显的大、中、小三级尺寸差，并按计划使用嵌套特写、连续动作或跨格主体；
+11. 每段内容必须写成“景别 + 人物动作 + 群友反应或道具特写 + 逐字气泡”，不得只给抽象总结。
+12. 每个话题只显示一个不超过 12 个汉字的自然短标题、一个完整真实姓名、一句不超过 24 个汉字的事实短句，
+    以及默认一条不超过 22 个汉字的真实主气泡；只有连续镜头确有需要时才允许第二条短气泡。
+13. 所有指定文字必须逐字且恰好出现一次；禁止输出内部字段名、topic ID、表格栏目、说明性标签、
+    自动创造的栏目名、英文装饰词、Logo 或网址。
+14. 海报用于微信手机端，画布固定为 1024×1536 竖版；关键文字避开四周安全边距，缩略图优先看清主标题、日期和两项统计。
+15. 空间不足时严格依次减少装饰、底部总结、副标题、次要气泡；日期、两项统计、全部话题、完整姓名、事实短句和主气泡不可删除。
+16. 重新生图只允许改变所选美术家族及当天解析出的视觉细节；聊天事实、日期、数字、人物、气泡、话题覆盖和既定分镜不得改变。
+17. 格子必须有明显的大、中、小三级尺寸差，并按计划使用嵌套特写、连续动作或跨格主体；
     禁止整齐两列等高矩形和“每个话题一块”的列表式构图。
-13. 必须把给定的“统计日期：YYYY-MM-DD”作为清晰可见的画面文字，放在海报顶部或底部，不得省略或改写。"""
+18. 必须把给定的“统计日期：YYYY-MM-DD”作为清晰可见的画面文字，放在海报顶部或底部，不得省略或改写。"""
 
 CHUNK_ANALYZE_SYSTEM = """你是群聊事件分析助手。只提取聊天中真实存在的事件/人物/原话，
 输出严格 JSON（不输出其他内容），没有事件就返回空数组。"""
@@ -191,21 +197,27 @@ def build_grounded_story_material(selection: dict, topic_order: tuple[str, ...])
         raise ValueError("漫画阅读顺序没有覆盖全部入选主题")
 
     lines = [
-        f"整页按阅读顺序讲清以下 {len(ordered)} 段真实群聊剧情。序号仅表示阅读次序，不得画进图片："
+        f"整页按阅读顺序讲清以下 {len(ordered)} 段真实群聊剧情。序号仅表示阅读次序，不得画进图片。"
+        "每段都要给出具体景别、人物动作、群友反应或道具特写，并使用下列逐字文字："
     ]
     for index, item in enumerate(ordered, start=1):
-        title = _compact_visible_text(item.get("title"), 24) or "群聊话题"
-        participant_label = str(item.get("participant_label") or "群友（昵称未识别）").strip()
-        fact = _compact_visible_text(item.get("summary"), 72) or "（仅按该话题的真实消息证据绘制）"
+        title = _compact_visible_text(item.get("title"), 12) or "群聊话题"
+        visible_people = item.get("visible_participants") if isinstance(item.get("visible_participants"), list) else []
+        participant_label = next((str(value).strip() for value in visible_people if str(value).strip()), "")
+        if not participant_label:
+            participant_label = str(item.get("participant_label") or "群友（昵称未识别）").strip()
+        fact = _compact_visible_text(item.get("summary"), 24) or "仅按真实消息证据绘制"
         quotes = item.get("quotes") if isinstance(item.get("quotes"), list) else []
-        quote = next((_compact_visible_text(value, 48) for value in quotes if str(value or "").strip()), "")
+        quote = next((_compact_visible_text(value, 22) for value in quotes if str(value or "").strip()), "")
+        bubble = quote or _compact_visible_text(fact, 22)
         lines.append(
-            f"{index}. 小标题写《{title}》。画面讲清“{fact}”。让 {participant_label} 出现在对应场景附近，"
-            f"其中一个气泡逐字写“{quote or fact}”。"
+            f"{index}. 短标题逐字写《{title}》；完整姓名逐字写“{participant_label}”；"
+            f"事实短句逐字写“{fact}”；主气泡逐字写“{bubble}”。"
+            "画面指令必须补全景别、该人物的具体动作，以及群友反应或对应道具特写。"
         )
     lines.append(
-        "这些剧情句只用于指导绘画；画面只显示小标题、短旁白、人物姓名和气泡正文，"
-        "不要显示序号、说明文字、字段名称或程序标识。"
+        "以上每段指定文字在整张图中恰好出现一次。画面只显示允许的短标题、事实短句、完整姓名和气泡正文；"
+        "不要显示序号、说明文字、字段名称、程序标识、英文装饰词、Logo、网址或额外标签。"
     )
     return "\n".join(lines)
 
@@ -486,6 +498,7 @@ class DeepSeekImagePromptBuilder:
             + theme_prompt
             + "\n大主题控制全图配色、画材、服装、造型、装饰、纹理、光影和画风；"
             "不得创造、补充或改写聊天事实，也不得被整体版式替换或削弱。"
+            "重新生图只允许改变所选美术家族及当天已解析的视觉细节，日期、数字、人物、逐字气泡、话题覆盖和既定分镜都是不变量。"
         )
 
     @staticmethod

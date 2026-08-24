@@ -56,6 +56,19 @@ def test_resolve_api():
         assert resp.status_code == 200
 
 
+def test_v2_image_theme_catalog_shape_and_order():
+    with client:
+        response = client.get("/api/v2/image-themes")
+        assert response.status_code == 200
+        themes = response.json()["themes"]
+        assert [item["key"] for item in themes[:2]] == ["random_preset", "custom"]
+        assert len(themes) == 24
+        assert sum(item["kind"] == "preset" for item in themes) == 22
+        assert themes[2]["key"] == "silkscreen_editorial"
+        assert themes[-1]["key"] == "mineral_pigment"
+        assert all(set(item) == {"key", "label", "description", "kind", "category", "swatches", "variation_count"} for item in themes)
+
+
 @pytest.mark.parametrize("bad_date", ["2026-02-30", "2026-8-18", "not-a-date"])
 def test_v2_invalid_dates_return_400(bad_date):
     with client:
@@ -87,12 +100,15 @@ def test_group_image_theme_roundtrip_and_validation():
             assert listed["image_theme"] == "custom"
             assert listed["image_theme_custom"] == "手账拼贴"
 
-            # 切换到具体预设时保留自定义文本，以便稍后切回 custom 回显。
-            updated = client.put(f"/api/groups/{group_id}", json={"image_theme": "pink"})
+            # 切换到公开预设时保存稳定键并清空旧自定义文本。
+            updated = client.put(f"/api/groups/{group_id}", json={"image_theme": "ink_wash_editorial"})
             assert updated.status_code == 200
             listed = next(item for item in client.get("/api/groups").json() if item["id"] == group_id)
-            assert listed["image_theme"] == "pink"
-            assert listed["image_theme_custom"] == "手账拼贴"
+            assert listed["image_theme"] == "ink_wash_editorial"
+            assert listed["image_theme_custom"] == ""
+            prompt_config = client.get(f"/api/groups/{group_id}/image-prompt").json()
+            assert prompt_config["image_theme"] == "ink_wash_editorial"
+            assert prompt_config["resolved_theme"]["resolved_theme"] == "ink_wash_editorial"
 
             bad_payloads = [
                 {"image_theme": "not_a_theme"},
