@@ -164,6 +164,26 @@ def _migrate_codex_image_timeout_default() -> None:
         session.commit()
 
 
+def _migrate_send_target_auto_mode() -> None:
+    """把历史重复群名转换为“留空即自动跟随”的发送目标语义。
+
+    只清空与当时 ``wechat_group_name`` 完全相同的值。任何不同的非空值都
+    视为用户明确设置的人工覆盖，迁移和后续自动同步都不得改写。
+    """
+    marker = "migration_send_target_auto_mode_v1"
+    with Session(engine) as session:
+        if session.get(Setting, marker) is not None:
+            return
+        session.exec(
+            Group.__table__.update()
+            .where(Group.send_target != "")
+            .where(Group.send_target == Group.wechat_group_name)
+            .values(send_target="")
+        )
+        session.add(Setting(key=marker, value="done"))
+        session.commit()
+
+
 def init_db(settings: Settings) -> Any:
     """初始化 SQLite 引擎并建表。"""
     global engine
@@ -182,6 +202,7 @@ def init_db(settings: Settings) -> Any:
     _migrate_codex_image_timeout_default()
     _migrate_daily_schedule_defaults()
     _migrate_daily_schedule_0015()
+    _migrate_send_target_auto_mode()
     apply_db_settings(settings)
     return engine
 

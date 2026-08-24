@@ -78,17 +78,21 @@ def _msg(sender: str, content: str = "hi", i: int = 0) -> V2Message:
 class FakeSource(WeChatDataSource):
     name = "fake"
 
-    def __init__(self, messages=None, fail=False, error_type=""):
+    def __init__(self, messages=None, fail=False, error_type="", group_name="测试群", available=True):
         self.messages = messages or [_msg("张三", "今天聊了票房", i=1), _msg("李四", "《牛来》破500万", i=2)]
         self.fail = fail
         self.error_type = error_type
+        self.group_name = group_name
+        self.available = available
         self.fetch_calls = 0
 
     def health_check(self) -> DataSourceHealth:
-        return DataSourceHealth(DataSourceStatus.OK, "ok")
+        if self.available:
+            return DataSourceHealth(DataSourceStatus.OK, "ok")
+        return DataSourceHealth(DataSourceStatus.UNAVAILABLE, "unavailable")
 
     def list_groups(self) -> list[ResolvedGroup]:
-        return [ResolvedGroup(group_id="g@chatroom", group_name="测试群")]
+        return [ResolvedGroup(group_id="g@chatroom", group_name=self.group_name)]
 
     def resolve_group(self, name: str) -> list[ResolvedGroup]:
         return []
@@ -196,6 +200,9 @@ def _make_pipeline(tmp_path, source=None, prompt=None, gen=None, sender=None, im
                 wechat_send_enabled=True,
             )
         else:
+            group.wechat_group_id = "g@chatroom"
+            group.wechat_group_name = "测试群"
+            group.send_target = ""
             group.image_enabled = image_enabled
             group.send_time = send_time
             group.image_theme = image_theme
@@ -555,6 +562,66 @@ def test_send_due_sends_text_then_image(tmp_path):
     sender = pipeline.sender
     assert len(sender.text_calls) == 1
     assert len(sender.image_calls) == 1
+
+
+def test_send_due_refreshes_renamed_group_by_stable_id_without_changing_archive_name(tmp_path):
+    source = FakeSource()
+    pipeline, group = _make_pipeline(tmp_path, source=source)
+    pipeline.generate_all(run_date="2026-08-18")
+    source.group_name = "测试群新名称"
+
+    results = pipeline.send_due(now=datetime(2026, 8, 18, 9, 0, 0))
+
+    assert results[0]["status"] == "sent"
+    assert [target for target, _ in pipeline.sender.text_calls] == ["测试群新名称"]
+    assert [target for target, _ in pipeline.sender.image_calls] == ["测试群新名称"]
+    with Session(repo.engine) as session:
+        saved = session.get(Group, group.id)
+        assert saved.display_name == "测试群"
+        assert saved.wechat_group_name == "测试群新名称"
+        assert saved.send_target == ""
+    run = pipeline.store.load_run("测试群", "2026-08-18")
+    assert run["name_sync_status"] == "fresh"
+    assert run["effective_send_target"] == "测试群新名称"
+    assert run["sent_target"] == "测试群新名称"
+
+
+def test_send_due_preserves_manual_target_after_current_name_changes(tmp_path):
+    source = FakeSource()
+    pipeline, group = _make_pipeline(tmp_path, source=source, image_enabled=False)
+    pipeline.generate_all(run_date="2026-08-18")
+    with Session(repo.engine) as session:
+        saved = session.get(Group, group.id)
+        saved.send_target = "人工搜索目标"
+        repo.save_group(session, saved)
+    source.group_name = "微信新名称"
+
+    result = pipeline.send_due(now=datetime(2026, 8, 18, 9, 0, 0))[0]
+
+    assert result["status"] == "sent"
+    assert [target for target, _ in pipeline.sender.text_calls] == ["人工搜索目标"]
+    run = pipeline.store.load_run("测试群", "2026-08-18")
+    assert run["name_sync_status"] == "manual_override"
+    assert run["effective_send_target"] == "人工搜索目标"
+    with Session(repo.engine) as session:
+        saved = session.get(Group, group.id)
+        assert saved.wechat_group_name == "微信新名称"
+        assert saved.send_target == "人工搜索目标"
+
+
+def test_send_due_uses_cached_name_when_live_sync_is_unavailable(tmp_path):
+    source = FakeSource()
+    pipeline, _ = _make_pipeline(tmp_path, source=source, image_enabled=False)
+    pipeline.generate_all(run_date="2026-08-18")
+    source.available = False
+
+    result = pipeline.send_due(now=datetime(2026, 8, 18, 9, 0, 0))[0]
+
+    assert result["status"] == "sent"
+    assert [target for target, _ in pipeline.sender.text_calls] == ["测试群"]
+    run = pipeline.store.load_run("测试群", "2026-08-18")
+    assert run["name_sync_status"] == "cached"
+    assert run["effective_send_target"] == "测试群"
 
 
 def test_send_due_processes_same_time_groups_in_stable_order(tmp_path, monkeypatch):

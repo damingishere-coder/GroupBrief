@@ -80,6 +80,8 @@ export interface GroupV2 extends Group {
   prompt_model: string;
   image_enabled: boolean;
   send_target: string;
+  effective_send_target: string;
+  send_target_mode: "auto" | "manual";
   ranking_template: string;
   image_prompt_template: string;
   image_theme: string;
@@ -294,6 +296,27 @@ export interface TestReadResult {
   message_count: number;
   raw_message_count: number;
 }
+export interface GroupNameSyncChange {
+  id: number | null;
+  wechat_group_id: string;
+  old_name: string;
+  new_name: string;
+}
+export interface GroupNameSyncSkip {
+  id: number | null;
+  wechat_group_id: string;
+  reason: string;
+}
+export interface GroupNameSyncResult {
+  status: "ok" | "partial" | "unavailable";
+  source: string;
+  checked: number;
+  updated: GroupNameSyncChange[];
+  unchanged: number;
+  skipped: GroupNameSyncSkip[];
+  synced_at: string;
+  detail: string;
+}
 export const discoverGroups = () => get<DiscoveredGroup[]>("/groups/discover");
 export const resolveGroups = (name: string) =>
   get<GroupMatch[]>(`/groups/resolve?name=${encodeURIComponent(name)}`);
@@ -303,6 +326,7 @@ export const testReadGroup = (groupId: number) =>
   post<TestReadResult>(`/groups/${groupId}/test-read`);
 
 export const listGroups = () => get<GroupV2[]>("/groups");
+export const syncWechatGroupNames = () => post<GroupNameSyncResult>("/groups/sync-wechat-names");
 export const createGroup = (body: GroupPayload) => post<{ id: number; restored?: boolean }>("/groups", body);
 export const updateGroup = (groupId: number, body: Partial<GroupPayload>) =>
   put<{ id: number }>(`/groups/${groupId}`, body);

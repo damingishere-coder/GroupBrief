@@ -1955,11 +1955,23 @@ textarea:focus-visible {
 }
 
 .groups-target-cell {
-  display: block;
+  display: flex;
   max-width: 150px;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.groups-target-cell span,
+.groups-target-cell small {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.groups-target-cell small {
+  color: #8a96a8;
+  font-size: 11px;
 }
 
 .groups-toggle {
@@ -2082,6 +2094,12 @@ textarea:focus-visible {
 
 .group-detail-field-error {
   font-size: 11px;
+}
+
+.group-detail-field-help {
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.45;
 }
 
 .group-detail-switch {

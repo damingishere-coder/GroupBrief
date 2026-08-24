@@ -18,6 +18,12 @@ from app.ai.prompt_templates import (
 )
 from app.db import repository as repo
 from app.db.models import Group
+from app.data_sources.wechat_data_analysis import WeChatDataAnalysisSource
+from app.services.group_name_sync import (
+    GroupNameSyncService,
+    effective_send_target,
+    send_target_mode,
+)
 
 router = APIRouter(prefix="/api/groups", tags=["groups"])
 
@@ -158,6 +164,8 @@ def list_groups(session: Session = Depends(repo.get_session)):
             "prompt_model": g.prompt_model,
             "image_enabled": g.image_enabled,
             "send_target": g.send_target,
+            "effective_send_target": effective_send_target(g),
+            "send_target_mode": send_target_mode(g),
             "ranking_template": g.ranking_template,
             "image_prompt_template": g.image_prompt_template,
             "image_theme": g.image_theme,
@@ -174,6 +182,7 @@ def list_groups(session: Session = Depends(repo.get_session)):
 @router.post("")
 def create_group(payload: GroupCreate, session: Session = Depends(repo.get_session)):
     values = payload.model_dump()
+    values["send_target"] = str(values.get("send_target") or "").strip()
     values["image_theme"], values["image_theme_custom"] = _validate_group_theme(
         values.get("image_theme", "random_preset"), values.get("image_theme_custom", "")
     )
@@ -209,6 +218,8 @@ def update_group(
         updates["image_theme_custom"] = custom
     if "image_prompt_override" in updates:
         updates["image_prompt_override"] = _validate_prompt_override(updates["image_prompt_override"])
+    if "send_target" in updates:
+        updates["send_target"] = str(updates.get("send_target") or "").strip()
     for field, value in updates.items():
         setattr(group, field, value)
     group = repo.save_group(session, group)
@@ -258,6 +269,17 @@ def discover_groups():
         }
         for g in groups
     ]
+
+
+@router.post("/sync-wechat-names")
+def sync_wechat_names(
+    session: Session = Depends(repo.get_session),
+    settings: Settings = Depends(get_settings),
+):
+    """按稳定微信群 ID 刷新当前名称；不打开微信，也不发送任何内容。"""
+    source = WeChatDataAnalysisSource(settings=settings)
+    report = GroupNameSyncService(source).sync(session)
+    return report.to_dict()
 
 
 @router.get("/resolve")
@@ -376,7 +398,7 @@ def verify_send_target(
 ):
     """只查找并核验微信目标，不发送任何文字或图片。"""
     group = _require_active_group(session, group_id)
-    target = (group.send_target or group.wechat_group_name or group.display_name or "").strip()
+    target = effective_send_target(group)
     if not target:
         raise HTTPException(422, "该群没有可验证的发送目标")
 

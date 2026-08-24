@@ -18,6 +18,7 @@ import {
   deleteGroup,
   listGroups,
   resolveGroups,
+  syncWechatGroupNames,
   testReadGroup,
   updateGroup,
 } from "../../api";
@@ -97,6 +98,7 @@ export default function Groups() {
   const [testResults, setTestResults] = useState<Record<number, TestReadResult>>({});
   const [deleteTarget, setDeleteTarget] = useState<GroupV2 | null>(null);
   const [deleteBusy, setDeleteBusy] = useState(false);
+  const [syncingNames, setSyncingNames] = useState(false);
 
   const load = () => {
     setLoading(true);
@@ -182,6 +184,22 @@ export default function Groups() {
       })
       .catch((error: unknown) => toast(`搜索失败：${String(error)}`))
       .finally(() => setSearching(false));
+  };
+
+  const syncNames = () => {
+    if (syncingNames) return;
+    setSyncingNames(true);
+    syncWechatGroupNames()
+      .then((result) => {
+        if (result.status === "unavailable") {
+          toast(`微信群名同步不可用，已保留缓存名称：${result.detail || "数据源未返回群列表"}`);
+        } else {
+          toast(`微信群名同步完成：更新 ${result.updated.length} 个，未变化 ${result.unchanged} 个${result.skipped.length ? `，跳过 ${result.skipped.length} 个` : ""}`);
+        }
+        load();
+      })
+      .catch((error: unknown) => toast(`微信群名同步失败：${String(error)}`))
+      .finally(() => setSyncingNames(false));
   };
 
   const bindMatch = (match: GroupMatch) => {
@@ -280,6 +298,10 @@ export default function Groups() {
           })}
         </div>
         <span className="groups-result-count">显示 {filteredGroups.length} / {groups.length} 个群</span>
+        <Button tone="secondary" className="ui-button-compact" onClick={syncNames} busy={syncingNames}>
+          <ArrowsClockwise size={16} aria-hidden="true" />
+          同步微信群名
+        </Button>
         <Button tone="ghost" className="ui-button-compact" onClick={load} busy={loading}>
           <ArrowsClockwise size={16} aria-hidden="true" />
           刷新
@@ -312,13 +334,15 @@ export default function Groups() {
             <tbody>
               {filteredGroups.map((group) => {
                 const testResult = testResults[group.id];
+                const currentName = group.wechat_group_name || group.display_name || "未命名群";
+                const archiveNameDiffers = Boolean(group.display_name && group.display_name !== currentName);
                 return (
                   <Fragment key={group.id}>
                     <tr>
                       <td data-label="群名称 / 绑定信息">
                         <div className="groups-name-cell">
-                          <strong>{group.display_name || "未命名群"}</strong>
-                          <span>{group.wechat_group_name || group.wechat_group_id || "尚未绑定微信群"}</span>
+                          <strong>{currentName}</strong>
+                          {archiveNameDiffers && <span>归档名称：{group.display_name}</span>}
                           {group.wechat_group_id && <small>ID：{group.wechat_group_id}</small>}
                         </div>
                       </td>
@@ -336,7 +360,12 @@ export default function Groups() {
                       <td data-label="AI 图片">
                         <ToggleSwitch checked={group.image_enabled} label={`${group.display_name} AI 图片开关`} busy={toggleBusy === `${group.id}:image_enabled`} onChange={() => toggle(group, "image_enabled")} />
                       </td>
-                      <td data-label="发送目标"><span className="groups-target-cell">{group.send_target || group.wechat_group_name || "未设置"}</span></td>
+                      <td data-label="发送目标">
+                        <div className="groups-target-cell">
+                          <span>{group.effective_send_target || "未设置"}</span>
+                          <small>{group.send_target_mode === "manual" ? "人工覆盖" : "自动跟随"}</small>
+                        </div>
+                      </td>
                       <td data-label="最近配置"><span className="groups-muted-cell">{formatDateTime(group.updated_at)}</span></td>
                       <td data-label="操作">
                         <div className="groups-row-actions">

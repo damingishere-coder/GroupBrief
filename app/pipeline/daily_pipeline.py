@@ -41,6 +41,12 @@ from app.scheduler.period import PeriodResolver
 from app.sender.base import WechatSender
 from app.sender.wechat_native import create_wechat_sender
 from app.services.generation_runtime import generation_mutex
+from app.services.group_name_sync import (
+    GroupNameSyncReport,
+    GroupNameSyncService,
+    effective_send_target,
+    send_target_mode,
+)
 from app.v2.constants import (
     DATA_READY,
     FAILED,
@@ -86,6 +92,7 @@ class DailyPipeline:
         self.sender = sender or create_wechat_sender(settings=self.settings, dry_run=dry_run)
         self.store = store or RunStore(self.settings.output_dir)
         self.dry_run = dry_run
+        self._last_name_sync_report: GroupNameSyncReport | None = None
 
     # ================= 生成阶段 =================
 
@@ -116,6 +123,7 @@ class DailyPipeline:
             }]
         window = self.period_resolver.resolve(run_date=requested_date, timezone=self.settings.app_timezone)
         run_date_str = window.run_date.isoformat()
+        self._last_name_sync_report = self._sync_group_names(group_ids)
         groups = self._load_groups(group_ids)
         if not groups:
             return [{"status": "no_groups", "reason": "无启用群"}]
@@ -331,6 +339,10 @@ class DailyPipeline:
         base = {
             "group_id": str(group.id),
             "wechat_group_id": group.wechat_group_id,
+            "wechat_group_name": group.wechat_group_name,
+            "effective_send_target": effective_send_target(group),
+            "send_target_mode": send_target_mode(group),
+            **self._name_sync_audit(group),
             "period_start": period_start,
             "period_end": period_end,
             "send_time": group.send_time,
@@ -664,7 +676,12 @@ class DailyPipeline:
         now = now or datetime.now(ZoneInfo(self.settings.app_timezone))
         run_date = now.date().isoformat()
         results: list[dict] = []
-        for group in self._load_groups():
+        groups = self._load_groups()
+        due_group_ids = self._due_sync_group_ids(groups, run_date, now)
+        if due_group_ids:
+            self._last_name_sync_report = self._sync_group_names(due_group_ids)
+            groups = self._load_groups()
+        for group in groups:
             if not bool(getattr(group, "wechat_send_enabled", False)):
                 continue
             group_name = group.display_name or group.wechat_group_name
@@ -717,6 +734,15 @@ class DailyPipeline:
         allow_hold: bool = False,
         allow_sent: bool = False,
     ) -> dict:
+        target = effective_send_target(group)
+        self.store.update(
+            group_name,
+            run_date,
+            wechat_group_name=str(group.wechat_group_name or "").strip(),
+            effective_send_target=target,
+            send_target_mode=send_target_mode(group),
+            **self._name_sync_audit(group),
+        )
         claim_id, run, claim_reason = self.store.claim_send(
             group_name,
             run_date,
@@ -739,7 +765,6 @@ class DailyPipeline:
                 "detail": f"发送任务未领取：{claim_reason}",
             }
 
-        target = group.send_target or group.wechat_group_name or group_name
         ranking_txt = self.store.ranking_txt_path(group_name, run_date)
         image = self.store.image_path(group_name, run_date)
 
@@ -1013,6 +1038,7 @@ class DailyPipeline:
                     "error": "run_date 必须是有效的 YYYY-MM-DD 日期",
                 }
             run_date = parsed_run_date.isoformat()
+        self._last_name_sync_report = self._sync_group_names([group_id])
         group = self._get_group(group_id)
         if not group:
             return {"status": "failed", "error": f"群不存在 {group_id}"}
@@ -1146,6 +1172,7 @@ class DailyPipeline:
                     "error": "run_date 必须是有效的 YYYY-MM-DD 日期",
                 }
             run_date = parsed_run_date.isoformat()
+        self._last_name_sync_report = self._sync_group_names([group_id])
         group = self._get_group(group_id)
         if not group:
             return {"status": "failed", "error": f"群不存在 {group_id}"}
@@ -1207,6 +1234,57 @@ class DailyPipeline:
         )
 
     # ================= 工具 =================
+
+    def _sync_group_names(self, group_ids: list[int] | None = None) -> GroupNameSyncReport:
+        from sqlmodel import Session
+
+        with Session(repo.engine) as session:
+            report = GroupNameSyncService(self.data_source).sync(session, group_ids=group_ids)
+        logger.info(
+            "流水线群名同步：status=%s checked=%d updated=%d skipped=%d",
+            report.status,
+            report.checked,
+            len(report.updated),
+            len(report.skipped),
+        )
+        return report
+
+    def _name_sync_audit(self, group: Group) -> dict:
+        mode = send_target_mode(group)
+        report = self._last_name_sync_report
+        if mode == "manual":
+            status = "manual_override"
+        elif report is not None and report.is_fresh(group.id):
+            status = "fresh"
+        else:
+            status = "cached"
+        return {
+            "name_sync_status": status,
+            "name_sync_at": report.synced_at if report is not None else "",
+        }
+
+    def _due_sync_group_ids(
+        self,
+        groups: list[Group],
+        run_date: str,
+        now: datetime,
+    ) -> list[int]:
+        late_window = timedelta(minutes=max(int(self.settings.wechat_late_send_window_minutes), 0))
+        group_ids: list[int] = []
+        for group in groups:
+            if group.id is None or not bool(getattr(group, "wechat_send_enabled", False)):
+                continue
+            group_name = group.display_name or group.wechat_group_name
+            run = self.store.load_run(group_name, run_date)
+            if run.get("status") not in (IMAGE_READY, READY_TO_SEND):
+                continue
+            if run.get("sent_at") or run.get("send_hold"):
+                continue
+            send_time = parse_send_time(group.send_time or run.get("send_time", "08:30"))
+            due_at = datetime.combine(now.date(), send_time, tzinfo=now.tzinfo)
+            if due_at <= now <= due_at + late_window:
+                group_ids.append(int(group.id))
+        return group_ids
 
     def _load_groups(self, group_ids: list[int] | None = None) -> list[Group]:
         from sqlmodel import Session

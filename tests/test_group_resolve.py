@@ -10,6 +10,7 @@ from sqlmodel import SQLModel, Session, create_engine, select
 from starlette.testclient import TestClient
 
 from app.api import groups as groups_api
+from app.data_sources.base import DataSourceHealth, DataSourceStatus, ResolvedGroup
 from app.db import repository as repo
 from app.db.models import Group
 from app.providers.history.base import (
@@ -178,6 +179,81 @@ def test_resolve_api_returns_typed_matches(client, monkeypatch):
             "match_type": "exact",
         }
     ]
+
+
+def test_group_list_exposes_effective_target_and_mode(client):
+    test_client, engine = client
+    with Session(engine) as session:
+        automatic = repo.save_group(
+            session,
+            Group(
+                display_name="固定归档名",
+                wechat_group_id="auto-api@chatroom",
+                wechat_group_name="微信当前名",
+                send_target="",
+            ),
+        )
+        manual = repo.save_group(
+            session,
+            Group(
+                display_name="人工归档名",
+                wechat_group_id="manual-api@chatroom",
+                wechat_group_name="微信当前名二",
+                send_target="人工目标",
+            ),
+        )
+        automatic_id = int(automatic.id)
+        manual_id = int(manual.id)
+
+    rows = {item["id"]: item for item in test_client.get("/api/groups").json()}
+    assert rows[automatic_id]["send_target_mode"] == "auto"
+    assert rows[automatic_id]["effective_send_target"] == "微信当前名"
+    assert rows[manual_id]["send_target_mode"] == "manual"
+    assert rows[manual_id]["effective_send_target"] == "人工目标"
+
+
+def test_sync_wechat_names_endpoint_updates_by_stable_id_without_sending(client, monkeypatch):
+    test_client, engine = client
+    with Session(engine) as session:
+        group = repo.save_group(
+            session,
+            Group(
+                display_name="固定 V3 归档名",
+                wechat_group_id="rename-api@chatroom",
+                wechat_group_name="旧微信名",
+                send_target="",
+            ),
+        )
+        group_id = int(group.id)
+
+    class ApiSource:
+        name = "wechat_data_analysis"
+
+        def health_check(self):
+            return DataSourceHealth(DataSourceStatus.OK, "ok")
+
+        def list_groups(self):
+            return [ResolvedGroup("rename-api@chatroom", "新微信名")]
+
+    monkeypatch.setattr(groups_api, "WeChatDataAnalysisSource", lambda settings: ApiSource())
+    response = test_client.post("/api/groups/sync-wechat-names")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "ok"
+    assert body["updated"] == [
+        {
+            "id": group_id,
+            "wechat_group_id": "rename-api@chatroom",
+            "old_name": "旧微信名",
+            "new_name": "新微信名",
+        }
+    ]
+    with Session(engine) as session:
+        saved = session.get(Group, group_id)
+        assert saved.display_name == "固定 V3 归档名"
+        assert saved.wechat_group_name == "新微信名"
+        assert saved.send_target == ""
 
 
 def test_read_api_reports_raw_and_countable_message_counts(client, monkeypatch):

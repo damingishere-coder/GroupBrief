@@ -195,7 +195,7 @@ export default function GroupDetail({ groupId, invalidGroupId }: GroupDetailProp
     setField("display_name", group.group_name);
     setField("wechat_group_id", group.group_id);
     setField("wechat_group_name", group.group_name);
-    setField("send_target", group.group_name);
+    setField("send_target", "");
     toast(`已回填「${group.group_name}」的真实群信息`);
   };
 
@@ -232,7 +232,6 @@ export default function GroupDetail({ groupId, invalidGroupId }: GroupDetailProp
     const next: Record<string, string> = {};
     if (!form.display_name.trim()) next.display_name = "请填写展示名称";
     if (!form.wechat_group_id.trim()) next.wechat_group_id = "请绑定真实微信群 ID";
-    if (!form.send_target.trim()) next.send_target = "请填写发送目标群名";
     if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(form.send_time.trim())) next.send_time = "请输入 HH:mm 格式，例如 08:30";
     setErrors(next);
     return Object.keys(next).length === 0;
@@ -326,7 +325,7 @@ export default function GroupDetail({ groupId, invalidGroupId }: GroupDetailProp
         <section className="group-detail-card group-discovery-card">
           <div className="group-detail-section-heading">
             <div className="group-detail-heading-icon"><Compass size={20} aria-hidden="true" /></div>
-            <div><h2>从微信发现真实群</h2><p>优先使用真实群信息回填名称、ID 和发送目标。</p></div>
+            <div><h2>从微信发现真实群</h2><p>回填稳定 ID 和当前名称；发送目标默认自动跟随微信群名。</p></div>
           </div>
           <div className="group-discovery-actions">
             <Button tone="secondary" onClick={loadDiscovered} busy={discovering}><UsersThree size={17} aria-hidden="true" />发现微信群</Button>
@@ -355,14 +354,16 @@ export default function GroupDetail({ groupId, invalidGroupId }: GroupDetailProp
       <section className="group-detail-card">
         <div className="group-detail-section-heading"><div><h2>基础信息</h2><p>这些信息用于确定数据源中的真实群聊。</p></div></div>
         <div className="group-detail-form-grid">
-          <Field id="display-name" label="展示名称" required error={errors.display_name}>
+          <Field id="display-name" label="展示 / 归档名称" required error={errors.display_name}>
             <input id="display-name" value={form.display_name} onChange={(event) => setField("display_name", event.target.value)} />
+            <span className="group-detail-field-help">作为稳定的历史目录名称，不会随微信群改名自动变化。</span>
           </Field>
           <Field id="wechat-group-id" label="微信群 ID" required error={errors.wechat_group_id}>
             <input id="wechat-group-id" value={form.wechat_group_id} onChange={(event) => setField("wechat_group_id", event.target.value)} placeholder="例如 xxx@chatroom" />
           </Field>
-          <Field id="wechat-group-name" label="微信显示名称">
+          <Field id="wechat-group-name" label="微信当前群名（自动同步）">
             <input id="wechat-group-name" value={form.wechat_group_name || ""} onChange={(event) => setField("wechat_group_name", event.target.value)} />
+            <span className="group-detail-field-help">系统会在每日生成和实际发送前按稳定群 ID 刷新。</span>
           </Field>
           <Field id="provider-preference" label="数据源偏好">
             <select id="provider-preference" value={form.provider_preference} onChange={(event) => setField("provider_preference", event.target.value)}>
@@ -399,8 +400,13 @@ export default function GroupDetail({ groupId, invalidGroupId }: GroupDetailProp
             <input id="image-enabled" type="checkbox" checked={form.image_enabled} onChange={(event) => setField("image_enabled", event.target.checked)} />
             <span><strong>启用 AI 图片</strong><small>启用后会进入串行生图阶段</small></span>
           </label>
-          <Field id="send-target" label="发送目标（微信群名）" required error={errors.send_target}>
-            <input id="send-target" value={form.send_target} onChange={(event) => setField("send_target", event.target.value)} placeholder="默认使用绑定群名" />
+          <Field id="send-target" label="发送目标（可选人工覆盖）" error={errors.send_target}>
+            <input id="send-target" value={form.send_target} onChange={(event) => setField("send_target", event.target.value)} placeholder="留空则自动跟随微信当前群名" />
+            <span className="group-detail-field-help">
+              {form.send_target.trim()
+                ? `人工覆盖：将搜索「${form.send_target.trim()}」`
+                : `自动跟随：将搜索「${form.wechat_group_name?.trim() || form.display_name.trim() || "尚未设置"}」`}
+            </span>
           </Field>
           <label className="group-detail-switch" htmlFor="wechat-send-enabled">
             <input id="wechat-send-enabled" type="checkbox" checked={Boolean(form.wechat_send_enabled)} onChange={(event) => setField("wechat_send_enabled", event.target.checked)} />

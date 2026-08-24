@@ -190,3 +190,40 @@ def test_codex_image_timeout_default_and_migration_are_safe(tmp_path, monkeypatc
     repo._migrate_codex_image_timeout_default()
     with Session(custom_engine) as session:
         assert session.get(Setting, "codex_timeout_seconds").value == "900"
+
+
+def test_send_target_auto_mode_migration_clears_only_duplicated_current_name(tmp_path, monkeypatch):
+    engine = create_engine(f"sqlite:///{tmp_path / 'send-target-auto.db'}")
+    SQLModel.metadata.create_all(engine)
+    monkeypatch.setattr(repo, "engine", engine)
+
+    with Session(engine) as session:
+        session.add(
+            Group(
+                display_name="自动群",
+                wechat_group_name="微信当前名",
+                send_target="微信当前名",
+            )
+        )
+        session.add(
+            Group(
+                display_name="人工群",
+                wechat_group_name="微信当前名二",
+                send_target="人工覆盖名",
+            )
+        )
+        session.add(Group(display_name="已是自动", wechat_group_name="微信当前名三", send_target=""))
+        session.commit()
+
+    repo._migrate_send_target_auto_mode()
+    with Session(engine) as session:
+        groups = list(session.exec(select(Group).order_by(Group.id)).all())
+        assert [group.send_target for group in groups] == ["", "人工覆盖名", ""]
+        assert session.get(Setting, "migration_send_target_auto_mode_v1").value == "done"
+        groups[0].send_target = "迁移后人工设置"
+        session.add(groups[0])
+        session.commit()
+
+    repo._migrate_send_target_auto_mode()
+    with Session(engine) as session:
+        assert session.exec(select(Group).where(Group.display_name == "自动群")).one().send_target == "迁移后人工设置"
