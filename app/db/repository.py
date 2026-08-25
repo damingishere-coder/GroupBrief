@@ -175,7 +175,7 @@ _V2_GROUP_COLUMNS: dict[str, str] = {
     "send_target": "VARCHAR(256) NOT NULL DEFAULT ''",
     "ranking_template": "VARCHAR(64) NOT NULL DEFAULT 'default'",
     "image_prompt_template": "VARCHAR(64) NOT NULL DEFAULT 'default'",
-    "image_theme": "VARCHAR(64) NOT NULL DEFAULT 'random_preset'",
+    "image_theme": "VARCHAR(64) NOT NULL DEFAULT 'ai_free'",
     "image_theme_custom": "VARCHAR(80) NOT NULL DEFAULT ''",
     "image_prompt_override": "TEXT NOT NULL DEFAULT ''",
     "wechat_send_enabled": "BOOLEAN NOT NULL DEFAULT 0",

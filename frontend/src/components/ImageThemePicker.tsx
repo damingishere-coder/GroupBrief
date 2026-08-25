@@ -76,7 +76,9 @@ export function ImageThemePicker({
     close();
   };
 
-  const status = current?.key === "random_preset"
+  const status = current?.key === "ai_free"
+    ? "不注入预设风格"
+    : current?.key === "random_preset"
     ? `每日随机 · ${current.variation_count} 种组合`
     : current?.key === "custom"
       ? "自定义描述"
@@ -120,7 +122,7 @@ export function ImageThemePicker({
                     onClick={() => choose(theme.key)}
                   >
                     <span><b>{theme.label}</b><small>{theme.description}</small></span>
-                    <em>{theme.key === "random_preset" ? `${theme.variation_count} 种` : "80 字内"}</em>
+                    <em>{theme.key === "ai_free" ? "默认" : theme.key === "random_preset" ? `${theme.variation_count} 种` : "80 字内"}</em>
                   </button>
                 ))}
               </div>

@@ -39,6 +39,17 @@ def test_theme_is_inserted_when_prompt_has_no_canonical_section():
     assert "【事件】\n真实事件" in updated
 
 
+def test_ai_free_replaces_concrete_theme_with_one_neutral_hint():
+    original = "【大主题】\n赛博霓虹：深蓝黑底、青紫粉霓虹。\n\n【事件】\n真实事件\n"
+    updated = replace_theme_section(original, resolve_image_theme("ai_free"))
+
+    assert updated.count("【视觉风格】") == 1
+    assert "根据当天真实聊天内容自由选择统一视觉风格。" in updated
+    assert "赛博霓虹" not in updated
+    assert "深蓝黑底" not in updated
+    assert "【事件】\n真实事件" in updated
+
+
 def test_random_theme_resolves_to_one_fixed_concrete_theme():
     class Picker:
         @staticmethod

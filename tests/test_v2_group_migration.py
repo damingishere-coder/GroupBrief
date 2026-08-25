@@ -81,7 +81,7 @@ def test_five_legacy_defaults_migrate_once_without_overwriting_custom(tmp_path, 
         rows = connection.exec_driver_sql(
             "SELECT id, image_theme, image_theme_custom FROM groups ORDER BY id"
         ).all()
-        assert [row[1] for row in rows[:5]] == ["random_preset"] * 5
+        assert [row[1] for row in rows[:5]] == ["ai_free"] * 5
         assert tuple(rows[5][1:]) == ("blue_white", "指定手账")
         connection.exec_driver_sql("UPDATE groups SET image_theme='blue_white' WHERE id=1")
     with Session(engine) as session:

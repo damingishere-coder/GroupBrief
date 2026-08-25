@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import re
+from copy import deepcopy
 from time import perf_counter
 from datetime import datetime
 
@@ -90,8 +91,9 @@ topic_order 与 panel_beats 必须恰好覆盖全部入选主题；至少一个�
 
 _FINAL_PROMPT_RETRY_INSTRUCTION = """\
 
-上一次最终 Prompt 暴露了内部字段名、主题 ID，或退化成等大模块列表。请完整重写：
-按“景别 + 人物动作 + 群友反应或道具特写 + 逐字气泡”写每个话题；保留全部已选话题、指定画风、统计日期与漫画分镜；
+上一次最终 Prompt 暴露了内部字段名、主题 ID、缺少固定头尾，或退化成等大模块列表。请完整重写：
+按“景别 + 人物动作 + 群友反应或道具特写 + 逐字气泡”写每个话题；保留全部已选话题、当前视觉风格说明、统计日期与漫画分镜；
+群名称、完整统计时段、真实主标题、真实副标题必须在顶部；真实底部总结、消息数和发言人数必须在底部；
 每段指定文字只出现一次，不要输出任何数据字段式栏目名、英文装饰词、Logo、网址或 topic ID，也不要把一个话题机械装进一个等大的矩形区域。"""
 
 SYSTEM_BASE = """你是「群报 GroupBrief」的漫画日报海报 Prompt 设计师。
@@ -108,20 +110,21 @@ SYSTEM_BASE = """你是「群报 GroupBrief」的漫画日报海报 Prompt 设�
 6. 数据（消息数、发言人数）必须使用给定数字，禁止自行计算。
 7. 必须严格按给定的【输出结构】组织最终 Prompt；给定的漫画分镜骨架控制整张图的大小格与阅读节奏。
 8. 候选主题已经过证据校验和程序评分；最终只能使用给定的 2～7 个入选主题，并且每个恰好使用一次。
-9. 【大主题】是全图最高视觉约束，控制配色、画材、服装、造型、装饰、纹理、光影和画风；
-   漫画分镜只控制格子几何、阅读路径和镜头节拍，不得替换或削弱【大主题】。
+9. 仅当【视觉风格】给出手动预设或自定义风格时，才把它作为最高视觉约束；默认 AI 自由发挥时，
+   只能根据当天真实聊天内容自由选择统一视觉风格，不得追加任何预设风格库词。
 10. 一个话题不等于一个矩形模块；5～7 个话题可以展开为 7～12 个镜头，至少一个话题使用连续镜头。
 11. 每段内容必须写成“景别 + 人物动作 + 群友反应或道具特写 + 逐字气泡”，不得只给抽象总结。
 12. 每个话题只显示一个不超过 12 个汉字的自然短标题、一个完整真实姓名、一句不超过 24 个汉字的事实短句，
     以及默认一条不超过 22 个汉字的真实主气泡；只有连续镜头确有需要时才允许第二条短气泡。
 13. 所有指定文字必须逐字且恰好出现一次；禁止输出内部字段名、topic ID、表格栏目、说明性标签、
     自动创造的栏目名、英文装饰词、Logo 或网址。
-14. 海报用于微信手机端，画布固定为 1024×1536 竖版；关键文字避开四周安全边距，缩略图优先看清主标题、日期和两项统计。
-15. 空间不足时严格依次减少装饰、底部总结、副标题、次要气泡；日期、两项统计、全部话题、完整姓名、事实短句和主气泡不可删除。
-16. 重新生图只允许改变所选美术家族及当天解析出的视觉细节；聊天事实、日期、数字、人物、气泡、话题覆盖和既定分镜不得改变。
+14. 海报用于微信手机端，画布固定为 1024×1536 竖版；顶部固定显示群名称、完整统计时段、主标题和副标题，底部固定显示一句总结、消息数和发言人数。
+15. 空间不足时严格依次减少装饰、次要气泡、次要反应细节；群名称、完整统计时段、主副标题、底部总结、日期、两项统计、全部话题、完整姓名、事实短句和主气泡不可删除。
+16. 重新生图只允许按当前视觉风格说明改变视觉表现；聊天事实、群名称、完整统计时段、主副标题、底部总结、数字、人物、气泡、话题覆盖和既定分镜不得改变。
 17. 格子必须有明显的大、中、小三级尺寸差，并按计划使用嵌套特写、连续动作或跨格主体；
     禁止整齐两列等高矩形和“每个话题一块”的列表式构图。
-18. 必须把给定的“统计日期：YYYY-MM-DD”作为清晰可见的画面文字，放在海报顶部或底部，不得省略或改写。"""
+18. 必须把给定群名称、完整统计时段和“统计日期：YYYY-MM-DD”逐字作为清晰可见的画面文字，不得省略或改写。
+19. 【主标题】【副标题】【底部总结】都必须填入基于已选真实话题生成的实际文案；禁止写“不绘制”“不设置”“省略”或只保留说明占位。"""
 
 CHUNK_ANALYZE_SYSTEM = """你是群聊事件分析助手。只提取聊天中真实存在的事件/人物/原话，
 输出严格 JSON（不输出其他内容），没有事件就返回空数组。"""
@@ -138,12 +141,121 @@ CHUNK_ANALYZE_PROMPT = """以下是微信群聊记录片段（{label}）。
 要求：只提取真实存在的内容；没有事件就返回空数组；每个片段最多提取 10 个事件，最终候选最多 10 个。"""
 
 _HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
+_STYLE_SECTION_RE = re.compile(
+    r"(?ms)^【(?:大主题|视觉风格)】\s*\n.*?(?=^【[^\n】]+】\s*$|\Z)"
+)
 _FORBIDDEN_FINAL_PROMPT_TERMS = ("参与群友", "事实信息", "真实原话", "信息卡", "topic-")
+_CONFLICTING_VISIBILITY_PHRASES = (
+    "不绘制群名称", "不绘制群名", "不单独绘制群名", "不绘制为画面文字",
+    "不作为画面文字绘制", "仅作为内容语境", "仅作为创作语境", "仅作背景识别",
+    "不绘制完整时间", "不绘制统计时间", "统计范围，不绘制",
+    "不绘制副标题", "不设置副标题", "副标题不绘制", "省略副标题",
+    "不绘制底部总结", "不设置底部总结", "底部总结不绘制", "省略底部总结",
+)
+_PLACEHOLDER_SECTION_PHRASES = (
+    "优先使用", "建议不超过", "一句话概括", "必须生成", "当天生成",
+    "清晰绘制", "只出现一次", "正在生成", "自动生成",
+)
+_SECTION_OMISSION_TERMS = ("不绘制", "不设置", "省略", "仅作为", "仅作", "不作为")
 
 
 def _strip_html_comments(text: str) -> str:
     """剥离模板中的 HTML 注释（供作者写说明，不进入最终 Prompt）。"""
     return _HTML_COMMENT_RE.sub("", text).strip()
+
+
+def _normalize_ai_free_style(text: str, neutral_hint: str) -> str:
+    """AI 自由发挥时移除模型扩写的风格段，只保留一句中性说明。"""
+    without_style = _STYLE_SECTION_RE.sub("", text).strip()
+    return f"【视觉风格】\n{neutral_hint}\n\n{without_style}"
+
+
+def _section_body(text: str, heading: str) -> str:
+    match = re.search(
+        rf"(?ms)^【{re.escape(heading)}】\s*\n(.*?)(?=^【[^\n】]+】\s*$|\Z)",
+        text,
+    )
+    return match.group(1).strip() if match else ""
+
+
+def _has_real_section_content(text: str, heading: str) -> bool:
+    body = _section_body(text, heading)
+    if (
+        not body
+        or any(phrase in body for phrase in _CONFLICTING_VISIBILITY_PHRASES)
+        or any(term in body for term in _SECTION_OMISSION_TERMS)
+    ):
+        return False
+    lines = [re.sub(r"^[\s*\-]+", "", line).strip() for line in body.splitlines()]
+    return any(
+        line
+        and not (line.startswith("（") and line.endswith("）"))
+        and not any(phrase in line for phrase in _PLACEHOLDER_SECTION_PHRASES)
+        for line in lines
+    )
+
+
+def _visible_contract_violations(
+    text: str,
+    *,
+    group_name: str,
+    period_line: str,
+    date_line: str,
+    message_line: str,
+    speaker_line: str,
+) -> list[str]:
+    """失败关闭校验：固定头尾必须有真实内容，且不能出现相反指令。"""
+    violations = [phrase for phrase in _CONFLICTING_VISIBILITY_PHRASES if phrase in text]
+    required_literals = {
+        "群名称": group_name,
+        "完整统计时段": period_line,
+        "统计日期": date_line,
+        "消息数": message_line,
+        "发言人数": speaker_line,
+    }
+    for label, literal in required_literals.items():
+        if literal not in text:
+            violations.append(f"缺少{label}：{literal}")
+    if group_name not in _section_body(text, "群名称"):
+        violations.append("【群名称】未包含实际显示名")
+    if period_line not in _section_body(text, "统计时间"):
+        violations.append("【统计时间】未包含完整起止时间")
+    data_body = _section_body(text, "数据")
+    if message_line not in data_body or speaker_line not in data_body:
+        violations.append("【数据】未同时包含消息数和发言人数")
+    for heading in ("主标题", "副标题", "底部总结"):
+        if not _has_real_section_content(text, heading):
+            violations.append(f"【{heading}】缺少真实文案")
+    return list(dict.fromkeys(violations))
+
+
+def _validated_persisted_selection(selection: object, messages: list[PromptMessage]) -> dict:
+    """验证已落盘选题仍完整且能回查快照；不重新调用模型选题。"""
+    if not isinstance(selection, dict) or not isinstance(selection.get("candidates"), list):
+        raise ValueError("已保存的选题总结缺少 candidates，已停止重建")
+    result = deepcopy(selection)
+    selected = [item for item in result["candidates"] if isinstance(item, dict) and item.get("selected")]
+    selected_ids = [str(item.get("topic_id") or "").strip() for item in selected]
+    stored_ids = result.get("selected_topic_ids")
+    if not isinstance(stored_ids, list) or selected_ids != [str(value) for value in stored_ids]:
+        raise ValueError("已保存的选题 ID 与入选标记不一致，已停止重建")
+    if not selected_ids or len(selected_ids) != len(set(selected_ids)):
+        raise ValueError("已保存的选题 ID 为空或重复，已停止重建")
+    allowed_message_ids = {message.message_id for message in messages}
+    for item in selected:
+        if not str(item.get("title") or "").strip() or not str(item.get("summary") or "").strip():
+            raise ValueError("已保存的入选主题缺少标题或总结，已停止重建")
+        evidence_ids = item.get("message_ids") if isinstance(item.get("message_ids"), list) else []
+        if not evidence_ids or any(str(message_id) not in allowed_message_ids for message_id in evidence_ids):
+            raise ValueError("已保存的入选主题无法从 messages.json 回查，已停止重建")
+        quotes = item.get("quotes") if isinstance(item.get("quotes"), list) else []
+        if not any(str(value).strip() for value in quotes):
+            raise ValueError("已保存的入选主题缺少真实原话，已停止重建")
+        visible_people = item.get("visible_participants") if isinstance(item.get("visible_participants"), list) else []
+        if not any(str(value).strip() for value in visible_people) and not str(item.get("participant_label") or "").strip():
+            raise ValueError("已保存的入选主题缺少可见人物，已停止重建")
+    selected_topics_json(result)
+    return result
 
 
 _MEDIA_PREFIX = {
@@ -258,22 +370,33 @@ class DeepSeekImagePromptBuilder:
             report_date = (data.report_date or data.period_end[:10]).strip()
             if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", report_date):
                 raise ValueError("report_date 必须来自统计周期并使用 YYYY-MM-DD")
-            theme_text = f"{theme.display_name}：{theme.prompt}"
+            theme_text = theme.visible_text
+            explicit_theme_text = theme_text if theme.has_explicit_style else ""
+            visible_group_name = (data.visible_group_name or data.group_name).strip()
+            if not visible_group_name:
+                raise ValueError("群聊显示名不能为空")
             date_line = f"统计日期：{report_date}"
+            period_line = f"{data.period_start} ~ {data.period_end}"
+            message_line = f"{data.message_count} 条消息"
+            speaker_line = f"{data.speaker_count} 人发言"
 
             messages = [self._to_prompt_message(message, index) for index, message in enumerate(data.messages, start=1)]
             messages = [message for message in messages if message.text]
             direct_chars = max(1_000, int(self.settings.max_context_chars or 50_000))
-            chunks = segment_messages(
-                messages,
-                direct_chars=direct_chars,
-                target_chars=min(TARGET_CHUNK_CHARS, direct_chars),
-                hard_chars=max(HARD_CHUNK_CHARS, direct_chars),
-                session_gap_minutes=SESSION_GAP_MINUTES,
-                overlap_messages=OVERLAP_MESSAGES,
-            )
-            if not chunks:
-                raise ValueError("没有可提交给总结模型的聊天文本")
+            chunks: list[ConversationChunk] = []
+            if data.persisted_topic_selection is None:
+                chunks = segment_messages(
+                    messages,
+                    direct_chars=direct_chars,
+                    target_chars=min(TARGET_CHUNK_CHARS, direct_chars),
+                    hard_chars=max(HARD_CHUNK_CHARS, direct_chars),
+                    session_gap_minutes=SESSION_GAP_MINUTES,
+                    overlap_messages=OVERLAP_MESSAGES,
+                )
+                if not chunks:
+                    raise ValueError("没有可提交给总结模型的聊天文本")
+            elif not messages:
+                raise ValueError("messages.json 为空，无法回查已保存选题")
             meta: dict = {
                 "template": data.template,
                 "template_source": "group_override" if data.template_override else "global",
@@ -287,8 +410,15 @@ class DeepSeekImagePromptBuilder:
                 "report_date": report_date,
             }
             meta.update(theme.to_meta())
+            meta["style_intervention"] = theme.has_explicit_style
 
-            if len(chunks) <= 1:
+            if data.persisted_topic_selection is not None:
+                selection = _validated_persisted_selection(data.persisted_topic_selection, messages)
+                meta["mode"] = "persisted_topic_selection"
+                meta["topic_selection_reused"] = True
+                meta["reuse_source"] = "run.prompt_meta"
+                analysis_calls = 0
+            elif len(chunks) <= 1:
                 meta["mode"] = "direct"
                 candidates, candidate_calls = self._topic_candidates_with_retry(
                     TOPIC_CANDIDATE_SYSTEM,
@@ -302,8 +432,11 @@ class DeepSeekImagePromptBuilder:
 
                 def analyze(item: tuple[int, ConversationChunk]) -> tuple[list[dict], int]:
                     idx, chunk = item
+                    event_system = EVENT_ANALYZE_SYSTEM
+                    if explicit_theme_text:
+                        event_system += "\n\n" + self._theme_constraint(explicit_theme_text)
                     return self._event_cards_with_retry(
-                        EVENT_ANALYZE_SYSTEM + "\n\n" + self._theme_constraint(f"{theme.display_name}：{theme.prompt}"),
+                        event_system,
                         build_event_prompt(chunk, f"第 {idx}/{len(chunks)} 块"),
                         chunk,
                     )
@@ -326,7 +459,9 @@ class DeepSeekImagePromptBuilder:
                 )
                 analysis_calls = event_calls + candidate_calls
 
-            selection = score_and_select_topics(candidates, messages)
+            if data.persisted_topic_selection is None:
+                selection = score_and_select_topics(candidates, messages)
+                meta["topic_selection_reused"] = False
             meta["topic_selection_version"] = selection["topic_selection_version"]
             meta["topic_selection"] = selection
             selected_payload = selected_topics_json(selection)
@@ -336,7 +471,16 @@ class DeepSeekImagePromptBuilder:
             style_layout_locked = detect_explicit_style_layout(custom_style_text)
             preferred_layout = preferred_layout_from_style(custom_style_text)
 
-            if preferred_layout:
+            if data.persisted_topic_selection is not None:
+                layout = restored_layout_plan(
+                    data.persisted_theme_meta,
+                    topic_ids,
+                    style_layout_locked=style_layout_locked,
+                )
+                if layout is None:
+                    raise ValueError("已保存的漫画分镜无法覆盖全部入选主题，已停止重建")
+                layout_calls = 0
+            elif preferred_layout:
                 layout = fixed_layout_plan(
                     preferred_layout,
                     topic_ids,
@@ -355,7 +499,7 @@ class DeepSeekImagePromptBuilder:
                     layout, layout_calls = self._layout_plan_with_retry(
                         selected_payload,
                         topic_ids,
-                        theme_text=theme_text,
+                        theme_text=explicit_theme_text,
                         recent_history=recent_history,
                         style_layout_locked=style_layout_locked,
                         seed_text=f"{data.group_id or data.group_name}|{data.run_date}",
@@ -373,7 +517,7 @@ class DeepSeekImagePromptBuilder:
             structure = render_image_prompt_template(
                 template_text,
                 {
-                    "group_name": data.group_name,
+                    "group_name": visible_group_name,
                     "period_start": data.period_start,
                     "period_end": data.period_end,
                     "report_date": report_date,
@@ -389,6 +533,15 @@ class DeepSeekImagePromptBuilder:
             if date_line not in structure:
                 # 兼容没有新增占位符的旧/群级模板，同时保证每个最终 Prompt 都收到日期区块。
                 structure = f"【固定画面日期】\n{date_line}\n\n{structure}"
+            fixed_visibility_contract = (
+                "【固定头尾可见合同｜不得降级】\n"
+                f"顶部逐字清晰绘制群名称“{visible_group_name}”、完整统计时段“{period_line}”、"
+                "本次基于真实话题生成的主标题和副标题。\n"
+                f"底部逐字清晰绘制本次基于真实话题生成的一句总结，以及“{message_line}”“{speaker_line}”。\n"
+                "不得写任何不绘制、不设置、省略或仅作语境的相反指令；"
+                "空间不足只能减少装饰、次要气泡和次要反应细节。"
+            )
+            structure = f"{structure}\n\n{fixed_visibility_contract}"
 
             final_user_prompt = (
                 "以下主题已经过原消息证据回查和喜剧优先固定评分。"
@@ -403,48 +556,62 @@ class DeepSeekImagePromptBuilder:
             )
             text = ""
             final_calls = 0
+            last_violations: list[str] = []
             for attempt in range(FINAL_PROMPT_MAX_ATTEMPTS):
-                prompt = final_user_prompt if attempt == 0 else final_user_prompt + _FINAL_PROMPT_RETRY_INSTRUCTION
+                prompt = final_user_prompt
+                if attempt:
+                    prompt += _FINAL_PROMPT_RETRY_INSTRUCTION
+                    if last_violations:
+                        prompt += "\n上次具体违反：" + "；".join(last_violations[:8])
                 candidate_text = self._chat(
                     structure,
                     prompt,
-                    theme_text,
+                    explicit_theme_text,
                     layout_instruction,
                 )
                 final_calls += 1
+                if not theme.has_explicit_style:
+                    candidate_text = _normalize_ai_free_style(candidate_text, theme_text)
+                mandatory_blocks: list[str] = []
+                if story_material not in candidate_text:
+                    mandatory_blocks.append(story_material)
+                if theme_text not in candidate_text:
+                    heading = "【大主题】" if theme.has_explicit_style else "【视觉风格】"
+                    suffix = "\n漫画分镜不得替换或削弱该指定风格。" if theme.has_explicit_style else ""
+                    mandatory_blocks.append(heading + "\n" + theme_text + suffix)
+                if layout.layout_name not in candidate_text:
+                    mandatory_blocks.append("【漫画分镜｜整张图只使用一种骨架】\n" + layout_instruction)
+                if date_line not in candidate_text:
+                    mandatory_blocks.append(
+                        "【必须在画面中清晰绘制的固定文字】\n"
+                        + date_line
+                        + "\n该日期标识不得省略或改写。"
+                    )
+                if mandatory_blocks:
+                    candidate_text = "\n\n".join((*mandatory_blocks, candidate_text))
+
                 forbidden = [term for term in _FORBIDDEN_FINAL_PROMPT_TERMS if term in candidate_text]
-                if forbidden:
-                    logger.warning("最终 Prompt 暴露内部字段或主题 ID（第 %s/%s 次）：%s", attempt + 1, FINAL_PROMPT_MAX_ATTEMPTS, forbidden)
+                contract = _visible_contract_violations(
+                    candidate_text,
+                    group_name=visible_group_name,
+                    period_line=period_line,
+                    date_line=date_line,
+                    message_line=message_line,
+                    speaker_line=speaker_line,
+                )
+                last_violations = [*(f"含内部词：{term}" for term in forbidden), *contract]
+                if last_violations:
+                    logger.warning(
+                        "最终 Prompt 合同校验失败（第 %s/%s 次）：%s",
+                        attempt + 1,
+                        FINAL_PROMPT_MAX_ATTEMPTS,
+                        last_violations,
+                    )
                     continue
                 text = candidate_text
                 break
             if not text:
-                raise ValueError("最终生图 Prompt 连续暴露内部字段或主题 ID")
-
-            mandatory_blocks: list[str] = []
-            if story_material not in text:
-                mandatory_blocks.append(story_material)
-            if theme_text not in text:
-                mandatory_blocks.append(
-                    "【大主题】\n"
-                    + theme_text
-                    + "\n漫画分镜不得替换或削弱该指定风格。"
-                )
-            if layout.layout_name not in text:
-                mandatory_blocks.append("【漫画分镜｜整张图只使用一种骨架】\n" + layout_instruction)
-            if date_line not in text:
-                mandatory_blocks.append(
-                    "【必须在画面中清晰绘制的固定文字】\n"
-                    + date_line
-                    + "\n该日期标识必须位于海报顶部或底部，不得省略或改写。"
-                )
-            if mandatory_blocks:
-                text = "\n\n".join((*mandatory_blocks, text))
-            if date_line not in text:
-                raise ValueError("最终生图 Prompt 缺少准确统计日期")
-            forbidden = [term for term in _FORBIDDEN_FINAL_PROMPT_TERMS if term in text]
-            if forbidden:
-                raise ValueError("最终生图 Prompt 仍含内部字段或主题 ID：" + "、".join(forbidden))
+                raise ValueError("最终生图 Prompt 未通过固定头尾合同：" + "；".join(last_violations[:8]))
 
             meta["api_call_count"] = analysis_calls + layout_calls + final_calls
 
@@ -506,7 +673,7 @@ class DeepSeekImagePromptBuilder:
         return (
             "【漫画分镜约束｜整张图只使用一种骨架】\n"
             + layout_prompt
-            + "\n漫画分镜只控制格子几何、阅读路径和镜头节拍；必须服从大主题。"
+            + "\n漫画分镜只控制格子几何、阅读路径和镜头节拍；不得改变当前视觉风格说明。"
         )
 
     def _chat(

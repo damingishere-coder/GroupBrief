@@ -9,7 +9,7 @@ from app.ai.image_themes import ResolvedImageTheme
 
 MAX_PROMPT_CHARS = 50_000
 _THEME_SECTION_RE = re.compile(
-    r"(?ms)^【大主题】\s*\n.*?(?=^【[^\n】]+】\s*$|\Z)"
+    r"(?ms)^【(?:大主题|视觉风格)】\s*\n.*?(?=^【[^\n】]+】\s*$|\Z)"
 )
 
 
@@ -31,12 +31,13 @@ def prompt_revision(text: str) -> str:
 
 
 def resolved_theme_text(theme: ResolvedImageTheme) -> str:
-    return f"{theme.display_name}：{theme.prompt}"
+    return theme.visible_text
 
 
 def replace_theme_section(prompt: str, theme: ResolvedImageTheme) -> str:
     """只替换规范主题段；不存在时在开头插入，不改写其他内容。"""
-    block = f"【大主题】\n{resolved_theme_text(theme)}\n\n"
+    heading = "大主题" if theme.has_explicit_style else "视觉风格"
+    block = f"【{heading}】\n{resolved_theme_text(theme)}\n\n"
     if _THEME_SECTION_RE.search(prompt):
         return _THEME_SECTION_RE.sub(block.rstrip(), prompt, count=1).strip() + "\n"
     return block + prompt.lstrip()

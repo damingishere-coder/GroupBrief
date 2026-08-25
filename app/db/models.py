@@ -38,7 +38,7 @@ class Group(SQLModel, table=True):
     send_target: str = ""  # 可选人工发送目标；为空时自动跟随 wechat_group_name
     ranking_template: str = "default"  # 排行榜模板名
     image_prompt_template: str = "default"  # 生图 Prompt 模板名
-    image_theme: str = "random_preset"  # 生图大主题键（默认每日随机）
+    image_theme: str = "ai_free"  # 生图主题键（默认由 AI 按聊天内容自由发挥）
     image_theme_custom: str = ""  # 自定义生图大主题（image_theme=custom 时使用）
     image_prompt_override: str = ""  # 本群专属 Prompt 模板；为空时继承全局模板
     wechat_send_enabled: bool = False  # 独立于生成开关，默认禁止自动对外发送

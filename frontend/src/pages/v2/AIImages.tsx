@@ -146,7 +146,7 @@ export default function AIImages() {
   const [defaultConfig, setDefaultConfig] = useState<GroupImagePromptConfig | null>(null);
   const [globalDefaultPrompt, setGlobalDefaultPrompt] = useState("");
   const [defaultTemplateError, setDefaultTemplateError] = useState("");
-  const [defaultTheme, setDefaultTheme] = useState("random_preset");
+  const [defaultTheme, setDefaultTheme] = useState("ai_free");
   const [defaultCustom, setDefaultCustom] = useState("");
   const [defaultThemeText, setDefaultThemeText] = useState("");
   const [defaultThemeError, setDefaultThemeError] = useState("");
@@ -160,7 +160,7 @@ export default function AIImages() {
   const [detail, setDetail] = useState<ImageDetail | null>(null);
   const [runPrompt, setRunPrompt] = useState<RunPromptConfig | null>(null);
   const [runDraft, setRunDraft] = useState("");
-  const [runTheme, setRunTheme] = useState("random_preset");
+  const [runTheme, setRunTheme] = useState("ai_free");
   const [runCustom, setRunCustom] = useState("");
   const [detailLoading, setDetailLoading] = useState(false);
   const [runSaving, setRunSaving] = useState(false);
@@ -256,7 +256,7 @@ export default function AIImages() {
         if (cancelled) return;
         setDefaultConfig(config);
         if (!defaultStyleTouchedRef.current) {
-          setDefaultTheme(config.image_theme || "random_preset");
+          setDefaultTheme(config.image_theme || "ai_free");
           const savedCustom = config.image_theme === "custom" ? config.image_theme_custom || "" : "";
           setDefaultCustom(savedCustom);
           setDefaultThemeText(config.resolved_theme?.theme_text || "");
@@ -354,7 +354,7 @@ export default function AIImages() {
         const prompt = promptResult.value;
         setRunPrompt(prompt);
         setRunDraft(prompt.content);
-        setRunTheme(prompt.image_theme || "random_preset");
+        setRunTheme(prompt.image_theme || "ai_free");
         setRunCustom(prompt.image_theme_custom || "");
       } else {
         const message = describeLoadError("当天 Prompt", promptResult.reason);
@@ -392,7 +392,7 @@ export default function AIImages() {
   }, [detail?.run.group_name, detail?.run.run_date, regenStatus]);
 
   const selectedDefaultGroup = groups.find((group) => group.id === defaultGroupId);
-  const savedDefaultTheme = defaultConfig?.image_theme || "random_preset";
+  const savedDefaultTheme = defaultConfig?.image_theme || "ai_free";
   const savedDefaultCustom = defaultConfig?.image_theme === "custom"
     ? defaultConfig.image_theme_custom.trim()
     : "";
@@ -441,7 +441,7 @@ export default function AIImages() {
       });
       const refreshed = await getGroupImagePrompt(defaultGroupId);
       setDefaultConfig(refreshed);
-      setDefaultTheme(refreshed.image_theme || "random_preset");
+      setDefaultTheme(refreshed.image_theme || "ai_free");
       setDefaultCustom(refreshed.image_theme === "custom" ? refreshed.image_theme_custom || "" : "");
       setDefaultThemeText(refreshed.resolved_theme?.theme_text || "");
       defaultStyleTouchedRef.current = false;
@@ -505,7 +505,7 @@ export default function AIImages() {
       const restored = await restoreRunPrompt(detail.run.group_name, detail.run.run_date);
       setRunPrompt(restored);
       setRunDraft(restored.content);
-      setRunTheme(restored.image_theme || "random_preset");
+      setRunTheme(restored.image_theme || "ai_free");
       setRunCustom(restored.image_theme_custom || "");
       toast("已恢复首次编辑前的 Prompt");
     } catch (reason) {
@@ -528,10 +528,10 @@ export default function AIImages() {
       setDetail((current) => current ? { ...current, run: rebuilt.run } : current);
       setRunPrompt(prompt);
       setRunDraft(prompt.content);
-      setRunTheme(prompt.image_theme || "random_preset");
+      setRunTheme(prompt.image_theme || "ai_free");
       setRunCustom(prompt.image_theme_custom || "");
       loadRuns();
-      toast("已从当天 messages.json 重建 Prompt；没有重新读取微信，也没有生图");
+      toast("已复用当天已校验选题和既定分镜重建 Prompt；没有重新读取微信，也没有生图");
     } catch (reason) {
       toast(`Prompt 重建失败：${String(reason)}`);
     } finally {
@@ -585,7 +585,7 @@ export default function AIImages() {
     <div className="ai-images-page">
       <section className="ai-images-theme-card" aria-label="群聊指定风格">
         <div className="ai-images-theme-heading">
-          <div><h2>设置群聊生图风格</h2><p>可每日随机，也可固定一个风格家族并保留每天的细微变化。</p></div>
+          <div><h2>设置群聊生图风格</h2><p>默认由 AI 按聊天内容自由发挥；手动选择后才注入预设或自定义风格。</p></div>
           <Sparkle size={22} />
         </div>
         {catalogLoading && !groups.length ? <LoadingState label="正在读取群配置与主题目录…" /> : groupsError && !groups.length ? <EmptyState title="群配置加载失败" description={groupsError} action={<Button tone="secondary" onClick={loadCatalogs}>重新加载</Button>} /> : !groups.length ? <EmptyState title="暂无群配置" description="当前数据库中确实没有群，请先在群聊配置中创建群。" /> : (
@@ -670,7 +670,7 @@ export default function AIImages() {
               </div>}
               <div className="ai-images-asset-grid">
                 <div className="ai-images-preview-card"><div className="ai-images-content-heading"><h3>日报图片</h3><span>daily_image.png</span></div>{detail.files.includes("daily_image.png") && !imageLoadError ? <ImagePreviewTrigger src={currentImageSrc} alt="真实日报图片" imageClassName="ai-images-real-image" className="ai-images-real-image-trigger" onError={() => { setImageLoadError(true); setImageViewerOpen(false); }} onOpen={() => setImageViewerOpen(true)} /> : <EmptyState title="尚无可读图片" description="重新生图失败时会保留旧图；没有旧图时这里保持为空。" />}</div>
-                {runPrompt ? <div className="ai-images-prompt-card ai-images-run-editor"><div className="ai-images-content-heading"><h3>当天生图 Prompt</h3><Button tone="ghost" className="ui-button-compact" onClick={() => copyText(runDraft, toast)} disabled={!runDraft}><Copy size={16} />复制</Button></div><textarea value={runDraft} onChange={(event) => setRunDraft(event.target.value)} /><div className="ai-images-run-actions"><Button tone="ghost" onClick={restoreCurrentPrompt} busy={restoring} disabled={!runPrompt.has_original}><ArrowCounterClockwise size={16} />恢复最初版本</Button><Button tone="secondary" onClick={saveCurrentPrompt} busy={runSaving} disabled={!runDirty}><FloppyDisk size={16} />保存 Prompt</Button><Button tone="secondary" onClick={rebuildCurrentPrompt} busy={rebuildingPrompt} disabled={runDirty || ["queued", "running"].includes(regenStatus)}><Sparkle size={16} />从当天消息重建 Prompt</Button><Button tone="primary" onClick={regenerate} busy={regenerating} disabled={runDirty || rebuildingPrompt || ["queued", "running"].includes(regenStatus)}><Play size={16} />按现有 Prompt 重画</Button></div></div> : <div className="ai-images-prompt-card"><EmptyState title="当天 Prompt 加载失败" description={runPromptError || "当天 Prompt 暂不可用；日报图片和运行状态仍可查看。"} action={<Button tone="secondary" onClick={() => setDetailReloadVersion((current) => current + 1)}>重新读取 Prompt</Button>} /></div>}
+                {runPrompt ? <div className="ai-images-prompt-card ai-images-run-editor"><div className="ai-images-content-heading"><h3>当天生图 Prompt</h3><Button tone="ghost" className="ui-button-compact" onClick={() => copyText(runDraft, toast)} disabled={!runDraft}><Copy size={16} />复制</Button></div><textarea value={runDraft} onChange={(event) => setRunDraft(event.target.value)} /><div className="ai-images-run-actions"><Button tone="ghost" onClick={restoreCurrentPrompt} busy={restoring} disabled={!runPrompt.has_original}><ArrowCounterClockwise size={16} />恢复最初版本</Button><Button tone="secondary" onClick={saveCurrentPrompt} busy={runSaving} disabled={!runDirty}><FloppyDisk size={16} />保存 Prompt</Button><Button tone="secondary" onClick={rebuildCurrentPrompt} busy={rebuildingPrompt} disabled={runDirty || ["queued", "running"].includes(regenStatus)}><Sparkle size={16} />复用已校验选题重建 Prompt</Button><Button tone="primary" onClick={regenerate} busy={regenerating} disabled={runDirty || rebuildingPrompt || ["queued", "running"].includes(regenStatus)}><Play size={16} />按现有 Prompt 重画</Button></div></div> : <div className="ai-images-prompt-card"><EmptyState title="当天 Prompt 加载失败" description={runPromptError || "当天 Prompt 暂不可用；日报图片和运行状态仍可查看。"} action={<Button tone="secondary" onClick={() => setDetailReloadVersion((current) => current + 1)}>重新读取 Prompt</Button>} /></div>}
               </div>
               {regenStatus === "ready_for_review" && <div className="ai-images-review-actions"><WarningCircle size={18} /><span>请先检查新图。只有再次确认后才会发送文字和图片。</span><Button tone="primary" onClick={() => setSendConfirmOpen(true)}><PaperPlaneTilt size={17} />发送 / 重新发送</Button></div>}
               {detail.run.error && <div className="ai-images-run-error">主任务错误：{String(detail.run.error)}</div>}

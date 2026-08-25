@@ -219,7 +219,7 @@ def test_group_v2_defaults():
     assert g.send_target == ""
     assert g.ranking_template == "default"
     assert g.image_prompt_template == "default"
-    assert g.image_theme == "random_preset"
+    assert g.image_theme == "ai_free"
     assert g.image_theme_custom == ""
 
 
@@ -241,4 +241,4 @@ def test_existing_groups_table_gets_image_theme_columns(tmp_path, monkeypatch):
             "SELECT image_theme, image_theme_custom FROM groups WHERE id = 1"
         ).one()
     assert {"image_theme", "image_theme_custom"}.issubset(columns)
-    assert tuple(row) == ("random_preset", "")
+    assert tuple(row) == ("ai_free", "")

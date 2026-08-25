@@ -302,6 +302,7 @@ class DailyPipeline:
         force: bool,
         *,
         refresh_messages: bool = False,
+        reuse_persisted_topic_selection: bool = False,
     ) -> dict:
         group_name = group.display_name or group.wechat_group_name
         store = self.store
@@ -332,6 +333,7 @@ class DailyPipeline:
 
         # 防重复：同一群同一周期已到终态
         run = store.load_run(group_name, run_date)
+        persisted_prompt_meta = run.get("prompt_meta") if isinstance(run.get("prompt_meta"), dict) else {}
         if not force and not refresh_messages and run.get("status") in (IMAGE_READY, READY_TO_SEND, SENT):
             logger.info("群 %s %s 已到 %s，跳过生成", group_name, run_date, run.get("status"))
             return finish({"group_name": group_name, "status": "skipped", "detail": f"已{run.get('status')}"})
@@ -538,6 +540,11 @@ class DailyPipeline:
         prompt_msgs = [m for m in messages if RankingEngine._countable(m)]
         prompt_input = PromptInput(
             group_name=group_name,
+            visible_group_name=str(
+                run.get("wechat_group_name")
+                or group.wechat_group_name
+                or group_name
+            ).strip(),
             group_id=str(group.id or group.wechat_group_id or group_name),
             run_date=run_date,
             period_start=period_start,
@@ -551,7 +558,13 @@ class DailyPipeline:
             image_theme_custom=group.image_theme_custom,
             template_override=getattr(group, "image_prompt_override", "") or "",
             previous_theme_signature=store.previous_theme_signature(group_name, run_date),
-            persisted_theme_meta=run.get("prompt_meta") if isinstance(run.get("prompt_meta"), dict) else None,
+            persisted_theme_meta=persisted_prompt_meta or None,
+            persisted_topic_selection=(
+                persisted_prompt_meta.get("topic_selection")
+                if reuse_persisted_topic_selection
+                and isinstance(persisted_prompt_meta.get("topic_selection"), dict)
+                else None
+            ),
             recent_layout_history=store.recent_layout_history(group_name, run_date, limit=3),
         )
         prompt_started = perf_counter()
@@ -1122,6 +1135,14 @@ class DailyPipeline:
                 "error_type": "IMAGE_REGEN_BUSY",
                 "detail": "该运行正在生图，请完成后再重建 Prompt",
             }
+        current_prompt_meta = current.get("prompt_meta") if isinstance(current.get("prompt_meta"), dict) else {}
+        if not isinstance(current_prompt_meta.get("topic_selection"), dict):
+            return {
+                "group_name": group_name,
+                "status": "failed",
+                "error_type": "TOPIC_SELECTION_SNAPSHOT_INVALID",
+                "detail": "run.json 缺少已校验选题总结；已停止且不会重新选题",
+            }
 
         keep_sent = current.get("status") == SENT
         self.store.update(
@@ -1143,11 +1164,13 @@ class DailyPipeline:
             run_date,
             force=True,
             refresh_messages=False,
+            reuse_persisted_topic_selection=True,
         )
         if result.get("status") == "failed":
             self.store.update(
                 group_name,
                 run_date,
+                status=SENT if keep_sent else FAILED,
                 prompt_rebuild_status="failed",
                 prompt_rebuild_error=str(result.get("detail") or result.get("error") or "重建失败")[:500],
                 send_hold=True,
@@ -1170,7 +1193,7 @@ class DailyPipeline:
         return {
             "group_name": group_name,
             "status": "prompt_ready",
-            "detail": "已从当天 messages.json 重建排行榜和 Prompt；未取数，未生图",
+            "detail": "已复用 run.json 中已校验选题和既定分镜重建 Prompt；未取数，未生图",
         }
 
     def force_send(

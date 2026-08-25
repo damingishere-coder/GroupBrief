@@ -61,10 +61,10 @@ def test_v2_image_theme_catalog_shape_and_order():
         response = client.get("/api/v2/image-themes")
         assert response.status_code == 200
         themes = response.json()["themes"]
-        assert [item["key"] for item in themes[:2]] == ["random_preset", "custom"]
-        assert len(themes) == 24
+        assert [item["key"] for item in themes[:3]] == ["ai_free", "random_preset", "custom"]
+        assert len(themes) == 25
         assert sum(item["kind"] == "preset" for item in themes) == 22
-        assert themes[2]["key"] == "silkscreen_editorial"
+        assert themes[3]["key"] == "silkscreen_editorial"
         assert themes[-1]["key"] == "mineral_pigment"
         assert all(set(item) == {"key", "label", "description", "kind", "category", "swatches", "variation_count"} for item in themes)
 

@@ -63,15 +63,16 @@ EXPECTED_SWATCHES = {
 }
 
 
-def test_public_catalog_has_two_modes_and_22_stable_presets():
+def test_public_catalog_has_three_modes_and_22_stable_presets():
     validate_style_catalog()
     options = public_image_theme_options()
-    assert [item["key"] for item in options[:2]] == ["random_preset", "custom"]
-    assert all(item["kind"] == "mode" for item in options[:2])
-    assert [item["key"] for item in options[2:]] == EXPECTED_PRESET_KEYS
-    assert all(item["kind"] == "preset" for item in options[2:])
-    assert len(options) == 24
-    assert options[0]["variation_count"] == 352
+    assert [item["key"] for item in options[:3]] == ["ai_free", "random_preset", "custom"]
+    assert all(item["kind"] == "mode" for item in options[:3])
+    assert [item["key"] for item in options[3:]] == EXPECTED_PRESET_KEYS
+    assert all(item["kind"] == "preset" for item in options[3:])
+    assert len(options) == 25
+    assert options[0]["label"] == "AI 自由发挥"
+    assert options[1]["variation_count"] == 352
 
 
 def test_every_family_has_16_variations_valid_swatches_and_safe_visual_language():

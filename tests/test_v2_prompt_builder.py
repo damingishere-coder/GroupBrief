@@ -152,9 +152,30 @@ class FakeDeepSeek:
                     "message_ids": [match],
                 }]
             }, ensure_ascii=False)
-        # 模拟：按输出结构返回
-        structure_block = system.rsplit("【输出结构】", 1)[-1]
-        return f"生成成功\n{structure_block[:60]}"
+        # 模拟：返回满足固定头尾合同的最终 Prompt；故事、主题和分镜由构建器补齐。
+        return """生成成功
+【群名称】
+示例交流群 A
+
+【固定画面日期】
+统计日期：2026-08-17
+
+【统计时间】
+2026-08-17 00:00:00 ~ 2026-08-17 23:59:59
+
+【数据】
+3 条消息
+2 人发言
+
+【主标题】
+票房梗在群里起飞
+
+【副标题】
+张三和李四接住真实对话
+
+【底部总结】
+两句真话把今天聊成了漫画
+"""
 
 
 class TruncatedOnceDeepSeek(FakeDeepSeek):
@@ -361,7 +382,8 @@ def test_default_file_and_builtin_prompt_contract_are_synchronized():
         "不超过 24 个汉字",
         "不超过 22 个汉字",
         "景别 + 人物动作 + 群友反应或道具特写 + 逐字气泡",
-        "装饰 → 底部总结 → 副标题 → 次要气泡",
+        "装饰 → 次要气泡 → 次要反应细节",
+        "群名称、完整统计时段、主标题、副标题、底部总结",
         "【重新生图不变量】",
         "逐字且恰好出现一次",
     ):
@@ -393,7 +415,7 @@ def test_grounded_story_material_enforces_visible_text_budgets_and_shot_contract
     assert "恰好出现一次" in material
 
 
-def test_custom_theme_and_ai_free_theme_are_explicitly_injected():
+def test_custom_theme_is_injected_but_ai_free_has_no_style_intervention():
     b = _builder()
     custom = b.build(_input(image_theme="custom", image_theme_custom="夏日海边漫画"))
     assert custom.success
@@ -405,7 +427,57 @@ def test_custom_theme_and_ai_free_theme_are_explicitly_injected():
     b2 = _builder()
     ai_free = b2.build(_input(image_theme="ai_free"))
     assert ai_free.success
-    assert "统一视觉主题" in b2._provider.calls[-1][0]
+    final_system = b2._provider.calls[-1][0]
+    assert "根据当天真实聊天内容自由选择统一视觉风格。" in final_system
+    assert "大主题约束｜全图最高视觉约束" not in final_system
+    assert ai_free.meta["style_intervention"] is False
+    assert ai_free.prompt.count("【视觉风格】") == 1
+    assert ai_free.prompt.count("根据当天真实聊天内容自由选择统一视觉风格。") == 1
+    assert "【大主题】" not in ai_free.prompt
+
+
+def test_persisted_topic_selection_and_storyboard_skip_analysis_calls():
+    first = _builder().build(_input(image_theme="ai_free"))
+    assert first.success
+
+    fake = FakeDeepSeek()
+    data = _input(image_theme="ai_free", persisted_theme_meta=first.meta)
+    data.persisted_topic_selection = first.meta["topic_selection"]
+    rebuilt = _builder(fake=fake).build(data)
+
+    assert rebuilt.success
+    assert rebuilt.meta["mode"] == "persisted_topic_selection"
+    assert rebuilt.meta["topic_selection_reused"] is True
+    assert rebuilt.meta["layout_reused"] is True
+    assert rebuilt.meta["api_call_count"] == 1
+    assert len(fake.calls) == 1
+    assert "大主题约束｜全图最高视觉约束" not in fake.calls[0][0]
+
+
+def test_final_prompt_rejects_conflicting_header_footer_instructions():
+    class ConflictingFinalPrompt(FakeDeepSeek):
+        def _chat(self, messages: list[dict], **kwargs) -> str:
+            if kwargs.get("response_format") == "json_object":
+                return super()._chat(messages, **kwargs)
+            self.calls.append((messages[0]["content"], messages[1]["content"]))
+            return """【群名称】
+示例交流群 A，仅作背景识别，不作为画面文字绘制。
+【统计时间】
+2026-08-17 00:00:00 ~ 2026-08-17 23:59:59
+【数据】
+3 条消息
+2 人发言
+【主标题】
+真实标题
+【副标题】
+不设置、不绘制
+【底部总结】
+不绘制，避免增加文字
+"""
+
+    out = _builder(fake=ConflictingFinalPrompt()).build(_input(image_theme="ai_free"))
+    assert out.success is False
+    assert "固定头尾合同" in out.error
 
 
 def test_invalid_custom_theme_fails_before_model_call():

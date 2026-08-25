@@ -61,13 +61,25 @@ class ResolvedImageTheme:
     style_seed: str = ""
     catalog_version: str = ""
 
+    @property
+    def has_explicit_style(self) -> bool:
+        """只有手动预设、每日随机或自定义主题才注入具体风格约束。"""
+        return self.requested_key != AI_FREE_THEME
+
+    @property
+    def visible_text(self) -> str:
+        """写入 Prompt 的风格文本；AI 自由发挥只保留一条中性说明。"""
+        if not self.has_explicit_style:
+            return self.prompt
+        return f"{self.display_name}：{self.prompt}"
+
     def to_meta(self) -> dict[str, str]:
         return {
             "requested_theme": self.requested_key,
             "resolved_theme": self.actual_key,
             "theme_display_name": self.display_name,
             "theme_prompt": self.prompt,
-            "theme_text": f"{self.display_name}：{self.prompt}",
+            "theme_text": self.visible_text,
             "theme_custom": self.custom_text,
             "style_signature": self.style_signature,
             "style_seed": self.style_seed,
@@ -75,7 +87,7 @@ class ResolvedImageTheme:
         }
 
 
-DEFAULT_IMAGE_THEME = "random_preset"
+DEFAULT_IMAGE_THEME = "ai_free"
 RANDOM_PRESET_THEME = "random_preset"
 AI_FREE_THEME = "ai_free"
 CUSTOM_THEME = "custom"
@@ -113,8 +125,8 @@ IMAGE_THEME_MODE_DEFINITIONS: dict[str, ImageThemeDefinition] = {
         kind="mode", category="模式", variation_count=352,
     ),
     AI_FREE_THEME: ImageThemeDefinition(
-        AI_FREE_THEME, "AI 自由发挥（兼容）", "历史配置兼容模式",
-        "根据当天真实聊天选择一个统一视觉主题；不得新增或改变聊天事实。",
+        AI_FREE_THEME, "AI 自由发挥", "默认不指定画材、配色、纹理或光影",
+        "根据当天真实聊天内容自由选择统一视觉风格。",
         kind="mode", category="模式",
     ),
     CUSTOM_THEME: ImageThemeDefinition(
@@ -395,8 +407,12 @@ def _public_option(definition: ImageThemeDefinition) -> dict[str, object]:
 
 
 def public_image_theme_options() -> list[dict[str, object]]:
-    """返回两种选择模式和稳定排序的 22 个公开风格家族。"""
-    modes = (IMAGE_THEME_MODE_DEFINITIONS[RANDOM_PRESET_THEME], IMAGE_THEME_MODE_DEFINITIONS[CUSTOM_THEME])
+    """返回三种选择模式和稳定排序的 22 个公开风格家族。"""
+    modes = (
+        IMAGE_THEME_MODE_DEFINITIONS[AI_FREE_THEME],
+        IMAGE_THEME_MODE_DEFINITIONS[RANDOM_PRESET_THEME],
+        IMAGE_THEME_MODE_DEFINITIONS[CUSTOM_THEME],
+    )
     presets = (
         ImageThemeDefinition(
             family.key, family.label, family.description, "", kind="preset", category=family.category,

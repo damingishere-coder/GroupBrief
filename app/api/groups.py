@@ -49,7 +49,7 @@ class GroupCreate(BaseModel):
     send_target: str = ""
     ranking_template: str = "default"
     image_prompt_template: str = "default"
-    image_theme: str = "random_preset"
+    image_theme: str = DEFAULT_IMAGE_THEME
     image_theme_custom: str = ""
     image_prompt_override: str = ""
     wechat_send_enabled: bool = False
@@ -134,7 +134,7 @@ def _group_prompt_payload(group: Group) -> dict:
     preview = render_image_prompt_template(
         _strip_html_comments(content),
         {
-            "group_name": group.display_name or group.wechat_group_name,
+            "group_name": group.wechat_group_name or group.display_name,
             "period_start": "（生成时写入统计开始时间）",
             "period_end": "（生成时写入统计结束时间）",
             "message_count": "（生成时写入消息数）",
@@ -206,7 +206,7 @@ def create_group(payload: GroupCreate, session: Session = Depends(repo.get_sessi
         )
     values["send_target"] = str(values.get("send_target") or "").strip()
     values["image_theme"], values["image_theme_custom"] = _validate_group_theme(
-        values.get("image_theme", "random_preset"), values.get("image_theme_custom", "")
+        values.get("image_theme", DEFAULT_IMAGE_THEME), values.get("image_theme_custom", "")
     )
     values["image_prompt_override"] = _validate_prompt_override(values.get("image_prompt_override", ""))
     wechat_group_id = str(values.get("wechat_group_id") or "").strip()

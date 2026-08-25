@@ -116,7 +116,40 @@ class FakePrompt:
         self.inputs.append(data)
         if self.fail:
             return PromptOutput(False, error="DeepSeek 失败")
-        return PromptOutput(True, "【任务】\n生成图片\n【主标题】今天热聊", meta={"mode": "single"})
+        topic_selection = data.persisted_topic_selection or {
+            "topic_selection_version": "4.0",
+            "selected_topic_ids": ["topic-01", "topic-02"],
+            "selected_count": 2,
+            "candidates": [
+                {
+                    "topic_id": "topic-01", "selected": True, "title": "票房",
+                    "summary": "张三聊票房", "message_ids": ["m1"],
+                    "quotes": ["今天聊了票房"], "visible_participants": ["张三"],
+                },
+                {
+                    "topic_id": "topic-02", "selected": True, "title": "牛来",
+                    "summary": "李四回应票房", "message_ids": ["m2"],
+                    "quotes": ["《牛来》破500万"], "visible_participants": ["李四"],
+                },
+            ],
+        }
+        return PromptOutput(
+            True,
+            "【任务】\n生成图片\n【主标题】今天热聊",
+            meta={
+                "mode": "persisted_topic_selection" if data.persisted_topic_selection else "single",
+                "topic_selection": topic_selection,
+                "layout_catalog_version": "comic-panels-v3",
+                "layout_id": "split_focus",
+                "structure_mode": "dual_rhythm",
+                "featured_topic_ids": ["topic-01", "topic-02"],
+                "topic_order": ["topic-01", "topic-02"],
+                "panel_beats": [
+                    {"topic_id": "topic-01", "shots": ["establishing", "reaction"]},
+                    {"topic_id": "topic-02", "shots": ["dialogue"]},
+                ],
+            },
+        )
 
 
 class FakeGenerator:
@@ -333,6 +366,8 @@ def test_refresh_preserves_sent_status_and_sent_at_without_prompt_image_or_send(
 def test_rebuild_prompt_uses_saved_snapshot_without_fetch_or_image(tmp_path):
     pipeline, group = _make_pipeline(tmp_path)
     pipeline.generate_all(run_date="2026-08-18")
+    sent_at = "2026-08-18T09:00:00+08:00"
+    pipeline.store.update("测试群", "2026-08-18", status=SENT, sent_at=sent_at)
     snapshot_path = pipeline.store.messages_path("测试群", "2026-08-18")
     image_path = pipeline.store.image_path("测试群", "2026-08-18")
     snapshot_before = snapshot_path.read_bytes()
@@ -347,14 +382,39 @@ def test_rebuild_prompt_uses_saved_snapshot_without_fetch_or_image(tmp_path):
     assert result["status"] == "prompt_ready"
     assert source.fetch_calls == 0
     assert len(prompt.inputs) == 1
+    assert prompt.inputs[0].persisted_topic_selection["selected_topic_ids"] == ["topic-01", "topic-02"]
     assert generator.calls == []
     assert snapshot_path.read_bytes() == snapshot_before
     assert image_path.read_bytes() == image_before
     run = pipeline2.store.load_run("测试群", "2026-08-18")
-    assert run["status"] == PROMPT_READY
+    assert run["status"] == SENT
+    assert run["sent_at"] == sent_at
     assert run["message_snapshot_reused"] is True
     assert run["prompt_rebuild_status"] == "ready_for_review"
     assert run["image_regen_status"] == "prompt_rebuilt"
+    assert run["send_hold"] is True
+
+
+def test_rebuild_failure_preserves_sent_status_and_sent_at(tmp_path):
+    pipeline, group = _make_pipeline(tmp_path)
+    pipeline.generate_all(run_date="2026-08-18")
+    sent_at = "2026-08-18T09:00:00+08:00"
+    pipeline.store.update("测试群", "2026-08-18", status=SENT, sent_at=sent_at)
+
+    pipeline2, _ = _make_pipeline(
+        tmp_path,
+        source=FakeSource(fail=True),
+        prompt=FakePrompt(fail=True),
+        gen=FakeGenerator(),
+    )
+    result = pipeline2.rebuild_prompt_from_snapshot(group.id, "2026-08-18")
+    run = pipeline2.store.load_run("测试群", "2026-08-18")
+
+    assert result["status"] == "failed"
+    assert pipeline2.data_source.fetch_calls == 0
+    assert run["status"] == SENT
+    assert run["sent_at"] == sent_at
+    assert run["prompt_rebuild_status"] == "failed"
     assert run["send_hold"] is True
 
 
@@ -449,6 +509,27 @@ def test_pipeline_passes_group_theme_and_records_request_metadata(tmp_path):
     run = pipeline.store.load_run("测试群", "2026-08-18")
     assert run["image_theme"] == "random_preset"
     assert run["image_theme_custom"] == "可切回的旧主题"
+
+
+def test_prompt_visible_group_name_prefers_name_saved_in_run(tmp_path):
+    prompt = FakePrompt()
+    pipeline, group = _make_pipeline(tmp_path, prompt=prompt, image_enabled=False)
+    group.wechat_group_name = "数据库实时名 V5"
+    pipeline.store.save_run(
+        "测试群",
+        "2026-08-18",
+        {"status": "PENDING", "wechat_group_name": "运行已同步名 V4"},
+    )
+    window = pipeline.period_resolver.resolve(
+        run_date=date(2026, 8, 18),
+        timezone=pipeline.settings.app_timezone,
+    )
+
+    result = pipeline._generate_one(group, window, "2026-08-18", force=True)
+
+    assert result["status"] == "ready_to_send"
+    assert prompt.inputs[0].group_name == "测试群"
+    assert prompt.inputs[0].visible_group_name == "运行已同步名 V4"
 
 
 def test_generate_one_refreshes_current_image_switch_before_decision(tmp_path):
