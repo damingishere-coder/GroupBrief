@@ -3,6 +3,7 @@ from __future__ import annotations
 from fastapi.testclient import TestClient
 
 from app.main import app
+from app.ai.prompt_templates import DEFAULT_IMAGE_PROMPT_TEMPLATE
 
 client = TestClient(app)
 
@@ -24,7 +25,10 @@ def test_group_prompt_override_is_isolated_and_not_exposed_in_list():
             second_config = client.get(f"/api/groups/{second}/image-prompt").json()
             assert first_config["source"] == second_config["source"] == "global"
 
-            custom = "【任务】\n为 {{group_name}} 生成真实群报。\n【大主题】\n{{image_theme}}\n"
+            custom = DEFAULT_IMAGE_PROMPT_TEMPLATE.replace(
+                "生成一张竖版微信群日报漫画信息图。",
+                "为 {{group_name}} 生成一张竖版微信群日报漫画信息图。",
+            )
             saved = client.put(
                 f"/api/groups/{first}/image-prompt",
                 json={
@@ -82,7 +86,10 @@ def test_group_prompt_revision_conflict_returns_409():
 
 
 def test_named_theme_preview_only_replaces_canonical_theme_section():
-    original = "【大主题】\n旧主题\n\n【固定画面日期】\n统计日期：2026-08-23\n\n【事件】\n张三说今天完成 3 项工作。\n"
+    original = DEFAULT_IMAGE_PROMPT_TEMPLATE.replace(
+        "{{overall_visual}}",
+        "固定群聊漫画要求。\n\n根据当天真实聊天内容自由选择统一视觉风格。",
+    ).replace("{{panels}}", "【版面1】\n张三说今天完成 3 项工作。")
     with client:
         response = client.post(
             "/api/v2/image-themes/resolve",
@@ -97,6 +104,4 @@ def test_named_theme_preview_only_replaces_canonical_theme_section():
         resolved = response.json()
         assert resolved["actual_key"] == "gouache_editorial"
         assert "不透明水粉社论" in resolved["prompt"]
-        assert "统计日期：2026-08-23" in resolved["prompt"]
         assert "张三说今天完成 3 项工作。" in resolved["prompt"]
-        assert "旧主题" not in resolved["prompt"]

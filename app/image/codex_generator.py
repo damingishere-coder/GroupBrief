@@ -1,8 +1,8 @@
 r"""Codex CLI ``$imagegen`` 图片生成器。
 
 主链路使用官方 ``codex exec --json``，认证目录与图片目录统一由
-``CODEX_HOME`` 派生。生成请求通过 Windows 命名互斥锁跨进程串行；只接收
-本次执行后出现且能唯一归属的图片，验证后再原子替换正式文件。
+``CODEX_HOME`` 派生。生成请求通过进程级与 Windows 命名信号量受控并发；
+自动流程只接收带匹配 job_id 的结构化回执，其他候选仅供人工恢复。
 """
 
 from __future__ import annotations
@@ -11,6 +11,7 @@ import ctypes
 import hashlib
 import json
 import os
+import re
 import signal
 import shutil
 import subprocess
@@ -22,6 +23,7 @@ from pathlib import Path
 from typing import Callable, Iterator
 
 from app.config.settings import Settings, get_settings
+from app.ai.concurrency import bounded_slot, normalized_limit
 from app.core.logging import get_logger
 from app.image.image_task import ImageTaskResult, detect_image_format, verify_image
 
@@ -31,12 +33,18 @@ _IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", "
 _POLL_INTERVAL = 0.5
 _RECOVERY_POLL_ROUNDS = 30
 _MAX_ATTEMPTS = 2
-_ATTEMPT_MANIFEST = ".codex-image-attempt.json"
+_ATTEMPT_MANIFEST = "attempt.json"
+_JOB_DIR = ".imagegen-jobs"
 _RESULT_SCHEMA = Path(__file__).with_name("codex_image_result.schema.json")
-_PROCESS_IMAGE_LOCK = threading.Lock()
-_MUTEX_NAME = "Local\\GroupBrief.CodexImagegen"
+_PROCESS_IMAGE_LOCK = threading.Lock()  # 兼容旧测试/扩展，不再作为全局单槽锁。
+_MUTEX_NAME = "Local\\GroupBrief.CodexImagegen.v2"
 _WAIT_OBJECT_0 = 0
 _WAIT_ABANDONED = 0x80
+_JOB_ID_RE = re.compile(r"^[A-Za-z0-9_-]{8,80}$")
+
+
+def re_fullmatch_job_id(value: str) -> bool:
+    return bool(_JOB_ID_RE.fullmatch(value or ""))
 
 
 def _terminate_process_tree(process: subprocess.Popen) -> None:
@@ -116,28 +124,49 @@ def _run_codex_process(
 
 
 @contextmanager
-def _imagegen_mutex(timeout_seconds: float) -> Iterator[None]:
-    """防止定时、手动和重生成任务跨线程/跨进程同时认领图片。"""
-    if not _PROCESS_IMAGE_LOCK.acquire(timeout=max(timeout_seconds, 0.1)):
-        raise TimeoutError("另一个 Codex 生图任务正在运行")
+def _imagegen_mutex(timeout_seconds: float, limit: int = 1) -> Iterator[None]:
+    """兼容旧函数名的跨进程受控并发槽。"""
+    limit = normalized_limit(limit, 1, maximum=6)
     handle = None
     owns_handle = False
-    try:
-        if os.name == "nt":
-            handle = ctypes.windll.kernel32.CreateMutexW(None, False, _MUTEX_NAME)
-            if not handle:
-                raise OSError("无法创建 Codex 生图互斥锁")
-            wait_code = ctypes.windll.kernel32.WaitForSingleObject(handle, int(timeout_seconds * 1000))
-            if wait_code not in (_WAIT_OBJECT_0, _WAIT_ABANDONED):
-                raise TimeoutError("等待 Codex 生图互斥锁超时")
-            owns_handle = True
-        yield
-    finally:
-        if handle:
-            if owns_handle:
-                ctypes.windll.kernel32.ReleaseMutex(handle)
-            ctypes.windll.kernel32.CloseHandle(handle)
-        _PROCESS_IMAGE_LOCK.release()
+    with bounded_slot("codex_image_request", limit):
+        try:
+            if os.name == "nt":
+                kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+                kernel32.CreateSemaphoreW.argtypes = [
+                    ctypes.c_void_p,
+                    ctypes.c_long,
+                    ctypes.c_long,
+                    ctypes.c_wchar_p,
+                ]
+                kernel32.CreateSemaphoreW.restype = ctypes.c_void_p
+                kernel32.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+                kernel32.WaitForSingleObject.restype = ctypes.c_uint
+                kernel32.ReleaseSemaphore.argtypes = [
+                    ctypes.c_void_p,
+                    ctypes.c_long,
+                    ctypes.c_void_p,
+                ]
+                kernel32.ReleaseSemaphore.restype = ctypes.c_int
+                kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+                kernel32.CloseHandle.restype = ctypes.c_int
+                handle = kernel32.CreateSemaphoreW(
+                    None, limit, limit, _MUTEX_NAME
+                )
+                if not handle:
+                    raise OSError("无法创建 Codex 生图并发信号量")
+                wait_code = kernel32.WaitForSingleObject(
+                    handle, int(timeout_seconds * 1000)
+                )
+                if wait_code not in (_WAIT_OBJECT_0, _WAIT_ABANDONED):
+                    raise TimeoutError("等待 Codex 生图并发槽超时")
+                owns_handle = True
+            yield
+        finally:
+            if handle:
+                if owns_handle:
+                    kernel32.ReleaseSemaphore(handle, 1, None)
+                kernel32.CloseHandle(handle)
 
 
 class CodexImageGenerator:
@@ -239,6 +268,9 @@ class CodexImageGenerator:
         output_path: Path,
         *,
         force: bool = False,
+        job_id: str = "",
+        revision: int = 1,
+        prompt_sha256: str = "",
     ) -> ImageTaskResult:
         # 配置/可执行性错误不应排队等待全局生图锁；进入锁后仍会再次检查，
         # 以覆盖等待期间 CLI 状态发生变化的情况。
@@ -246,11 +278,17 @@ class CodexImageGenerator:
         if not ok:
             return ImageTaskResult(False, error=detail, detail={"stage": "health"})
         try:
-            with _imagegen_mutex((self.timeout * _MAX_ATTEMPTS) + 60):
+            with _imagegen_mutex(
+                (self.timeout * _MAX_ATTEMPTS) + 60,
+                normalized_limit(self.settings.image_generation_concurrency, 2, maximum=6),
+            ):
                 return self._generate_locked(
                     Path(prompt_file),
                     Path(output_path),
                     force=force,
+                    job_id=job_id,
+                    revision=revision,
+                    prompt_sha256=prompt_sha256,
                 )
         except TimeoutError as exc:
             return ImageTaskResult(False, error=str(exc), detail={"stage": "mutex"})
@@ -264,6 +302,9 @@ class CodexImageGenerator:
         output_path: Path,
         *,
         force: bool = False,
+        job_id: str = "",
+        revision: int = 1,
+        prompt_sha256: str = "",
     ) -> ImageTaskResult:
         ok, detail = self.health_check()
         if not ok:
@@ -290,10 +331,30 @@ class CodexImageGenerator:
             prompt_text = prompt_file.read_text(encoding="utf-8")
         except (OSError, UnicodeError) as exc:
             return ImageTaskResult(False, error=f"无法读取 image_prompt.txt：{exc}", detail={"stage": "input"})
+        required_size = (
+            (1024, 1536)
+            if "1024×1536" in prompt_text or "1024x1536" in prompt_text.lower()
+            else None
+        )
+
+        # 任务哈希按磁盘原始字节创建；Windows 的 read_text 会把 CRLF 规范化
+        # 为 LF，不能再对解码后的文本计算哈希，否则内容未变也会被误判。
+        actual_prompt_sha256 = hashlib.sha256(prompt_file.read_bytes()).hexdigest()
+        if prompt_sha256 and prompt_sha256.lower() != actual_prompt_sha256:
+            return ImageTaskResult(
+                False,
+                error="Prompt 内容已变化，拒绝使用旧生图任务",
+                detail={"stage": "input", "prompt_sha256": actual_prompt_sha256},
+            )
+        job_id = (job_id or uuid.uuid4().hex).strip()
+        if not re_fullmatch_job_id(job_id):
+            return ImageTaskResult(False, error="生图 job_id 格式无效", detail={"stage": "input"})
 
         task_dir = prompt_file.parent.resolve()
         output_path = output_path.resolve()
-        manifest_path = task_dir / _ATTEMPT_MANIFEST
+        job_dir = task_dir / _JOB_DIR / job_id
+        job_dir.mkdir(parents=True, exist_ok=True)
+        manifest_path = job_dir / _ATTEMPT_MANIFEST
         history: list[dict] = []
         next_attempt = 1
 
@@ -378,6 +439,7 @@ class CodexImageGenerator:
                     attempts=recovered_history,
                     manifest_path=manifest_path,
                     attempt=previous,
+                    required_size=required_size,
                 )
                 if recovered is not None:
                     return recovered
@@ -422,7 +484,15 @@ class CodexImageGenerator:
         last_diagnostics: list[dict] = []
 
         for attempt_number in range(next_attempt, _MAX_ATTEMPTS + 1):
-            attempt = self._new_attempt(task_dir, attempt_number, history)
+            attempt = self._new_attempt(
+                task_dir,
+                attempt_number,
+                history,
+                job_id=job_id,
+                revision=revision,
+                prompt_sha256=actual_prompt_sha256,
+                job_dir=job_dir,
+            )
             self._write_attempt_manifest(manifest_path, attempt)
             command = self._build_command(Path(attempt["result_path"]))
             logger.info(
@@ -438,7 +508,7 @@ class CodexImageGenerator:
                     command,
                     timeout=self.timeout,
                     cwd=str(task_dir),
-                    input=self._attempt_prompt(prompt_text),
+                    input=self._attempt_prompt(prompt_text, job_id),
                     env=environment,
                     on_start=lambda pid, record=attempt: self._record_attempt_pid(
                         manifest_path, record, pid
@@ -472,6 +542,7 @@ class CodexImageGenerator:
                 attempts=history,
                 manifest_path=manifest_path,
                 attempt=attempt,
+                required_size=required_size,
             )
             audit = self._attempt_audit(attempt, outcome, reason, diagnostics, exit_code)
             history.append(audit)
@@ -482,6 +553,18 @@ class CodexImageGenerator:
                 reason = "唯一候选未通过完整图片验证"
                 last_reason = reason
                 audit["recovery_reason"] = reason
+                attempt.update(
+                    state="retrying" if attempt_number < _MAX_ATTEMPTS else "exhausted",
+                    finished_at=datetime_now_iso(),
+                    outcome="invalid_output",
+                    exit_code=exit_code,
+                    recovery_reason=reason,
+                    attempt_history=history,
+                    candidate_diagnostics=diagnostics,
+                )
+                self._write_attempt_manifest(manifest_path, attempt)
+                self._cleanup_attempt_files(attempt)
+                continue
 
             if outcome == "timeout" and not self._ensure_recorded_process_stopped(attempt):
                 reason = "超时进程树未确认结束，禁止启动重试"
@@ -609,26 +692,45 @@ class CodexImageGenerator:
             return 1
 
     @staticmethod
-    def _attempt_prompt(prompt_text: str) -> str:
+    def _attempt_prompt(prompt_text: str, job_id: str) -> str:
         return (
             "$imagegen " + prompt_text + "\n\n"
+            f"本次生图任务 ID 是 {job_id}。"
             "只为本次任务调用一次 ImageGen，并只生成、选择一张最终图片。"
+            "最终图片的原始画布必须精确为 1024×1536 像素、严格 2:3 比例；"
+            "不得选择 9:19 超长手机截图比例或 864×1821 画布，不得依靠裁切补救。"
             "不要读取、引用或复用任何已有图片，也不要复制或另存生成结果。"
-            "最终回复必须严格符合 output schema，并在 image_path 中返回 "
+            "最终回复必须严格符合 output schema，在 job_id 中逐字返回本次任务 ID，并在 image_path 中返回 "
             "ImageGen 产生的这张最终图片当前存在的绝对路径。"
         )
 
-    def _new_attempt(self, task_dir: Path, attempt_number: int, history: list[dict]) -> dict:
+    def _new_attempt(
+        self,
+        task_dir: Path,
+        attempt_number: int,
+        history: list[dict],
+        *,
+        job_id: str = "",
+        revision: int = 1,
+        prompt_sha256: str = "",
+        job_dir: Path | None = None,
+    ) -> dict:
         attempt_id = uuid.uuid4().hex
+        job_id = job_id or uuid.uuid4().hex
+        job_dir = job_dir or (task_dir / _JOB_DIR / job_id)
+        job_dir.mkdir(parents=True, exist_ok=True)
         return {
-            "version": 1,
+            "version": 2,
             "state": "running",
+            "job_id": job_id,
+            "revision": max(1, int(revision)),
+            "prompt_sha256": prompt_sha256,
             "attempt_id": attempt_id,
             "attempt_number": attempt_number,
             "started_at": datetime_now_iso(),
             "pid": None,
-            "staging_path": str(task_dir / f".codex-image-{attempt_id}.png"),
-            "result_path": str(task_dir / f".codex-image-{attempt_id}.result.json"),
+            "staging_path": str(job_dir / f"candidate-{attempt_id}.png"),
+            "result_path": str(job_dir / f"receipt-{attempt_id}.json"),
             "before": self._snapshot(task_dir),
             "attempt_history": list(history),
         }
@@ -707,12 +809,14 @@ class CodexImageGenerator:
         )
 
     @staticmethod
-    def _structured_result_path(result_path: Path) -> Path | None:
+    def _structured_result_path(result_path: Path, expected_job_id: str) -> Path | None:
         try:
             parsed = json.loads(result_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return None
-        if not isinstance(parsed, dict) or set(parsed) != {"image_path"}:
+        if not isinstance(parsed, dict) or set(parsed) != {"job_id", "image_path"}:
+            return None
+        if str(parsed.get("job_id") or "") != expected_job_id:
             return None
         raw = parsed.get("image_path")
         if not isinstance(raw, str) or not raw.strip():
@@ -737,7 +841,9 @@ class CodexImageGenerator:
         paths: list[tuple[Path, str]] = []
         if self._is_new_candidate(staging_path, task_dir, before):
             paths.append((staging_path, "staging"))
-        structured = self._structured_result_path(result_path)
+        structured = self._structured_result_path(
+            result_path, str(attempt.get("job_id") or "")
+        )
         if structured is not None and self._is_new_candidate(structured, task_dir, before):
             paths.append((structured, "structured"))
         current = self._snapshot(task_dir)
@@ -789,15 +895,10 @@ class CodexImageGenerator:
     def _select_candidate(records: list[tuple[Path, dict]]) -> tuple[Path | None, str]:
         if not records:
             return None, "未发现本次尝试新增或修改的有效候选"
-        staged = [item for item in records if "staging" in item[1].get("sources", [])]
-        if len(staged) == 1:
-            return staged[0][0], "staging 路径唯一"
         structured = [item for item in records if "structured" in item[1].get("sources", [])]
         if len(structured) == 1:
-            return structured[0][0], "结构化最终路径唯一"
-        if len(records) == 1:
-            return records[0][0], "本次增量候选唯一"
-        return None, f"发现 {len(records)} 个不同内容候选，无法唯一归属"
+            return structured[0][0], "job_id 匹配的结构化最终路径唯一"
+        return None, f"发现 {len(records)} 个候选但缺少匹配 job_id 的可信回执，禁止自动猜图"
 
     def _reconcile_attempt(self, attempt: dict, task_dir: Path) -> tuple[Path | None, list[dict], str]:
         last_records: list[tuple[Path, dict]] = []
@@ -820,6 +921,7 @@ class CodexImageGenerator:
         exit_code: int | None = None,
     ) -> dict:
         return {
+            "job_id": str(attempt.get("job_id") or ""),
             "attempt_id": str(attempt.get("attempt_id") or ""),
             "attempt_number": int(attempt.get("attempt_number") or 1),
             "started_at": str(attempt.get("started_at") or ""),
@@ -841,11 +943,16 @@ class CodexImageGenerator:
         attempts: list[dict],
         manifest_path: Path,
         attempt: dict,
+        required_size: tuple[int, int] | None = None,
     ) -> ImageTaskResult | None:
         if source is None:
             return None
         try:
-            image_detail = self._promote_valid_image(source, output_path)
+            image_detail = self._promote_valid_image(
+                source,
+                output_path,
+                required_size=required_size,
+            )
         except Exception:
             logger.warning("候选图片验证失败，将按有限重试策略继续", exc_info=True)
             return None
@@ -857,6 +964,9 @@ class CodexImageGenerator:
             True,
             image_path=output_path,
             detail={
+                "job_id": str(attempt.get("job_id") or ""),
+                "revision": int(attempt.get("revision") or 1),
+                "prompt_sha256": str(attempt.get("prompt_sha256") or ""),
                 "attempt_count": attempt_number,
                 "recovery_status": recovery_status,
                 "candidate_diagnostics": diagnostics,
@@ -951,7 +1061,12 @@ class CodexImageGenerator:
         )
 
     @staticmethod
-    def _promote_valid_image(source: Path, output_path: Path) -> dict:
+    def _promote_valid_image(
+        source: Path,
+        output_path: Path,
+        *,
+        required_size: tuple[int, int] | None = None,
+    ) -> dict:
         from PIL import Image
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -964,6 +1079,11 @@ class CodexImageGenerator:
                 width, height = image.size
                 if width <= 0 or height <= 0:
                     raise ValueError(f"图片尺寸无效：{width}x{height}")
+                if required_size is not None and (width, height) != required_size:
+                    raise ValueError(
+                        f"图片尺寸必须为 {required_size[0]}×{required_size[1]}，"
+                        f"实际为 {width}×{height}；禁止裁切补救"
+                    )
                 image.convert("RGB").save(temp_path, format="PNG")
             ok, detail = verify_image(temp_path)
             if not ok:
@@ -975,6 +1095,7 @@ class CodexImageGenerator:
         return {
             "format": detect_image_format(output_path),
             "size_bytes": output_path.stat().st_size,
+            "sha256": CodexImageGenerator._sha256(output_path),
             "width": width,
             "height": height,
         }

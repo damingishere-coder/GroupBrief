@@ -23,8 +23,16 @@ from datetime import datetime
 from app.ai.prompt_templates import (
     ImagePromptTemplateError,
     ImagePromptTemplateService,
-    render_image_prompt_template,
     validate_image_prompt_template,
+)
+from app.ai.poster_copy import (
+    POSTER_COPY_VERSION,
+    POSTER_EDITOR_SYSTEM,
+    PosterCopyError,
+    build_poster_editor_prompt,
+    build_poster_editor_source,
+    parse_poster_copy,
+    render_poster_prompt,
 )
 from app.ai.prompt_builder_types import PromptInput, PromptOutput
 from app.ai.image_themes import ImageThemeError, resolve_image_theme
@@ -37,10 +45,8 @@ from app.ai.layouts import (
     detect_explicit_style_layout,
     fallback_layout_plan,
     fixed_layout_plan,
-    layout_plan_json,
     parse_layout_plan,
     preferred_layout_from_style,
-    resolved_layout_instruction,
     restored_layout_plan,
     selected_topic_ids,
 )
@@ -79,7 +85,7 @@ STRUCTURED_ANALYSIS_MAX_ATTEMPTS = 2
 TOPIC_CANDIDATE_MAX_TOKENS = 8_000
 EVENT_CARD_MAX_TOKENS = 6_000
 LAYOUT_DIRECTOR_MAX_TOKENS = 1_800
-FINAL_PROMPT_MAX_ATTEMPTS = 2
+FINAL_PROMPT_MAX_ATTEMPTS = 3
 _STRUCTURED_RETRY_INSTRUCTION = """\
 
 上一次响应不完整、被截断或不符合约定 JSON。请重新阅读原材料，并重新输出一个完整、紧凑、可解析的 JSON 对象。
@@ -90,144 +96,12 @@ _LAYOUT_RETRY_INSTRUCTION = """\
 必须使用合法 layout_id 和 structure_mode；featured_topic_ids 数量必须匹配结构模式，
 topic_order 与 panel_beats 必须恰好覆盖全部入选主题；至少一个话题使用两个镜头，镜头总数必须合法。"""
 
-_FINAL_PROMPT_RETRY_INSTRUCTION = """\
-
-上一次最终 Prompt 暴露了内部字段名、主题 ID、缺少固定头尾，或退化成等大模块列表。请完整重写：
-按“景别 + 人物动作 + 群友反应或道具特写 + 逐字气泡”写每个话题；保留全部已选话题、当前视觉风格说明、统计日期与漫画分镜；
-群名称、完整统计时段、真实主标题、真实副标题必须在顶部；真实底部总结、消息数和发言人数必须在底部；
-每段指定文字只出现一次，不要输出任何数据字段式栏目名、英文装饰词、Logo、网址或 topic ID，也不要把一个话题机械装进一个等大的矩形区域。"""
-
-SYSTEM_BASE = """你是「群报 GroupBrief」的漫画日报海报 Prompt 设计师。
-你的唯一任务：根据给定的微信群聊内容，生成一份可以直接复制给 GPT 图片生成能力的完整中文 Prompt，
-用于绘制「竖版微信群日报漫画信息图」。
-
-硬性要求（必须严格遵守）：
-1. 只能使用聊天内容中真实存在的事件、人物、对话，禁止编造任何聊天中不存在的事件。
-2. 不得凭空补充金额、时间、地点、身份关系。
-3. 原话引用必须来自真实聊天，可适当缩写，但不能改写事实。
-4. 事实真实性是准入门槛；通过真实性校验后，好玩程度、群内识别度和视觉笑点是第一优化目标。
-   可以使用字面化、反差、回环、误会与反转、一本正经地荒诞，但不能改变事实。
-5. 海报人物只能采用程序从对应消息回查得到的真实姓名，不得只画匿名人物或自由生成人名。
-6. 数据（消息数、发言人数）必须使用给定数字，禁止自行计算。
-7. 必须严格按给定的【输出结构】组织最终 Prompt；给定的漫画分镜骨架控制整张图的大小格与阅读节奏。
-8. 候选主题已经过证据校验和程序评分；最终只能使用给定的 2～7 个入选主题，并且每个恰好使用一次。
-9. 仅当【视觉风格】给出手动预设或自定义风格时，才把它作为最高视觉约束；默认 AI 自由发挥时，
-   只能根据当天真实聊天内容自由选择统一视觉风格，不得追加任何预设风格库词。
-10. 一个话题不等于一个矩形模块；5～7 个话题可以展开为 7～12 个镜头，至少一个话题使用连续镜头。
-11. 每段内容必须写成“景别 + 人物动作 + 群友反应或道具特写 + 逐字气泡”，不得只给抽象总结。
-12. 每个话题只显示一个不超过 12 个汉字的自然短标题、一个完整真实姓名、一句不超过 24 个汉字的事实短句，
-    以及默认一条不超过 22 个汉字的真实主气泡；只有连续镜头确有需要时才允许第二条短气泡。
-13. 所有指定文字必须逐字且恰好出现一次；禁止输出内部字段名、topic ID、表格栏目、说明性标签、
-    自动创造的栏目名、英文装饰词、Logo 或网址。
-14. 海报用于微信手机端，画布固定为 1024×1536 竖版；顶部固定显示群名称、完整统计时段、主标题和副标题，底部固定显示一句总结、消息数和发言人数。
-15. 空间不足时严格依次减少装饰、次要气泡、次要反应细节；群名称、完整统计时段、主副标题、底部总结、日期、两项统计、全部话题、完整姓名、事实短句和主气泡不可删除。
-16. 重新生图只允许按当前视觉风格说明改变视觉表现；聊天事实、群名称、完整统计时段、主副标题、底部总结、数字、人物、气泡、话题覆盖和既定分镜不得改变。
-17. 格子必须有明显的大、中、小三级尺寸差，并按计划使用嵌套特写、连续动作或跨格主体；
-    禁止整齐两列等高矩形和“每个话题一块”的列表式构图。
-18. 必须把给定群名称、完整统计时段和“统计日期：YYYY-MM-DD”逐字作为清晰可见的画面文字，不得省略或改写。
-19. 【主标题】【副标题】【底部总结】都必须填入基于已选真实话题生成的实际文案；禁止写“不绘制”“不设置”“省略”或只保留说明占位。"""
-
-CHUNK_ANALYZE_SYSTEM = """你是群聊事件分析助手。只提取聊天中真实存在的事件/人物/原话，
-输出严格 JSON（不输出其他内容），没有事件就返回空数组。"""
-
-CHUNK_ANALYZE_PROMPT = """以下是微信群聊记录片段（{label}）。
-
-请分析并输出 JSON：
-{{
-  "events": [
-    {{"title": "事件短标题", "people": ["提到的人名"], "content": "事件描述（真实基于聊天）", "quotes": ["1-3条逐字真实原话"]}}
-  ]
-}}
-
-要求：只提取真实存在的内容；没有事件就返回空数组；每个片段最多提取 10 个事件，最终候选最多 10 个。"""
-
 _HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
-_STYLE_SECTION_RE = re.compile(
-    r"(?ms)^【(?:大主题|视觉风格)】\s*\n.*?(?=^【[^\n】]+】\s*$|\Z)"
-)
-_FORBIDDEN_FINAL_PROMPT_TERMS = ("参与群友", "事实信息", "真实原话", "信息卡", "topic-")
-_CONFLICTING_VISIBILITY_PHRASES = (
-    "不绘制群名称", "不绘制群名", "不单独绘制群名", "不绘制为画面文字",
-    "不作为画面文字绘制", "仅作为内容语境", "仅作为创作语境", "仅作背景识别",
-    "不绘制完整时间", "不绘制统计时间", "统计范围，不绘制",
-    "不绘制副标题", "不设置副标题", "副标题不绘制", "省略副标题",
-    "不绘制底部总结", "不设置底部总结", "底部总结不绘制", "省略底部总结",
-)
-_PLACEHOLDER_SECTION_PHRASES = (
-    "优先使用", "建议不超过", "一句话概括", "必须生成", "当天生成",
-    "清晰绘制", "只出现一次", "正在生成", "自动生成",
-)
-_SECTION_OMISSION_TERMS = ("不绘制", "不设置", "省略", "仅作为", "仅作", "不作为")
 
 
 def _strip_html_comments(text: str) -> str:
     """剥离模板中的 HTML 注释（供作者写说明，不进入最终 Prompt）。"""
     return _HTML_COMMENT_RE.sub("", text).strip()
-
-
-def _normalize_ai_free_style(text: str, neutral_hint: str) -> str:
-    """AI 自由发挥时移除模型扩写的风格段，只保留一句中性说明。"""
-    without_style = _STYLE_SECTION_RE.sub("", text).strip()
-    return f"【视觉风格】\n{neutral_hint}\n\n{without_style}"
-
-
-def _section_body(text: str, heading: str) -> str:
-    match = re.search(
-        rf"(?ms)^【{re.escape(heading)}】\s*\n(.*?)(?=^【[^\n】]+】\s*$|\Z)",
-        text,
-    )
-    return match.group(1).strip() if match else ""
-
-
-def _has_real_section_content(text: str, heading: str) -> bool:
-    body = _section_body(text, heading)
-    if (
-        not body
-        or any(phrase in body for phrase in _CONFLICTING_VISIBILITY_PHRASES)
-        or any(term in body for term in _SECTION_OMISSION_TERMS)
-    ):
-        return False
-    lines = [re.sub(r"^[\s*\-]+", "", line).strip() for line in body.splitlines()]
-    return any(
-        line
-        and not (line.startswith("（") and line.endswith("）"))
-        and not any(phrase in line for phrase in _PLACEHOLDER_SECTION_PHRASES)
-        for line in lines
-    )
-
-
-def _visible_contract_violations(
-    text: str,
-    *,
-    group_name: str,
-    period_line: str,
-    date_line: str,
-    message_line: str,
-    speaker_line: str,
-) -> list[str]:
-    """失败关闭校验：固定头尾必须有真实内容，且不能出现相反指令。"""
-    violations = [phrase for phrase in _CONFLICTING_VISIBILITY_PHRASES if phrase in text]
-    required_literals = {
-        "群名称": group_name,
-        "完整统计时段": period_line,
-        "统计日期": date_line,
-        "消息数": message_line,
-        "发言人数": speaker_line,
-    }
-    for label, literal in required_literals.items():
-        if literal not in text:
-            violations.append(f"缺少{label}：{literal}")
-    if group_name not in _section_body(text, "群名称"):
-        violations.append("【群名称】未包含实际显示名")
-    if period_line not in _section_body(text, "统计时间"):
-        violations.append("【统计时间】未包含完整起止时间")
-    data_body = _section_body(text, "数据")
-    if message_line not in data_body or speaker_line not in data_body:
-        violations.append("【数据】未同时包含消息数和发言人数")
-    for heading in ("主标题", "副标题", "底部总结"):
-        if not _has_real_section_content(text, heading):
-            violations.append(f"【{heading}】缺少真实文案")
-    return list(dict.fromkeys(violations))
 
 
 def _validated_persisted_selection(selection: object, messages: list[PromptMessage]) -> dict:
@@ -283,58 +157,6 @@ def _to_ai_text(m) -> str:
     return content
 
 
-def _compact_visible_text(value: object, maximum: int) -> str:
-    """把事实或原话压成单行；只截显示文本，不改变证据与完整姓名。"""
-    text = re.sub(r"\s+", " ", str(value or "")).strip()
-    if len(text) <= maximum:
-        return text
-    for marker in ("。", "！", "？", "；"):
-        position = text.rfind(marker, 0, maximum + 1)
-        if position >= max(12, maximum // 2):
-            return text[: position + 1]
-    return text[: maximum - 1].rstrip() + "…"
-
-
-def build_grounded_story_material(selection: dict, topic_order: tuple[str, ...]) -> str:
-    """把证据整理成自然剧情句；不把内部数据字段交给图片模型绘制。"""
-    selected = [
-        item
-        for item in selection.get("candidates", [])
-        if isinstance(item, dict) and item.get("selected")
-    ]
-    if not selected:
-        raise ValueError("没有可生成漫画剧情的入选主题")
-    by_id = {str(item.get("topic_id") or ""): item for item in selected}
-    ordered = [by_id[topic_id] for topic_id in topic_order if topic_id in by_id]
-    if len(ordered) != len(selected):
-        raise ValueError("漫画阅读顺序没有覆盖全部入选主题")
-
-    lines = [
-        f"整页按阅读顺序讲清以下 {len(ordered)} 段真实群聊剧情。序号仅表示阅读次序，不得画进图片。"
-        "每段都要给出具体景别、人物动作、群友反应或道具特写，并使用下列逐字文字："
-    ]
-    for index, item in enumerate(ordered, start=1):
-        title = _compact_visible_text(item.get("title"), 12) or "群聊话题"
-        visible_people = item.get("visible_participants") if isinstance(item.get("visible_participants"), list) else []
-        participant_label = next((str(value).strip() for value in visible_people if str(value).strip()), "")
-        if not participant_label:
-            participant_label = str(item.get("participant_label") or "群友（昵称未识别）").strip()
-        fact = _compact_visible_text(item.get("summary"), 24) or "仅按真实消息证据绘制"
-        quotes = item.get("quotes") if isinstance(item.get("quotes"), list) else []
-        quote = next((_compact_visible_text(value, 22) for value in quotes if str(value or "").strip()), "")
-        bubble = quote or _compact_visible_text(fact, 22)
-        lines.append(
-            f"{index}. 短标题逐字写《{title}》；完整姓名逐字写“{participant_label}”；"
-            f"事实短句逐字写“{fact}”；主气泡逐字写“{bubble}”。"
-            "画面指令必须补全景别、该人物的具体动作，以及群友反应或对应道具特写。"
-        )
-    lines.append(
-        "以上每段指定文字在整张图中恰好出现一次。画面只显示允许的短标题、事实短句、完整姓名和气泡正文；"
-        "不要显示序号、说明文字、字段名称、程序标识、英文装饰词、Logo、网址或额外标签。"
-    )
-    return "\n".join(lines)
-
-
 class DeepSeekImagePromptBuilder:
     """保留历史类名以兼容现有注入点；默认实现已切换为 Codex GPT。"""
 
@@ -376,7 +198,6 @@ class DeepSeekImagePromptBuilder:
             visible_group_name = (data.visible_group_name or data.group_name).strip()
             if not visible_group_name:
                 raise ValueError("群聊显示名不能为空")
-            date_line = f"统计日期：{report_date}"
             period_line = f"{data.period_start} ~ {data.period_end}"
             message_line = f"{data.message_count} 条消息"
             speaker_line = f"{data.speaker_count} 人发言"
@@ -506,8 +327,6 @@ class DeepSeekImagePromptBuilder:
                         seed_text=f"{data.group_id or data.group_name}|{data.run_date}",
                     )
 
-            layout_instruction = resolved_layout_instruction(layout, custom_style_text)
-            story_material = build_grounded_story_material(selection, layout.topic_order)
             meta.update(layout.to_meta())
             meta["recent_layout_ids"] = [
                 str(item.get("layout_id") or "")
@@ -515,104 +334,58 @@ class DeepSeekImagePromptBuilder:
                 if isinstance(item, dict) and item.get("layout_id")
             ]
 
-            structure = render_image_prompt_template(
-                template_text,
-                {
-                    "group_name": visible_group_name,
-                    "period_start": data.period_start,
-                    "period_end": data.period_end,
-                    "report_date": report_date,
-                    "message_count": str(data.message_count),
-                    "speaker_count": str(data.speaker_count),
-                    "image_theme": theme_text,
-                    "layout_name": layout.layout_name,
-                    "layout_instruction": layout_instruction,
-                },
-            )
-            # 群级模板覆盖也必须服从真实剧情和漫画分镜契约。
-            structure = f"{structure}\n\n{story_material}"
-            if date_line not in structure:
-                # 兼容没有新增占位符的旧/群级模板，同时保证每个最终 Prompt 都收到日期区块。
-                structure = f"【固定画面日期】\n{date_line}\n\n{structure}"
-            fixed_visibility_contract = (
-                "【固定头尾可见合同｜不得降级】\n"
-                f"顶部逐字清晰绘制群名称“{visible_group_name}”、完整统计时段“{period_line}”、"
-                "本次基于真实话题生成的主标题和副标题。\n"
-                f"底部逐字清晰绘制本次基于真实话题生成的一句总结，以及“{message_line}”“{speaker_line}”。\n"
-                "不得写任何不绘制、不设置、省略或仅作语境的相反指令；"
-                "空间不足只能减少装饰、次要气泡和次要反应细节。"
-            )
-            structure = f"{structure}\n\n{fixed_visibility_contract}"
-
-            final_user_prompt = (
-                "以下主题已经过原消息证据回查和喜剧优先固定评分。"
-                "最终 Prompt 只能使用 selected_topics，并严格服从 storyboard_plan 的阅读顺序和逐话题镜头；"
-                "不得加入未入选候选、临时改选、遗漏或重复主题；JSON 字段名和 topic ID 只供内部对应，"
-                "绝对不要出现在最终 Prompt 或画面文字中：\n\n"
-                + selected_payload
-                + "\n\n【已校验漫画分镜方案】\n"
-                + layout_plan_json(layout)
-                + "\n\n"
-                + story_material
-            )
+            editor_source = build_poster_editor_source(selection, layout)
+            final_user_prompt = build_poster_editor_prompt(editor_source)
             text = ""
             final_calls = 0
             last_violations: list[str] = []
             for attempt in range(FINAL_PROMPT_MAX_ATTEMPTS):
                 prompt = final_user_prompt
                 if attempt:
-                    prompt += _FINAL_PROMPT_RETRY_INSTRUCTION
+                    prompt += (
+                        "\n\n上一次漫画编辑 JSON 未通过证据或结构校验。"
+                        "请重新输出完整 JSON，不要解释，不要复用错误内容。"
+                    )
                     if last_violations:
                         prompt += "\n上次具体违反：" + "；".join(last_violations[:8])
-                candidate_text = self._chat(
-                    structure,
+                raw_copy = self._analysis_chat(
+                    POSTER_EDITOR_SYSTEM,
                     prompt,
-                    explicit_theme_text,
-                    layout_instruction,
+                    response_format="json_object",
+                    temperature=0.35,
+                    max_tokens=6000,
                 )
                 final_calls += 1
-                if not theme.has_explicit_style:
-                    candidate_text = _normalize_ai_free_style(candidate_text, theme_text)
-                mandatory_blocks: list[str] = []
-                if story_material not in candidate_text:
-                    mandatory_blocks.append(story_material)
-                if theme_text not in candidate_text:
-                    heading = "【大主题】" if theme.has_explicit_style else "【视觉风格】"
-                    suffix = "\n漫画分镜不得替换或削弱该指定风格。" if theme.has_explicit_style else ""
-                    mandatory_blocks.append(heading + "\n" + theme_text + suffix)
-                if layout.layout_name not in candidate_text:
-                    mandatory_blocks.append("【漫画分镜｜整张图只使用一种骨架】\n" + layout_instruction)
-                if date_line not in candidate_text:
-                    mandatory_blocks.append(
-                        "【必须在画面中清晰绘制的固定文字】\n"
-                        + date_line
-                        + "\n该日期标识不得省略或改写。"
+                try:
+                    copy = parse_poster_copy(raw_copy, editor_source)
+                    candidate_text = render_poster_prompt(
+                        copy,
+                        group_name=visible_group_name,
+                        period_line=period_line,
+                        message_line=message_line,
+                        speaker_line=speaker_line,
+                        style_text=theme_text,
+                        explicit_style=theme.has_explicit_style,
+                        template_text=template_text,
                     )
-                if mandatory_blocks:
-                    candidate_text = "\n\n".join((*mandatory_blocks, candidate_text))
-
-                forbidden = [term for term in _FORBIDDEN_FINAL_PROMPT_TERMS if term in candidate_text]
-                contract = _visible_contract_violations(
-                    candidate_text,
-                    group_name=visible_group_name,
-                    period_line=period_line,
-                    date_line=date_line,
-                    message_line=message_line,
-                    speaker_line=speaker_line,
-                )
-                last_violations = [*(f"含内部词：{term}" for term in forbidden), *contract]
-                if last_violations:
+                except PosterCopyError as exc:
+                    last_violations = [str(exc)]
                     logger.warning(
-                        "最终 Prompt 合同校验失败（第 %s/%s 次）：%s",
+                        "漫画编辑稿校验失败（第 %s/%s 次）：%s",
                         attempt + 1,
                         FINAL_PROMPT_MAX_ATTEMPTS,
                         last_violations,
                     )
                     continue
                 text = candidate_text
+                meta["poster_copy_version"] = POSTER_COPY_VERSION
+                meta["poster_topic_count"] = len(copy.panels)
+                meta["poster_visible_participant_count"] = sum(
+                    len(panel.participants) for panel in copy.panels
+                )
                 break
             if not text:
-                raise ValueError("最终生图 Prompt 未通过固定头尾合同：" + "；".join(last_violations[:8]))
+                raise ValueError("最终生图 Prompt 未通过固定漫画合同：" + "；".join(last_violations[:8]))
 
             meta["api_call_count"] = analysis_calls + layout_calls + final_calls
 
@@ -670,40 +443,6 @@ class DeepSeekImagePromptBuilder:
             + "\n大主题控制全图配色、画材、服装、造型、装饰、纹理、光影和画风；"
             "不得创造、补充或改写聊天事实，也不得被整体版式替换或削弱。"
             "重新生图只允许改变所选美术家族及当天已解析的视觉细节，日期、数字、人物、逐字气泡、话题覆盖和既定分镜都是不变量。"
-        )
-
-    @staticmethod
-    def _layout_constraint(layout_prompt: str) -> str:
-        return (
-            "【漫画分镜约束｜整张图只使用一种骨架】\n"
-            + layout_prompt
-            + "\n漫画分镜只控制格子几何、阅读路径和镜头节拍；不得改变当前视觉风格说明。"
-        )
-
-    def _chat(
-        self,
-        structure: str,
-        user_prompt: str,
-        theme_prompt: str = "",
-        layout_prompt: str = "",
-        *,
-        response_format: str = "text",
-        temperature: float = 0.7,
-        max_tokens: int = 3000,
-    ) -> str:
-        """调用主备总结模型。system 含固定约束 + 模板输出结构。"""
-        theme_block = "\n\n" + self._theme_constraint(theme_prompt) if theme_prompt else ""
-        layout_block = "\n\n" + self._layout_constraint(layout_prompt) if layout_prompt else ""
-        system = SYSTEM_BASE + theme_block + layout_block + "\n\n【输出结构】\n" + structure
-        messages = [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user_prompt},
-        ]
-        return self._provider._chat(
-            messages,
-            response_format=response_format,
-            temperature=temperature,
-            max_tokens=max_tokens,
         )
 
     def _analysis_chat(

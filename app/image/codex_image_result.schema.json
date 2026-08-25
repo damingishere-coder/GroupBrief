@@ -2,11 +2,15 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
   "properties": {
+    "job_id": {
+      "type": "string",
+      "minLength": 8
+    },
     "image_path": {
       "type": "string",
       "minLength": 1
     }
   },
-  "required": ["image_path"],
+  "required": ["job_id", "image_path"],
   "additionalProperties": false
 }

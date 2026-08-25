@@ -398,7 +398,7 @@ export default function GroupDetail({ groupId, invalidGroupId }: GroupDetailProp
         <div className="group-detail-form-grid">
           <label className="group-detail-switch" htmlFor="image-enabled">
             <input id="image-enabled" type="checkbox" checked={form.image_enabled} onChange={(event) => setField("image_enabled", event.target.checked)} />
-            <span><strong>启用 AI 图片</strong><small>启用后会进入串行生图阶段</small></span>
+            <span><strong>启用 AI 图片</strong><small>启用后会进入最多 2 路的受控生图阶段</small></span>
           </label>
           <Field id="send-target" label="发送目标（可选人工覆盖）" error={errors.send_target}>
             <input id="send-target" value={form.send_target} onChange={(event) => setField("send_target", event.target.value)} placeholder="留空则自动跟随微信当前群名" />

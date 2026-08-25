@@ -10,9 +10,15 @@ import {
 } from "./model";
 
 describe("AI 图片视图模型", () => {
-  it("使用群名与日期组成稳定且无歧义的运行键", () => {
-    const run = { group_name: "测试群", run_date: "2026-08-25", status: "PROMPT_READY" } as V2Run;
-    expect(runKey(run)).toBe("测试群\u00002026-08-25");
+  it("优先使用稳定群 ID、微信 ID 与日期组成运行键", () => {
+    const run = {
+      group_name: "测试群",
+      group_id: 23,
+      wechat_group_id: "wx-group-23",
+      run_date: "2026-08-25",
+      status: "PROMPT_READY",
+    } as V2Run;
+    expect(runKey(run)).toBe("23\u0000wx-group-23\u00002026-08-25");
   });
 
   it("把旧后端 404 转成可操作的提示", () => {

@@ -1,9 +1,9 @@
 """生图 Prompt 模板服务。
 
 模板以 UTF-8 文本文件存储在 templates/image_prompt/ 下（默认 default.md）。
-与排行榜模板（app/ranking/template_service.py）结构一致，变量不同：
-group_name / report_date / period_start / period_end / message_count / speaker_count /
-image_theme / layout_name / layout_instruction。
+与排行榜模板（app/ranking/template_service.py）结构一致。最终固定区块由
+main_title / subtitle / overall_visual / panels / text_rules / footer_summary 等
+结构化变量填入；历史变量仅保留解析兼容，不进入默认模板。
 """
 
 from __future__ import annotations
@@ -13,22 +13,13 @@ from pathlib import Path
 
 from app.config.settings import PROJECT_ROOT
 
-# 默认生图 Prompt 模板（与 templates/image_prompt/default.md 同步；恢复默认时写回此内容）
+# 默认生图 Prompt 模板（与 templates/image_prompt/default.md 同步）。动态内容先经
+# 结构化证据校验，再由代码填入，模型不能自行增删区块。
 DEFAULT_IMAGE_PROMPT_TEMPLATE = """【任务】
 生成一张竖版微信群日报漫画信息图。
 
-【使用场景与画布】
-用于微信手机端阅读，画布固定为 1024×1536 竖版。关键文字避开四周安全边距；缩略图状态优先看清主标题、统计日期和两项统计数据。
-
-【创作优先级】
-事实真实性是准入门槛；通过真实性校验后，好玩程度、群内识别度和视觉笑点是第一优化目标。
-正常保留 5～7 个独立话题的密度，用漫画镜头表现“谁做了什么、别人怎样接话”，不要画成栏目列表。
-
 【群名称】
 {{group_name}}
-
-【固定画面日期】
-统计日期：{{report_date}}
 
 【统计时间】
 {{period_start}} ~ {{period_end}}
@@ -37,66 +28,22 @@ DEFAULT_IMAGE_PROMPT_TEMPLATE = """【任务】
 {{message_count}} 条消息
 {{speaker_count}} 人发言
 
-【视觉风格】
-{{image_theme}}
-
-【漫画分镜】
-{{layout_name}}
-{{layout_instruction}}
-
 【主标题】
-（优先使用群聊原句、群内梗、反差或回环；建议不超过 18 个汉字）
+{{main_title}}
 
 【副标题】
-（一句话概括当天讨论；建议不超过 26 个汉字）
+{{subtitle}}
 
-【剧情与镜头分配】
-按给定阅读顺序使用全部入选话题，不得遗漏、重复、增删或改选。
-一个话题不等于一个矩形模块；同一话题可以用连续的环境、动作、对白、反应或特写镜头展开。
-正常 5～7 个话题应形成 7～12 个视觉格，至少一个话题使用两个以上连续镜头。
-每个话题必须写成可绘制的“景别 + 人物动作 + 群友反应或道具特写 + 逐字气泡”，不得只写抽象总结。
+【整体视觉】
+{{overall_visual}}
 
-【逐话题可见文字合同】
-每个话题只使用：一个不超过 12 个汉字的自然短标题、一个完整真实姓名、一句不超过 24 个汉字的事实短句，以及默认一条不超过 22 个汉字的真实主气泡。
-只有连续镜头确有需要时，才允许增加第二条不超过 22 个汉字的短气泡；完整真实姓名不得缩写、替换或省略。
+{{panels}}
 
-【画面文字白名单】
-只清晰绘制：群名称、完整统计时段、主标题、副标题、底部总结、统计日期、给定数据、自然的话题短标题、短事实旁白、真实姓名和精选群聊气泡。
-每段指定文字逐字、恰好出现一次，不得重复；不得绘制程序字段、主题编号、说明性栏目名、JSON、自动创造的栏目名、英文装饰词、Logo、网址或额外标签。
-
-【空间不足时的降级顺序】
-严格依次减少：装饰 → 次要气泡 → 次要反应细节。不得删除或弱化群名称、完整统计时段、主标题、副标题、底部总结、统计日期、两项统计数据、任何入选话题、完整真实姓名、事实短句或主气泡。
-
-【分镜表现】
-整页至少有大、中、小三级格子尺寸差；使用嵌套反应小格、连续动作、局部特写或一次跨格主体建立节奏。
-气泡尾巴、人物视线和动作线共同引导从上到下、从左到右阅读；禁止整齐两列等高矩形和重复模板块。
+【文字规则】
+{{text_rules}}
 
 【底部总结】
-必须生成并清晰绘制一句基于当天真实讨论的短文案，回收当天内容；不使用“信息量拉满”“一天顶一周”“比过山车还刺激”等通用套话。
-
-【固定头尾合同】
-海报顶部必须清晰绘制群名称“{{group_name}}”、完整统计时段“{{period_start}} ~ {{period_end}}”、当天生成的真实主标题和真实副标题。
-海报底部必须清晰绘制当天生成的一句底部总结，以及“{{message_count}} 条消息”“{{speaker_count}} 人发言”。这些内容不可降级、不可省略、不可改写。
-
-【重新生图不变量】
-重新生图时只允许按当前视觉风格说明改变视觉表现；聊天事实、群名称、完整统计时段、主副标题、底部总结、统计数字、人物、逐字气泡、话题覆盖和既定漫画分镜不得改变。
-
-【硬性要求】
-1. 只使用聊天内容中真实存在的事件、人物、对话，禁止编造。
-2. 不得凭空补充金额、时间、地点、身份关系。
-3. 气泡文字必须来自程序给定的真实聊天，可缩短长度，但不能改写事实。
-4. 可以使用字面化、反差、回环、误会与反转、一本正经地荒诞，但不能改变事实。
-5. 海报人物依据聊天事件中的真实人员，而不是发言排行榜 Top10；姓名只能使用程序回查得到的人员。
-6. 数据（消息数、发言人数）必须使用给定数字，禁止自行计算。
-7. 仅当【视觉风格】提供了手动预设或自定义风格时，它才是全图最高视觉约束；默认 AI 自由发挥时，不得自行追加任何预设风格库词。
-8. 【漫画分镜】只控制格子几何、阅读路径和镜头节拍；每张图只能使用给定的一种骨架。
-9. 不得把法庭、菜单、地图、新闻台等无关主题包装强加给真实聊天。
-10. 最终 Prompt 必须严格包含给定的 2～7 个入选主题且各使用一次；证据不足时由上游减少数量，不得编造。
-11. 每个入选话题至少显示一个真实姓名、一句事实短句和一句给定气泡，不得用泛化头像替代人物。
-12. 漫画主体与对话必须和对应聊天事实直接相关，视觉比喻只能放大已有笑点，不能另写故事。
-13. 必须把群名称“{{group_name}}”、完整统计时段“{{period_start}} ~ {{period_end}}”和“统计日期：{{report_date}}”逐字作为清晰可见的画面文字。
-14. 指定文字必须逐字且恰好出现一次；不得自行创造栏目名、英文装饰词、Logo、网址或说明性标签。
-15. 空间不足时只能按既定降级顺序缩减；群名称、完整统计时段、主标题、副标题、底部总结、日期、两项统计、全部话题、真实姓名、事实短句和主气泡是不可删除项。
+{{footer_summary}}
 """
 
 # 生图 Prompt 模板支持的变量
@@ -111,6 +58,12 @@ IMAGE_PROMPT_VARS = frozenset(
         "image_theme",
         "layout_name",
         "layout_instruction",
+        "main_title",
+        "subtitle",
+        "overall_visual",
+        "panels",
+        "text_rules",
+        "footer_summary",
     }
 )
 
@@ -118,7 +71,39 @@ _SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 _RENDER_DEFAULTS = {
     "layout_name": "（生成时自动选择漫画分镜骨架）",
     "layout_instruction": "（生成时根据入选主题和最近分镜历史写入大小格与镜头节拍）",
+    "main_title": "（生成时填入当天真实主标题）",
+    "subtitle": "（生成时填入当天真实副标题）",
+    "overall_visual": "（生成时填入固定整体视觉与当前风格）",
+    "panels": "【版面1】\n（生成时按真实入选话题填入）",
+    "text_rules": "（生成时填入固定文字规则）",
+    "footer_summary": "（生成时填入当天真实底部总结）",
 }
+_FIXED_TEMPLATE_HEADINGS = (
+    "任务",
+    "群名称",
+    "统计时间",
+    "数据",
+    "主标题",
+    "副标题",
+    "整体视觉",
+    "文字规则",
+    "底部总结",
+)
+_FIXED_TEMPLATE_VARS = frozenset(
+    {
+        "group_name",
+        "period_start",
+        "period_end",
+        "message_count",
+        "speaker_count",
+        "main_title",
+        "subtitle",
+        "overall_visual",
+        "panels",
+        "text_rules",
+        "footer_summary",
+    }
+)
 
 
 class ImagePromptTemplateError(ValueError):
@@ -170,14 +155,26 @@ class ImagePromptTemplateService:
 
 
 def validate_image_prompt_template(text: str) -> None:
-    """校验模板：所有 {{var}} 占位符必须属于受支持变量。"""
+    """校验模板变量以及固定群聊漫画区块合同。"""
+    used_vars: set[str] = set()
     for m in re.finditer(r"\{\{\s*(\w+)\s*\}\}", text):
         var = m.group(1)
+        used_vars.add(var)
         if var not in IMAGE_PROMPT_VARS:
             raise ImagePromptTemplateError(
                 f"模板包含不支持的变量：{{{{{var}}}}}。"
                 f"支持的变量：{sorted(IMAGE_PROMPT_VARS)}"
             )
+    headings = tuple(re.findall(r"(?m)^【([^\n】]+)】\s*$", text))
+    if headings != _FIXED_TEMPLATE_HEADINGS:
+        raise ImagePromptTemplateError(
+            "模板区块必须严格为：" + " → ".join(_FIXED_TEMPLATE_HEADINGS)
+        )
+    missing = sorted(_FIXED_TEMPLATE_VARS - used_vars)
+    if missing:
+        raise ImagePromptTemplateError(
+            "固定漫画模板缺少变量：" + ", ".join(f"{{{{{name}}}}}" for name in missing)
+        )
 
 
 def render_image_prompt_template(text: str, values: dict[str, str]) -> str:

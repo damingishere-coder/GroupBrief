@@ -66,6 +66,14 @@ async def lifespan(app: FastAPI):
     app.state.startup_checks, app.state.startup_check_error = (
         _capture_startup_checks(settings)
     )
+    from app.image.regeneration import recover_pending_regenerations
+
+    recovered_image_jobs = recover_pending_regenerations(settings)
+    if recovered_image_jobs:
+        logging.getLogger("groupbrief.image").warning(
+            "已按原 job_id 恢复 %d 个中断的生图任务；不会新建结果未知任务",
+            recovered_image_jobs,
+        )
     # P9：日志轮转清理已在 setup_logging 中执行
     scheduler_started = _should_start_scheduler(settings)
     app.state.scheduler_owner = settings.scheduler_owner

@@ -70,9 +70,9 @@ def test_score_weights_total_100_and_log_normalization():
 
 @pytest.mark.parametrize("candidate_count", [5, 6, 7])
 def test_selection_keeps_five_to_seven_high_quality_topics(candidate_count: int):
-    messages = _messages(candidate_count)
+    messages = _messages(candidate_count * 2)
     candidates = [
-        _candidate(index, [f"m{index - 1}"], 36 - index, 18, 18)
+        _candidate(index, [f"m{(index - 1) * 2}", f"m{(index - 1) * 2 + 1}"], 36 - index, 18, 18)
         for index in range(1, candidate_count + 1)
     ]
     selection = score_and_select_topics(candidates, messages)
@@ -84,9 +84,12 @@ def test_selection_keeps_five_to_seven_high_quality_topics(candidate_count: int)
 
 
 def test_selection_stops_at_seven_topics():
-    messages = _messages(10)
+    messages = _messages(20)
     selection = score_and_select_topics(
-        [_candidate(index, [f"m{index - 1}"], 38, 18, 18) for index in range(1, 11)],
+        [
+            _candidate(index, [f"m{(index - 1) * 2}", f"m{(index - 1) * 2 + 1}"], 38, 18, 18)
+            for index in range(1, 11)
+        ],
         messages,
     )
     assert selection["candidate_count"] == 10
@@ -105,7 +108,7 @@ def test_two_or_three_real_candidates_are_all_selected_without_padding():
 def test_high_volume_chat_does_not_reduce_topic_density():
     messages = _messages(205)
     candidates = [
-        _candidate(index, [f"m{index - 1}"], comedy=36 - index, visual=18, recognition=18)
+        _candidate(index, [f"m{(index - 1) * 2}", f"m{(index - 1) * 2 + 1}"], comedy=36 - index, visual=18, recognition=18)
         for index in range(1, 8)
     ]
     selection = score_and_select_topics(candidates, messages)
@@ -180,7 +183,7 @@ def test_visible_participants_are_derived_from_evidence_and_names_are_not_trunca
     first = selection["candidates"][0]
     assert first["visible_participants"][0] == "很长但必须完整保留的群友姓名"
     assert "很长但必须完整保留的群友姓名" in first["participant_label"]
-    assert first["participant_label"].endswith("等 4 人")
+    assert first["participant_label"] == "很长但必须完整保留的群友姓名、李四、王五、赵六"
     assert set(first["visible_participants"]).issubset(set(first["participants"]))
 
 
@@ -200,8 +203,8 @@ def test_visible_participants_skip_an_over_budget_name_and_keep_scanning():
     )
     first = selection["candidates"][0]
 
-    assert first["visible_participants"] == ["c2341298", "Max"]
-    assert first["participant_label"] == "c2341298、Max等 3 人"
+    assert first["visible_participants"] == ["c2341298", "这是一个特别特别特别长的完整群友姓名", "Max"]
+    assert first["participant_label"] == "c2341298、这是一个特别特别特别长的完整群友姓名、Max"
 
 
 def test_same_display_name_with_different_ids_keeps_all_participant_fields_consistent():

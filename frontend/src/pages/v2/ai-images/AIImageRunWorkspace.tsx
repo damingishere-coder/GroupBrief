@@ -72,6 +72,9 @@ export function AIImageRunWorkspace({
     detailError,
     runPromptError,
     regenPollError,
+    imageCandidates,
+    candidateLoading,
+    candidateClaiming,
     setDetailReloadVersion,
     filteredRuns,
     regenStatus,
@@ -82,6 +85,7 @@ export function AIImageRunWorkspace({
     restoreCurrentPrompt,
     rebuildCurrentPrompt,
     regenerate,
+    claimCandidate,
     confirmSend,
   } = model;
 
@@ -123,6 +127,15 @@ export function AIImageRunWorkspace({
                 <div className="ai-images-preview-card"><div className="ai-images-content-heading"><h3>日报图片</h3><span>daily_image.png</span></div>{detail.files.includes("daily_image.png") && !imageLoadError ? <ImagePreviewTrigger src={currentImageSrc} alt="真实日报图片" imageClassName="ai-images-real-image" className="ai-images-real-image-trigger" onError={() => { setImageLoadError(true); setImageViewerOpen(false); }} onOpen={() => setImageViewerOpen(true)} /> : <EmptyState title="尚无可读图片" description="重新生图失败时会保留旧图；没有旧图时这里保持为空。" />}</div>
                 {runPrompt ? <div className="ai-images-prompt-card ai-images-run-editor"><div className="ai-images-content-heading"><h3>当天生图 Prompt</h3><Button tone="ghost" className="ui-button-compact" onClick={() => copyText(runDraft, toast)} disabled={!runDraft}><Copy size={16} />复制</Button></div><textarea value={runDraft} onChange={(event) => setRunDraft(event.target.value)} /><div className="ai-images-run-actions"><Button tone="ghost" onClick={restoreCurrentPrompt} busy={restoring} disabled={!runPrompt.has_original}><ArrowCounterClockwise size={16} />恢复最初版本</Button><Button tone="secondary" onClick={saveCurrentPrompt} busy={runSaving} disabled={!runDirty}><FloppyDisk size={16} />保存 Prompt</Button><Button tone="secondary" onClick={rebuildCurrentPrompt} busy={rebuildingPrompt} disabled={runDirty || ["queued", "running"].includes(regenStatus)}><Sparkle size={16} />复用已校验选题重建 Prompt</Button><Button tone="primary" onClick={regenerate} busy={regenerating} disabled={runDirty || rebuildingPrompt || ["queued", "running"].includes(regenStatus)}><Play size={16} />按现有 Prompt 重画</Button></div></div> : <div className="ai-images-prompt-card"><EmptyState title="当天 Prompt 加载失败" description={runPromptError || "当天 Prompt 暂不可用；日报图片和运行状态仍可查看。"} action={<Button tone="secondary" onClick={() => setDetailReloadVersion((current) => current + 1)}>重新读取 Prompt</Button>} /></div>}
               </div>
+              {["ambiguous_result", "result_unknown"].includes(regenStatus) && <section className="ai-images-candidate-card" aria-label="生图候选人工认领">
+                <div className="ai-images-content-heading"><div><h3>本次任务候选图片</h3><span>只显示当前 job_id、群和日期都匹配的候选</span></div></div>
+                {candidateLoading ? <LoadingState label="正在核对候选哈希…" /> : !imageCandidates.length ? <EmptyState title="没有可认领候选" description="系统已保留旧图，也不会自动重复提交结果未知的生图调用。" /> : <div className="ai-images-candidate-grid">{imageCandidates.map((candidate) => <article key={candidate.candidate_id}>
+                  <img src={candidate.preview_url} alt={`${candidate.group_name} ${candidate.run_date} 候选图`} />
+                  <strong>{candidate.group_name} · {candidate.run_date}</strong>
+                  <small>任务 {candidate.job_id.slice(0, 12)} · 哈希 {candidate.sha256.slice(0, 12)}</small>
+                  <Button tone="secondary" busy={candidateClaiming === candidate.candidate_id} disabled={Boolean(candidateClaiming)} onClick={() => { void claimCandidate(candidate); }}>确认归属并替换</Button>
+                </article>)}</div>}
+              </section>}
               {regenStatus === "ready_for_review" && <div className="ai-images-review-actions"><WarningCircle size={18} /><span>请先检查新图。只有再次确认后才会发送文字和图片。</span><Button tone="primary" onClick={() => setSendConfirmOpen(true)}><PaperPlaneTilt size={17} />发送 / 重新发送</Button></div>}
               {detail.run.error && <div className="ai-images-run-error">主任务错误：{String(detail.run.error)}</div>}
             </>

@@ -14,7 +14,7 @@ from app.services.speaker_identity import build_speaker_stats, speaker_name_sort
 
 from app.ai.conversation_segments import ConversationChunk, PromptMessage
 
-TOPIC_SELECTION_VERSION = "4.0"
+TOPIC_SELECTION_VERSION = "5.0"
 MAX_CANDIDATES = 10
 MIN_SELECTED = 2
 TARGET_SELECTED = 5
@@ -22,8 +22,8 @@ MAX_SELECTED = 7
 HIGH_VOLUME_MESSAGE_THRESHOLD = 200
 SELECTION_MIN_SCORE = 60.0
 SELECTION_MAX_GAP = 15.0
-VISIBLE_PARTICIPANT_LIMIT = 3
-VISIBLE_PARTICIPANT_CHAR_BUDGET = 24
+VISIBLE_PARTICIPANT_LIMIT = 4
+VISIBLE_PARTICIPANT_CHAR_BUDGET = 48
 UNRESOLVED_PARTICIPANT_LABEL = "群友（昵称未识别）"
 
 SCORE_WEIGHTS = {
@@ -42,7 +42,8 @@ TOPIC_CANDIDATE_SYSTEM = """你是群聊日报选题编辑。只能基于给定�
 不得为了凑数把一个事件拆成“发起/回应”或重复角度。
 comedy_score 为 0～40，group_recognition_score 为 0～20，visual_score 为 0～20。
 comedy_angle 说明真实笑点，visual_gag 说明不改变事实的视觉笑点，并给出简短 score_reason。
-为避免响应截断，标题、人物和评分理由必须简洁；summary 必须是一句可直接放进图片的信息，建议不超过 48 个汉字；
+为避免响应截断，标题、人物和评分理由必须简洁；summary 必须是一句完整、可直接放进图片的信息，建议不超过 60 个汉字，
+不得以省略号、半句话或残缺表情代码结尾；
 quotes 只能逐字摘录原消息，禁止改写或把摘要伪装成原话；
 每个候选的 message_ids 最多保留 100 条有效证据。"""
 
@@ -209,6 +210,26 @@ def _normalized_quote(value: str) -> str:
     return _QUOTE_PUNCTUATION_RE.sub("", unicodedata.normalize("NFKC", value or "")).casefold()
 
 
+def _complete_excerpt(value: str, maximum: int) -> str:
+    """保留完整可读句或连续短句，不制造悬空省略号。"""
+    text = re.sub(r"\s+", " ", value or "").strip()
+    if len(text) <= maximum:
+        return text
+    sentences = [part.strip() for part in re.split(r"(?<=[。！？!?；;])", text) if part.strip()]
+    selected = ""
+    for sentence in sentences:
+        if len(sentence) > maximum:
+            continue
+        combined = selected + sentence
+        if len(combined) > maximum:
+            break
+        selected = combined
+    if selected:
+        return selected
+    clauses = [part.strip() for part in re.split(r"[，,、：:]", text) if part.strip()]
+    return next((part for part in clauses if len(part) <= maximum), "")
+
+
 def _verified_quotes(candidate_quotes: Iterable[str], items: Iterable[TopicEvidence]) -> list[str]:
     """只保留可从所引消息回查的原话；无有效候选时使用真实原文短句。"""
     evidence_items = list(items)
@@ -220,14 +241,15 @@ def _verified_quotes(candidate_quotes: Iterable[str], items: Iterable[TopicEvide
             continue
         if any(normalized in message for message, _ in normalized_messages) and quote not in verified:
             verified.append(quote.strip())
-        if len(verified) >= 2:
+        if len(verified) >= 3:
             break
     if verified:
         return verified
 
     for _, original in normalized_messages:
-        if original:
-            return [original[:80]]
+        excerpt = _complete_excerpt(original, 80)
+        if excerpt:
+            return [excerpt]
     return []
 
 
@@ -238,11 +260,14 @@ def _evidence_dialogue(items: Iterable[TopicEvidence]) -> list[dict[str, str]]:
         text = item.text.strip()
         if not text:
             continue
+        excerpt = _complete_excerpt(text, 240)
+        if not excerpt:
+            continue
         dialogue.append(
             {
                 "message_id": item.message_id,
                 "speaker": item.sender_name,
-                "text": text[:240],
+                "text": excerpt,
             }
         )
     return dialogue
@@ -342,13 +367,22 @@ def score_and_select_topics(
                 "TOPIC_CANDIDATES_INVALID",
                 f"候选主题“{candidate['title']}”没有可回查的原话证据",
             )
+        evidence_dialogue = _evidence_dialogue(items)
+        dialogue_speaker_count = len(
+            {
+                str(entry.get("speaker") or "").strip()
+                for entry in evidence_dialogue
+                if _resolved_participant_name(str(entry.get("speaker") or ""))
+            }
+        )
         metrics.append(
             {
                 **candidate,
                 "message_ids": ids,
                 "people": attribution["participants"],
                 "quotes": verified_quotes,
-                "evidence_dialogue": _evidence_dialogue(items),
+                "evidence_dialogue": evidence_dialogue,
+                "dialogue_speaker_count": dialogue_speaker_count,
                 "evidence_message_count": len(ids),
                 **attribution,
                 "duration_minutes": round(duration, 1),
@@ -384,7 +418,12 @@ def score_and_select_topics(
         if guaranteed_selected < rank <= MAX_SELECTED:
             total = item["scores"]["total"]
             gap = (previous_total - total) if previous_total is not None else 0.0
-            selected = total >= SELECTION_MIN_SCORE and gap < SELECTION_MAX_GAP
+            selected = (
+                total >= SELECTION_MIN_SCORE
+                and gap < SELECTION_MAX_GAP
+                and item["participant_count"] >= 2
+                and item["dialogue_speaker_count"] >= 2
+            )
             if not selected:
                 # 分数降序；第一个不满足后，后续候选也不再入选。
                 for tail in scored[rank - 1 :]:

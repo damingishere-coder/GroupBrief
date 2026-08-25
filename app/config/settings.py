@@ -92,6 +92,8 @@ class Settings(BaseSettings):
     codex_home: str = ""
     codex_timeout_seconds: int = 1200
     codex_generated_images_dir: str = ""  # 留空时默认 ~/.codex/generated_images
+    # Codex/ImageGen 任务在可靠结构化回执下允许受控并发；默认两路。
+    image_generation_concurrency: int = 2
 
     # 微信发送（V2）。默认适配微信 4.1.x 的 Windows 键盘/剪贴板/OCR 驱动；
     # legacy_cli 保留旧 wechat-automation-api 兼容入口。

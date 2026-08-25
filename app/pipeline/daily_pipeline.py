@@ -3,13 +3,13 @@
 生成阶段（默认 00:15，run_date 决定周期）：
     PENDING → 首次取数/复用当天快照(messages.json) → DATA_READY → 排行(ranking.json/txt)
     → RANKING_READY → Codex GPT / DeepSeek 备用(image_prompt.txt) → PROMPT_READY
-    → Codex 串行生图(daily_image.png) → IMAGE_READY → READY_TO_SEND
+    → Codex 受控并发生图(daily_image.png) → IMAGE_READY → READY_TO_SEND
 发送阶段（每群 send_time）：
     READY_TO_SEND/IMAGE_READY → 发排行榜文字 → 发图片 → SENT
 
 约束：
 - 每个群独立状态；某群失败不阻塞其他群；
-- 生图阶段使用全局单队列严格串行；
+- 生图阶段默认最多 2 路并发，每个结果按独立 job_id 归属；
 - 同一群同一统计周期已到终态则跳过（force 可重跑）；
 - 同一日报日期的消息默认只读取一次；显式 refresh_messages 只覆盖当天快照，不连带重建 Prompt 或生图；
 - SENT 绝不重复发送（force_send 允许重发内容）。
@@ -124,12 +124,14 @@ class DailyPipeline:
             return [{"status": "no_groups", "reason": "无启用群"}]
 
         group_limit = normalized_limit(self.settings.generation_group_concurrency, 5)
+        image_limit = normalized_limit(self.settings.image_generation_concurrency, 2)
         logger.info(
-            "开始并行生成：groups=%d group_limit=%d fetch_limit=%d ai_limit=%d",
+            "开始并行生成：groups=%d group_limit=%d fetch_limit=%d ai_limit=%d image_limit=%d",
             len(groups),
             group_limit,
             normalized_limit(self.settings.wechat_fetch_concurrency, 1),
             normalized_limit(self.settings.ai_request_concurrency, 6),
+            image_limit,
         )
         if len(groups) == 1:
             group = groups[0]
@@ -153,7 +155,10 @@ class DailyPipeline:
             with ThreadPoolExecutor(
                 max_workers=min(group_limit, len(groups)),
                 thread_name_prefix="groupbrief-v2-group",
-            ) as executor:
+            ) as executor, ThreadPoolExecutor(
+                max_workers=min(image_limit, len(groups)),
+                thread_name_prefix="groupbrief-v2-image",
+            ) as image_executor:
                 future_indexes = {}
                 for index, group in enumerate(groups):
                     if refresh_messages:
@@ -175,7 +180,7 @@ class DailyPipeline:
                             force,
                         )
                     future_indexes[future] = index
-                results_by_index: dict[int, dict] = {}
+                image_future_indexes = {}
                 for future in as_completed(future_indexes):
                     result_index = future_indexes[future]
                     group = groups[result_index]
@@ -186,9 +191,29 @@ class DailyPipeline:
                         result = self._record_group_failure(
                             group, run_date_str, exc, "unexpected"
                         )
-                    results_by_index[result_index] = self._run_image_when_ready_safe(
-                        group, result, run_date_str, force
+                    image_future = image_executor.submit(
+                        self._run_image_when_ready_safe,
+                        group,
+                        result,
+                        run_date_str,
+                        force,
                     )
+                    image_future_indexes[image_future] = result_index
+
+                results_by_index: dict[int, dict] = {}
+                for image_future in as_completed(image_future_indexes):
+                    result_index = image_future_indexes[image_future]
+                    group = groups[result_index]
+                    try:
+                        results_by_index[result_index] = image_future.result()
+                    except Exception as exc:
+                        logger.exception(
+                            "群 %s 图片 worker 未捕获异常，已隔离",
+                            self._group_name(group),
+                        )
+                        results_by_index[result_index] = self._record_group_failure(
+                            group, run_date_str, exc, "image"
+                        )
 
         # 生图按 Prompt 完成顺序启动，API 结果仍按群配置顺序返回。
         return [results_by_index[index] for index in range(len(groups))]
@@ -272,11 +297,11 @@ class DailyPipeline:
         run_date: str,
         force: bool,
     ) -> dict:
-        """单群 Prompt 就绪后立即生图；调用方保证图片任务严格串行。"""
+        """单群 Prompt 就绪后立即提交受控并发生图。"""
         if not result.get("need_image"):
             return result
         group_name = group.display_name or group.wechat_group_name
-        logger.info("群 %s Prompt 已就绪，立即进入串行生图", group_name)
+        logger.info("群 %s Prompt 已就绪，立即进入受控并发生图", group_name)
         job = self._make_image_job(group, run_date, force)
         return self._run_image_jobs([job], run_date)[0]
 
@@ -645,6 +670,102 @@ class DailyPipeline:
             "status": "prompt_ready",
             "detail": "已复用 run.json 中已校验选题和既定分镜重建 Prompt；未取数，未生图",
         }
+
+    def rebuild_prompts_from_snapshots(
+        self,
+        targets: list[tuple[int, str, str]],
+        *,
+        acquire_lock: bool = True,
+    ) -> list[dict]:
+        """按稳定群 ID 并行重建已有快照；整个批次不访问微信或生图。"""
+        if acquire_lock:
+            with generation_mutex():
+                return self.rebuild_prompts_from_snapshots(
+                    targets,
+                    acquire_lock=False,
+                )
+        if not targets:
+            return []
+
+        seen: set[tuple[int, str]] = set()
+        normalized: list[tuple[int, str, str]] = []
+        for group_id, wechat_group_id, run_date in targets:
+            key = (int(group_id), str(run_date))
+            if key in seen:
+                continue
+            seen.add(key)
+            normalized.append((int(group_id), str(wechat_group_id), str(run_date)))
+
+        def rebuild_one(target: tuple[int, str, str]) -> dict:
+            group_id, expected_wechat_group_id, run_date = target
+            group = self._get_group(group_id)
+            if group is None:
+                return {
+                    "group_id": group_id,
+                    "status": "failed",
+                    "error_type": "GROUP_NOT_FOUND",
+                    "detail": f"群不存在 {group_id}",
+                }
+            actual_wechat_group_id = str(group.wechat_group_id or "").strip()
+            if not expected_wechat_group_id or actual_wechat_group_id != expected_wechat_group_id.strip():
+                return {
+                    "group_id": group_id,
+                    "status": "failed",
+                    "error_type": "GROUP_IDENTITY_MISMATCH",
+                    "detail": "group_id 与 wechat_group_id 不匹配，已停止重建",
+                }
+            group_name = self._group_name(group)
+            current = self.store.load_run(group_name, run_date)
+            try:
+                run_group_id = int(current.get("group_id"))
+            except (TypeError, ValueError):
+                run_group_id = -1
+            run_wechat_group_id = str(current.get("wechat_group_id") or "").strip()
+            if run_group_id != group_id or (
+                run_wechat_group_id and run_wechat_group_id != actual_wechat_group_id
+            ):
+                return {
+                    "group_id": group_id,
+                    "group_name": group_name,
+                    "status": "failed",
+                    "error_type": "RUN_IDENTITY_MISMATCH",
+                    "detail": "run.json 群身份与目标不一致，已停止重建",
+                }
+            result = self.rebuild_prompt_from_snapshot(
+                group_id,
+                run_date,
+                acquire_lock=False,
+            )
+            result.setdefault("group_id", group_id)
+            result.setdefault("wechat_group_id", actual_wechat_group_id)
+            return result
+
+        # 快照重建本身只读本地文件，允许六个群同时进入工作池；真正的
+        # Codex 文本调用仍由 provider 侧的 2 路信号量限流。
+        limit = min(len(normalized), 6)
+        if limit <= 1:
+            return [rebuild_one(target) for target in normalized]
+        results: dict[int, dict] = {}
+        with ThreadPoolExecutor(
+            max_workers=limit,
+            thread_name_prefix="groupbrief-prompt-rebuild",
+        ) as executor:
+            futures = {
+                executor.submit(rebuild_one, target): index
+                for index, target in enumerate(normalized)
+            }
+            for future in as_completed(futures):
+                index = futures[future]
+                try:
+                    results[index] = future.result()
+                except Exception as exc:
+                    results[index] = {
+                        "group_id": normalized[index][0],
+                        "status": "failed",
+                        "error_type": "PROMPT_REBUILD_FAILED",
+                        "detail": str(exc)[:500],
+                    }
+        return [results[index] for index in range(len(normalized))]
 
     def force_send(
         self,

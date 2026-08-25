@@ -288,6 +288,18 @@ export interface TopicSelection {
   candidates: TopicCandidate[];
 }
 
+export interface ImageCandidate {
+  candidate_id: string;
+  job_id: string;
+  group_id: number | string;
+  wechat_group_id: string;
+  group_name: string;
+  run_date: string;
+  sha256: string;
+  size_bytes: number;
+  preview_url: string;
+}
+
 // 群发现 / 解析绑定 / 测试读取（兼容保留能力）
 export interface DiscoveredGroup {
   group_id: string;
@@ -419,6 +431,13 @@ export const rebuildRunPrompt = (group: string, date: string) =>
   post<{ result: { status: string; detail?: string }; run: V2Run }>(`/v2/runs/${encodeURIComponent(group)}/${date}/rebuild-prompt`);
 export const regenerateRunImage = (group: string, date: string) =>
   post<{ accepted: boolean; run: V2Run }>(`/v2/runs/${encodeURIComponent(group)}/${date}/regenerate-image`);
+export const getRunImageCandidates = (group: string, date: string) =>
+  get<{ candidates: ImageCandidate[] }>(`/v2/runs/${encodeURIComponent(group)}/${date}/image-candidates`);
+export const claimRunImageCandidate = (
+  group: string,
+  date: string,
+  body: { job_id: string; candidate_id: string },
+) => post<{ claimed: boolean; run: V2Run }>(`/v2/runs/${encodeURIComponent(group)}/${date}/image-candidates/claim`, body);
 
 // 模板中心
 export const listRankingTemplates = () => get<{ templates: string[]; previews: Record<string, string> }>("/v2/templates/ranking");

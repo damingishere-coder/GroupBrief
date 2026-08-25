@@ -1,8 +1,8 @@
-"""V2 图片生成任务：验证工具 + 串行调度器。
+"""V2 图片生成任务：验证工具 + 受控并发调度器。
 
 - verify_image：文件存在 / 大小 > 0 / 可被识别为常见图片格式（零依赖签名校验）；
-- SerialImageQueue：多群图片严格串行——当前群生成成功并确认文件存在，
-  才允许开始下一个群；单群失败不阻塞其他群（结果标记失败，继续下一群）；
+- SerialImageQueue：兼容旧类名，默认串行并支持显式并发上限；
+  单群失败不阻塞其他群（结果标记失败，继续下一群）；
 - 每个群每天最多 1 张。
 """
 
@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import inspect
 import shutil
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from time import perf_counter
@@ -78,6 +79,29 @@ def verify_image(path: Path) -> tuple[bool, str]:
     return True, f"OK：{fmt} 图片，{size} 字节"
 
 
+def verify_image_contract(prompt_file: Path, image_path: Path) -> tuple[bool, str]:
+    """固定漫画 Prompt 声明 1024×1536 时，拒绝用裁切或错尺寸图片补救。"""
+    ok, detail = verify_image(image_path)
+    if not ok:
+        return ok, detail
+    try:
+        prompt = prompt_file.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        prompt = ""
+    if "1024×1536" not in prompt and "1024x1536" not in prompt.lower():
+        return True, detail
+    try:
+        from PIL import Image
+
+        with Image.open(image_path) as image:
+            width, height = image.size
+    except Exception as exc:
+        return False, f"无法读取图片尺寸：{exc}"
+    if (width, height) != (1024, 1536):
+        return False, f"图片尺寸必须为 1024×1536，实际为 {width}×{height}；禁止裁切补救"
+    return True, f"{detail}；尺寸 {width}×{height}"
+
+
 def copy_generated_image(src: Path, dst: Path) -> None:
     """把生成图片复制/移动到目标路径（output/<群>/<日期>/daily_image.png）。"""
     dst.parent.mkdir(parents=True, exist_ok=True)
@@ -94,12 +118,18 @@ class ImageJob:
         output_path: Path,
         generator: Any,
         force: bool = False,
+        job_id: str = "",
+        revision: int = 1,
+        prompt_sha256: str = "",
     ):
         self.group_name = group_name
         self.prompt_file = prompt_file
         self.output_path = output_path
         self.generator = generator
         self.force = force
+        self.job_id = job_id
+        self.revision = max(1, int(revision))
+        self.prompt_sha256 = prompt_sha256
 
     def run(self) -> dict:
         """执行生图并验证落盘。返回结构化结果。"""
@@ -116,7 +146,16 @@ class ImageJob:
                 }
         try:
             generate_parameters = inspect.signature(self.generator.generate).parameters
-            if "force" in generate_parameters:
+            if "job_id" in generate_parameters:
+                result = self.generator.generate(
+                    self.prompt_file,
+                    self.output_path,
+                    force=self.force,
+                    job_id=self.job_id,
+                    revision=self.revision,
+                    prompt_sha256=self.prompt_sha256,
+                )
+            elif "force" in generate_parameters:
                 result = self.generator.generate(
                     self.prompt_file,
                     self.output_path,
@@ -142,7 +181,7 @@ class ImageJob:
                 "error_type": IMAGE_GENERATION_FAILED,
                 "generator_detail": result.detail or {},
             }
-        ok, detail = verify_image(self.output_path)
+        ok, detail = verify_image_contract(self.prompt_file, self.output_path)
         if not ok:
             return {
                 "group_name": self.group_name,
@@ -162,23 +201,67 @@ class ImageJob:
 
 
 class SerialImageQueue:
-    """严格串行生图队列（多群共用单队列）。"""
+    """兼容旧类名的受控图片队列；默认串行，可显式设置并发上限。"""
 
-    def __init__(self, run_hook: Callable[[ImageJob, dict], None] | None = None):
+    def __init__(
+        self,
+        run_hook: Callable[[ImageJob, dict], None] | None = None,
+        *,
+        max_workers: int = 1,
+    ):
         # run_hook：每群完成后回调（用于写 run.json / 日志）
         self.run_hook = run_hook
+        self.max_workers = max(1, int(max_workers))
+
+    @staticmethod
+    def _run_timed(job: ImageJob) -> dict:
+        started_at = perf_counter()
+        result = job.run()
+        result["imagegen_ms"] = round((perf_counter() - started_at) * 1000)
+        return result
 
     def run_all(self, jobs: list[ImageJob]) -> list[dict]:
-        """按顺序逐群执行；上一群完成（成功或失败）后才执行下一群。"""
-        results: list[dict] = []
-        for job in jobs:
-            started_at = perf_counter()
-            result = job.run()
-            result["imagegen_ms"] = round((perf_counter() - started_at) * 1000)
-            results.append(result)
-            if self.run_hook:
+        """受控并发执行，结果顺序始终与输入任务一致。"""
+        if not jobs:
+            return []
+        if self.max_workers == 1 or len(jobs) == 1:
+            results: list[dict] = []
+            for job in jobs:
+                result = self._run_timed(job)
+                results.append(result)
+                if self.run_hook:
+                    try:
+                        self.run_hook(job, result)
+                    except Exception:
+                        pass
+            return results
+
+        results_by_index: dict[int, dict] = {}
+        with ThreadPoolExecutor(
+            max_workers=min(self.max_workers, len(jobs)),
+            thread_name_prefix="groupbrief-image",
+        ) as executor:
+            futures = {
+                executor.submit(self._run_timed, job): (index, job)
+                for index, job in enumerate(jobs)
+            }
+            for future in as_completed(futures):
+                index, job = futures[future]
                 try:
-                    self.run_hook(job, result)
-                except Exception:
-                    pass
-        return results
+                    result = future.result()
+                except Exception as exc:
+                    result = {
+                        "group_name": job.group_name,
+                        "status": "failed",
+                        "success": False,
+                        "detail": str(exc)[:300],
+                        "error_type": IMAGE_GENERATION_FAILED,
+                        "imagegen_ms": 0,
+                    }
+                results_by_index[index] = result
+                if self.run_hook:
+                    try:
+                        self.run_hook(job, result)
+                    except Exception:
+                        pass
+        return [results_by_index[index] for index in range(len(jobs))]

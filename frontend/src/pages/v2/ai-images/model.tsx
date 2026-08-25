@@ -18,6 +18,8 @@ export const REGEN_LABELS: Record<string, string> = {
   queued: "已排队",
   running: "生成中",
   fallback_queued: "已转入 Codex Desktop 队列",
+  ambiguous_result: "发现候选，等待人工认领",
+  result_unknown: "结果未知，已停止重试",
   ready_for_review: "新图待审核",
   prompt_rebuilt: "Prompt 已重建，等待生图",
   failed: "重新生图失败",
@@ -30,7 +32,8 @@ export interface ImageDetail {
 }
 
 export function runKey(run: V2Run): string {
-  return `${run.group_name}\u0000${run.run_date}`;
+  const stableId = run.group_id || run.wechat_group_id || run.group_name;
+  return `${stableId}\u0000${run.wechat_group_id || ""}\u0000${run.run_date}`;
 }
 
 export function formatDateTime(value: unknown): string {
@@ -95,6 +98,14 @@ export function renderGroupPreview(
     "{{report_date}}": "统计日期（从统计周期自动填入）",
     "{{message_count}}": "消息数（生成时自动填入）",
     "{{speaker_count}}": "发言人数（生成时自动填入）",
+    "{{main_title}}": "当天真实主标题（生成时自动填入）",
+    "{{subtitle}}": "当天真实副标题（生成时自动填入）",
+    "{{overall_visual}}": themeText
+      ? `固定群聊漫画要求\n\n本次手动视觉风格：${themeText}`
+      : "固定群聊漫画要求\n\n根据当天真实聊天内容自由选择统一视觉风格。",
+    "{{panels}}": "【版面1】\n当天真实话题的完整漫画导演稿（生成时自动填入）",
+    "{{text_rules}}": "固定文字合同（生成时自动填入）",
+    "{{footer_summary}}": "当天真实底部总结（生成时自动填入）",
     "{{image_theme}}": themeText || "（在上方输入指定风格后自动填入）",
     "{{layout_name}}": "整张海报版式（生成时自动选择）",
     "{{layout_instruction}}": "版式结构指令（生成时自动填入）",

@@ -385,6 +385,7 @@ def _seed_defaults(settings: Settings) -> None:
         "codex_home": settings.codex_home,
         "codex_timeout_seconds": str(settings.codex_timeout_seconds),
         "codex_generated_images_dir": settings.codex_generated_images_dir,
+        "image_generation_concurrency": str(settings.image_generation_concurrency),
         "wechat_sender_mode": settings.wechat_sender_mode,
         "wechat_native_action_delay_seconds": str(settings.wechat_native_action_delay_seconds),
         "wechat_native_mutex_timeout_seconds": str(settings.wechat_native_mutex_timeout_seconds),

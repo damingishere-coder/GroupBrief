@@ -6,7 +6,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from fastapi import HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.config.settings import Settings
 from app.v2.run_store import RunStore, validate_run_date
@@ -53,6 +53,21 @@ class RunPromptUpdateBody(BaseModel):
     expected_revision: str
     image_theme: str
     image_theme_custom: str = ""
+
+
+class StableRunTarget(BaseModel):
+    group_id: int
+    wechat_group_id: str
+    run_date: str
+
+
+class BatchRunTargetsBody(BaseModel):
+    targets: list[StableRunTarget] = Field(min_length=1, max_length=50)
+
+
+class CandidateClaimBody(BaseModel):
+    job_id: str = Field(min_length=8, max_length=64)
+    candidate_id: str = Field(min_length=64, max_length=64)
 
 
 class RetryBody(BaseModel):

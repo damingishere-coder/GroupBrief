@@ -112,7 +112,7 @@ class ImmediateFakeImageGenerator:
             self.calls.append(prompt)
         if prompt == "Prompt 快群":
             self.prompt_order.image_started.set()
-        time.sleep(0.02)
+        time.sleep(0.15)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_bytes(bytes.fromhex(
             "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489"
@@ -196,7 +196,7 @@ def test_prompt_ready_group_starts_image_before_other_prompts_finish(tmp_path, m
 
     assert prompt_order.slow_saw_image_start is True
     assert generator.calls == ["Prompt 快群", "Prompt 慢群"]
-    assert generator.maximum == 1
+    assert generator.maximum == 2
     assert [item["group_name"] for item in results] == ["慢群", "快群"]
     assert all(item["status"] == "ready_to_send" for item in results)
 

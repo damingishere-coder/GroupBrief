@@ -1,11 +1,14 @@
 import { useEffect, useMemo, useState } from "react";
 
 import {
+  claimRunImageCandidate,
+  getRunImageCandidates,
   getRunDetail,
   getRunPrompt,
   getRuns,
   getV2File,
   GroupV2,
+  ImageCandidate,
   pipelineSend,
   rebuildRunPrompt,
   regenerateRunImage,
@@ -50,6 +53,9 @@ export function useAIImageRuns(groups: GroupV2[], toast: ToastFn) {
   const [runPromptError, setRunPromptError] = useState("");
   const [regenPollError, setRegenPollError] = useState("");
   const [detailReloadVersion, setDetailReloadVersion] = useState(0);
+  const [imageCandidates, setImageCandidates] = useState<ImageCandidate[]>([]);
+  const [candidateLoading, setCandidateLoading] = useState(false);
+  const [candidateClaiming, setCandidateClaiming] = useState("");
 
   const loadRuns = () => {
     setLoading(true);
@@ -138,10 +144,37 @@ export function useAIImageRuns(groups: GroupV2[], toast: ToastFn) {
     };
   }, [detailReloadVersion, runs, selectedKey, toast]);
 
-  const regenStatus = String(detail?.run.image_regen_status || "idle");
+  const persistedRegenStatus = String(detail?.run.image_regen_status || "idle");
+  const imageJobStatus = String(
+    (detail?.run.image_job as { status?: unknown } | undefined)?.status || "",
+  );
+  const regenStatus = ["", "idle"].includes(persistedRegenStatus)
+    && ["ambiguous_result", "result_unknown"].includes(imageJobStatus)
+    ? imageJobStatus
+    : persistedRegenStatus;
   const currentImageSrc = detail
     ? `${getV2File(detail.run.group_name, detail.run.run_date, "daily_image.png")}?v=${imageVersion}`
     : "";
+
+  useEffect(() => {
+    if (!detail || !["ambiguous_result", "result_unknown"].includes(regenStatus)) {
+      setImageCandidates([]);
+      return;
+    }
+    let cancelled = false;
+    setCandidateLoading(true);
+    getRunImageCandidates(detail.run.group_name, detail.run.run_date)
+      .then((result) => {
+        if (!cancelled) setImageCandidates(result.candidates);
+      })
+      .catch((reason: unknown) => {
+        if (!cancelled) toast(`候选图片加载失败：${String(reason)}`);
+      })
+      .finally(() => {
+        if (!cancelled) setCandidateLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [detail?.run.group_name, detail?.run.run_date, regenStatus, toast]);
 
   useEffect(() => {
     if (!detail || !["queued", "running", "fallback_queued"].includes(regenStatus)) {
@@ -169,7 +202,7 @@ export function useAIImageRuns(groups: GroupV2[], toast: ToastFn) {
           const nextStatus = String(next.run.image_regen_status || "idle");
           continuePolling = ["queued", "running", "fallback_queued"].includes(nextStatus);
           nextDelay = regenerationPollDelay(nextStatus, 0);
-          if (["ready_for_review", "failed"].includes(nextStatus)) {
+          if (["ready_for_review", "failed", "ambiguous_result", "result_unknown"].includes(nextStatus)) {
             setImageVersion((current) => current + 1);
             loadRuns();
           }
@@ -292,11 +325,32 @@ export function useAIImageRuns(groups: GroupV2[], toast: ToastFn) {
     try {
       const accepted = await regenerateRunImage(detail.run.group_name, detail.run.run_date);
       setDetail((current) => current ? { ...current, run: accepted.run } : current);
-      toast("已加入单队列；生成成功后会停在人工审核状态");
+      toast("已加入 2 路受控队列；生成成功后会停在人工审核状态");
     } catch (reason) {
       toast(`重新生图请求失败：${String(reason)}`);
     } finally {
       setRegenerating(false);
+    }
+  };
+
+  const claimCandidate = async (candidate: ImageCandidate) => {
+    if (!detail) return;
+    setCandidateClaiming(candidate.candidate_id);
+    try {
+      const claimed = await claimRunImageCandidate(
+        detail.run.group_name,
+        detail.run.run_date,
+        { job_id: candidate.job_id, candidate_id: candidate.candidate_id },
+      );
+      setDetail((current) => current ? { ...current, run: claimed.run } : current);
+      setImageCandidates([]);
+      setImageVersion((current) => current + 1);
+      loadRuns();
+      toast("候选图片已按 job_id 和哈希认领，旧图已备份；仍需人工审核，不会自动发送");
+    } catch (reason) {
+      toast(`候选图片认领失败：${String(reason)}`);
+    } finally {
+      setCandidateClaiming("");
     }
   };
 
@@ -355,6 +409,9 @@ export function useAIImageRuns(groups: GroupV2[], toast: ToastFn) {
     detailError,
     runPromptError,
     regenPollError,
+    imageCandidates,
+    candidateLoading,
+    candidateClaiming,
     setDetailReloadVersion,
     filteredRuns,
     regenStatus,
@@ -366,6 +423,7 @@ export function useAIImageRuns(groups: GroupV2[], toast: ToastFn) {
     restoreCurrentPrompt,
     rebuildCurrentPrompt,
     regenerate,
+    claimCandidate,
     confirmSend,
   };
 }

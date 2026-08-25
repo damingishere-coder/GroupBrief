@@ -1,11 +1,14 @@
-"""DailyPipeline 的图片任务阶段实现。"""
+"""DailyPipeline 的受控并发图片任务阶段实现。"""
 
 from __future__ import annotations
 
 from datetime import datetime
+import hashlib
 from typing import Callable
+import uuid
 
 from app.image.image_task import ImageJob, SerialImageQueue
+from app.image.regeneration import normalize_candidate_diagnostics
 from app.v2.constants import (
     FAILED,
     IMAGE_GENERATION_FAILED,
@@ -16,19 +19,45 @@ from app.v2.run_store import RunStore
 
 
 class ImageStages:
-    """构造、记录并收口严格串行的图片任务。"""
+    """构造、记录并收口受控并发的图片任务。"""
 
     def __init__(self, *, store: RunStore, image_generator) -> None:
         self.store = store
         self.image_generator = image_generator
 
     def make_job(self, group_name: str, run_date: str, force: bool) -> ImageJob:
+        prompt_path = self.store.prompt_path(group_name, run_date)
+        prompt_sha256 = hashlib.sha256(prompt_path.read_bytes()).hexdigest()
+        current = self.store.load_run(group_name, run_date)
+        previous = current.get("image_job") if isinstance(current.get("image_job"), dict) else {}
+        if (
+            not force
+            and previous.get("job_id")
+            and previous.get("prompt_sha256") == prompt_sha256
+        ):
+            job_id = str(previous["job_id"])
+            revision = max(1, int(previous.get("revision") or 1))
+        else:
+            job_id = uuid.uuid4().hex
+            revision = max(1, int(previous.get("revision") or 0) + 1)
+        image_job = {
+            "job_id": job_id,
+            "revision": revision,
+            "prompt_sha256": prompt_sha256,
+            "status": "queued",
+            "queued_at": datetime.now().astimezone().isoformat(),
+            "candidates": [],
+        }
+        self.store.update(group_name, run_date, image_job=image_job)
         return ImageJob(
             group_name=group_name,
-            prompt_file=self.store.prompt_path(group_name, run_date),
+            prompt_file=prompt_path,
             output_path=self.store.image_path(group_name, run_date),
             generator=self.image_generator,
             force=force,
+            job_id=job_id,
+            revision=revision,
+            prompt_sha256=prompt_sha256,
         )
 
     def record_result(self, job: ImageJob, result: dict) -> None:
@@ -52,6 +81,27 @@ class ImageStages:
         generator_detail = result.get("generator_detail")
         if not isinstance(generator_detail, dict):
             generator_detail = {}
+        image_job = current.get("image_job") if isinstance(current.get("image_job"), dict) else {}
+        candidates = normalize_candidate_diagnostics(generator_detail)
+        next_job = {
+            **image_job,
+            "status": "completed" if result["success"] else (
+                "result_unknown"
+                if generator_detail.get("outcome_unknown") and not candidates
+                else "ambiguous_result"
+                if generator_detail.get("stage") == "ambiguous" or candidates
+                else "failed"
+            ),
+            "finished_at": datetime.now().astimezone().isoformat(),
+            "receipt": {
+                "job_id": job.job_id,
+                "revision": job.revision,
+                "prompt_sha256": job.prompt_sha256,
+                "image_path": str(job.output_path.resolve()) if result["success"] else "",
+                "sha256": str(generator_detail.get("sha256") or ""),
+            },
+            "candidates": candidates,
+        }
         self.store.update(
             job.group_name,
             run_date,
@@ -73,6 +123,7 @@ class ImageStages:
             image_recovery_status=str(generator_detail.get("recovery_status") or ""),
             image_candidate_diagnostics=generator_detail.get("candidate_diagnostics") or [],
             image_attempts=generator_detail.get("attempts") or [],
+            image_job=next_job,
         )
 
     def advance_ready(self, job: ImageJob, run_date: str) -> None:
@@ -88,7 +139,9 @@ class ImageStages:
         run_hook: Callable[[ImageJob, dict], None],
         after_hook: Callable[[ImageJob, str], None],
     ) -> list[dict]:
-        queue = SerialImageQueue(run_hook=run_hook)
+        settings = getattr(self.image_generator, "settings", None)
+        max_workers = int(getattr(settings, "image_generation_concurrency", 1) or 1)
+        queue = SerialImageQueue(run_hook=run_hook, max_workers=max_workers)
         queue_results = queue.run_all(image_jobs)
         final_results: list[dict] = []
         for job, queue_result in zip(image_jobs, queue_results):
