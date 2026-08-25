@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.config.settings import Settings
+from app.providers.ai.base import ExternalCallNotSubmittedError
 from app.providers.ai.codex import CodexGPTProvider, build_summary_provider
 
 
@@ -70,22 +71,34 @@ def test_codex_success_uses_stdin_read_only_and_does_not_call_fallback(monkeypat
     assert "--ephemeral" in captured["command"]
 
 
-def test_codex_failure_uses_deepseek_fallback(monkeypatch):
+def test_codex_confirmed_not_submitted_uses_deepseek_fallback(monkeypatch):
     provider = CodexGPTProvider(_settings(ai_api_key="fake"))
     fallback = _Fallback(result="备用成功")
     provider._fallback = fallback
-    monkeypatch.setattr(provider, "_codex_chat", lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("主模型失败")))
+    monkeypatch.setattr(
+        provider,
+        "_codex_chat",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            ExternalCallNotSubmittedError("主模型未提交")
+        ),
+    )
 
     assert provider._chat([{"role": "user", "content": "test"}]) == "备用成功"
     assert fallback.calls == 1
 
 
-def test_codex_and_deepseek_failure_returns_clear_error(monkeypatch):
+def test_codex_not_submitted_and_deepseek_failure_returns_clear_error(monkeypatch):
     provider = CodexGPTProvider(_settings(ai_api_key="fake"))
     provider._fallback = _Fallback(error=RuntimeError("备用失败"))
-    monkeypatch.setattr(provider, "_codex_chat", lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("主模型失败")))
+    monkeypatch.setattr(
+        provider,
+        "_codex_chat",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            ExternalCallNotSubmittedError("主模型未提交")
+        ),
+    )
 
-    with pytest.raises(RuntimeError, match="主模型与 DeepSeek 备用均失败"):
+    with pytest.raises(RuntimeError, match="未提交且 DeepSeek 备用失败"):
         provider._chat([{"role": "user", "content": "test"}])
 
 

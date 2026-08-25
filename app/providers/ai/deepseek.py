@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import random
 import time
 
@@ -30,7 +32,13 @@ from app.ai.deepseek_events import (
 )
 from app.config.settings import Settings
 from app.core.logging import get_logger
-from app.providers.ai.base import ImagePromptResult, PromptContext, PromptGeneratorProvider
+from app.providers.ai.base import (
+    ExternalCallNotSubmittedError,
+    ExternalCallResultUnknownError,
+    ImagePromptResult,
+    PromptContext,
+    PromptGeneratorProvider,
+)
 
 logger = get_logger("groupbrief.ai")
 
@@ -224,10 +232,15 @@ class DeepSeekV4FlashProvider(PromptGeneratorProvider):
         if response_format == "json_object":
             payload["response_format"] = {"type": "json_object"}
 
+        request_id = hashlib.sha256(
+            json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(
+                "utf-8"
+            )
+        ).hexdigest()[:24]
         attempts = max(1, int(self.settings.ai_max_retries))
         last_error = ""
+        last_failure_was_pre_submit = False
         for attempt in range(1, attempts + 1):
-            retryable = True
             try:
                 with bounded_slot(
                     "deepseek_request",
@@ -239,21 +252,67 @@ class DeepSeekV4FlashProvider(PromptGeneratorProvider):
                         json=payload,
                         timeout=self.settings.ai_timeout_seconds,
                     )
-                if response.status_code == 200:
+            except (httpx.ConnectTimeout, httpx.PoolTimeout, httpx.ConnectError) as exc:
+                # 连接尚未建立或尚未取得连接池槽位，可以确认未提交。
+                last_error = str(exc)[:160] or exc.__class__.__name__
+                last_failure_was_pre_submit = True
+                logger.warning(
+                    "DeepSeek 连接前失败（attempt=%d request_id=%s）：%s",
+                    attempt,
+                    request_id,
+                    last_error,
+                )
+                if attempt < attempts:
+                    delay = min(8.0, 2 ** (attempt - 1)) + random.uniform(0.0, 0.35)
+                    time.sleep(delay)
+                    continue
+                break
+            except httpx.InvalidURL as exc:
+                raise ExternalCallNotSubmittedError(
+                    f"DeepSeek URL 无效（request_id={request_id}）：{str(exc)[:160]}"
+                ) from exc
+            except httpx.RequestError as exc:
+                # 写入超时、读取超时、远端中断都无法证明请求未到达 Provider。
+                raise ExternalCallResultUnknownError(
+                    f"DeepSeek 请求结果未知（request_id={request_id}）：{exc.__class__.__name__}"
+                ) from exc
+
+            if response.status_code == 200:
+                try:
                     data = response.json()
                     content = data["choices"][0]["message"]["content"]
                     if not isinstance(content, str) or not content.strip():
                         raise ValueError("DeepSeek 返回空内容")
-                    logger.info("DeepSeek 调用成功（attempt %d）", attempt)
-                    return content
-                last_error = f"HTTP {response.status_code}: {response.text[:200]}"
-                retryable = response.status_code in {429, 503} or response.status_code >= 500
-                logger.warning("DeepSeek attempt %d 失败：%s", attempt, last_error)
-            except Exception as exc:
-                last_error = str(exc)[:200]
-                logger.warning("DeepSeek attempt %d 异常：%s", attempt, last_error)
+                except (KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                    raise ExternalCallResultUnknownError(
+                        f"DeepSeek 成功响应无法解析（request_id={request_id}）"
+                    ) from exc
+                logger.info(
+                    "DeepSeek 调用成功（attempt=%d request_id=%s）", attempt, request_id
+                )
+                return content
+
+            # 429/503 明确表示限流或暂不可用，可以受控重试；其他 5xx 不能
+            # 证明 Provider 没有在内部完成请求，按结果未知处理。
+            last_failure_was_pre_submit = False
+            last_error = f"HTTP {response.status_code}"
+            if response.status_code >= 500 and response.status_code != 503:
+                raise ExternalCallResultUnknownError(
+                    f"DeepSeek 服务端错误且结果未知（request_id={request_id}）：{last_error}"
+                )
+            retryable = response.status_code in {429, 503}
+            logger.warning(
+                "DeepSeek 明确拒绝（attempt=%d request_id=%s）：%s",
+                attempt,
+                request_id,
+                last_error,
+            )
             if attempt >= attempts or not retryable:
                 break
             delay = min(8.0, 2 ** (attempt - 1)) + random.uniform(0.0, 0.35)
             time.sleep(delay)
+        if last_failure_was_pre_submit:
+            raise ExternalCallNotSubmittedError(
+                f"DeepSeek 未提交：{last_error}（request_id={request_id}）"
+            )
         raise RuntimeError(f"DeepSeek 调用失败：{last_error}")

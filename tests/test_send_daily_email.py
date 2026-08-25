@@ -163,7 +163,7 @@ def test_main_sends_each_group_and_continues_after_failure(tmp_path, monkeypatch
 
     rc = mail_script.main()
 
-    assert rc == 1
+    assert rc == 3
     sent_subjects = [
         str(message["Subject"])
         for instance in FakeSMTP.instances
@@ -177,10 +177,20 @@ def test_main_sends_each_group_and_continues_after_failure(tmp_path, monkeypatch
         if "失败群" in str(message["Subject"])
     ]
     assert len(sent_subjects) == 1
-    assert len(failed_attempts) == 2
+    assert len(failed_attempts) == 1
 
 
-def test_send_quit_failure_does_not_retry(monkeypatch):
+def test_delivery_exit_code_treats_skipped_group_as_partial():
+    assert mail_script._delivery_exit_code(
+        sent_count=1,
+        already_sent_count=0,
+        failed_count=0,
+        unknown_count=0,
+        skipped_count=1,
+    ) == 2
+
+
+def test_send_quit_failure_does_not_retry(tmp_path, monkeypatch):
     settings = _settings(None)
     calls = {"connect": 0, "send": 0, "sleep": 0}
 
@@ -202,10 +212,14 @@ def test_send_quit_failure_does_not_retry(monkeypatch):
     message = mail_script.EmailMessage()
     message["Subject"] = "测试群"
 
-    ok, detail = mail_script._send_with_retry(message, settings)
+    result = mail_script._send_with_retry(
+        message,
+        settings,
+        ledger=mail_script.EmailDeliveryLedger(tmp_path / "ledger"),
+    )
 
-    assert ok
-    assert detail == ""
+    assert result.success
+    assert result.detail == ""
     assert calls == {"connect": 1, "send": 1, "sleep": 0}
 
 

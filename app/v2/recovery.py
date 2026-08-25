@@ -78,6 +78,12 @@ def scan_incomplete(store: RunStore, run_date: str | None = None) -> list[dict]:
             item["recovery_type"] = "manual_review"
             incomplete.append(item)
             continue
+        if run.get("prompt_hold") or run.get("prompt_operation_status") == "unknown":
+            item = dict(run)
+            item["recovery_type"] = "manual_review"
+            item["error_type"] = "PROMPT_RESULT_UNKNOWN"
+            incomplete.append(item)
+            continue
         if status in (SENT, FAILED):
             continue
         item = dict(run)
@@ -150,12 +156,17 @@ def recover_incomplete(
     for run in incomplete:
         group_name = run["group_name"]
         if run.get("recovery_type") == "manual_review":
+            error_type = str(run.get("error_type") or RUN_STATE_CORRUPT)
             results.append(
                 {
                     "group_name": group_name,
                     "status": "blocked",
-                    "error_type": RUN_STATE_CORRUPT,
-                    "detail": "运行状态文件损坏，需人工复核",
+                    "error_type": error_type,
+                    "detail": (
+                        "AI 调用结果未知，需人工复核"
+                        if error_type == "PROMPT_RESULT_UNKNOWN"
+                        else "运行状态文件损坏，需人工复核"
+                    ),
                 }
             )
             continue

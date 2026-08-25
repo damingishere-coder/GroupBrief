@@ -23,7 +23,7 @@ from app.pipeline.daily_pipeline import DailyPipeline, parse_date
 from app.services.generation_runtime import GenerationBusyError, generation_mutex
 from app.services.email_service import email_delivery_config_error
 from app.v2.constants import SCHEDULER_STATE_CORRUPT
-from app.scheduler.outcome import attach_outcome, summarize_results
+from app.scheduler.outcome import ProcessExitCode, attach_outcome, summarize_results
 
 logger = get_logger("groupbrief.scheduler")
 _STATE_LOCK = threading.RLock()
@@ -316,6 +316,22 @@ def _run_locked(settings: Settings, run_date: date, *, skip_email: bool) -> dict
         }
 
     if state.get("email_completed_at"):
+        if state.get("email_status") == "unknown":
+            return {
+                "status": "blocked",
+                "run_date": run_date_text,
+                "generation_status": generation_status,
+                "email_status": "unknown",
+                "error_type": "EMAIL_RESULT_UNKNOWN",
+                "detail": "邮件发送结果未知，需人工检查",
+            }
+        if state.get("email_status") in {"partial", "failed", "failed_before_submit"}:
+            return {
+                "status": "partial",
+                "run_date": run_date_text,
+                "generation_status": generation_status,
+                "email_status": state.get("email_status"),
+            }
         completed_status = generation_status if generation_status != "success" else "already_completed"
         return {
             "status": completed_status,
@@ -410,20 +426,47 @@ def _run_locked(settings: Settings, run_date: date, *, skip_email: bool) -> dict
         return {"status": "failed", "detail": str(exc)[:300]}
 
     output_tail = ((proc.stdout or "") + "\n" + (proc.stderr or ""))[-800:]
-    email_status = "sent" if proc.returncode == 0 else "failed"
+    if proc.returncode == int(ProcessExitCode.SUCCESS):
+        email_status = "sent"
+        result_status = generation_status
+        email_hold = False
+    elif proc.returncode == int(ProcessExitCode.PARTIAL):
+        email_status = "partial"
+        result_status = "partial"
+        email_hold = False
+    elif proc.returncode == int(ProcessExitCode.BLOCKED):
+        email_status = "unknown"
+        result_status = "blocked"
+        email_hold = True
+    else:
+        email_status = "failed_before_submit"
+        result_status = "partial"
+        email_hold = False
     state_store.update(
         run_date_text,
         email_status=email_status,
         email_completed_at=_now_iso(),
         email_exit_code=proc.returncode,
         email_detail=output_tail,
+        email_hold=email_hold,
+        email_error=(
+            "逐群邮件账本存在结果未知项，禁止自动重复发送"
+            if email_status == "unknown"
+            else ""
+        ),
     )
-    return {
-        "status": generation_status if proc.returncode == 0 else "partial",
+    result = {
+        "status": result_status,
         "run_date": run_date_text,
         "generation_status": generation_status,
         "email_status": email_status,
     }
+    if email_status == "unknown":
+        result.update(
+            error_type="EMAIL_RESULT_UNKNOWN",
+            detail="逐群邮件账本存在结果未知项，需人工核对",
+        )
+    return result
 
 
 def _generation_status(results: list[dict]) -> str:

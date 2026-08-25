@@ -233,7 +233,13 @@ class CodexImageGenerator:
 
     # ---------- 生成 ----------
 
-    def generate(self, prompt_file: Path, output_path: Path) -> ImageTaskResult:
+    def generate(
+        self,
+        prompt_file: Path,
+        output_path: Path,
+        *,
+        force: bool = False,
+    ) -> ImageTaskResult:
         # 配置/可执行性错误不应排队等待全局生图锁；进入锁后仍会再次检查，
         # 以覆盖等待期间 CLI 状态发生变化的情况。
         ok, detail = self.health_check()
@@ -241,19 +247,44 @@ class CodexImageGenerator:
             return ImageTaskResult(False, error=detail, detail={"stage": "health"})
         try:
             with _imagegen_mutex((self.timeout * _MAX_ATTEMPTS) + 60):
-                return self._generate_locked(Path(prompt_file), Path(output_path))
+                return self._generate_locked(
+                    Path(prompt_file),
+                    Path(output_path),
+                    force=force,
+                )
         except TimeoutError as exc:
             return ImageTaskResult(False, error=str(exc), detail={"stage": "mutex"})
         except Exception as exc:
             logger.exception("Codex 生图互斥阶段异常")
             return ImageTaskResult(False, error=str(exc)[:300], detail={"stage": "mutex"})
 
-    def _generate_locked(self, prompt_file: Path, output_path: Path) -> ImageTaskResult:
+    def _generate_locked(
+        self,
+        prompt_file: Path,
+        output_path: Path,
+        *,
+        force: bool = False,
+    ) -> ImageTaskResult:
         ok, detail = self.health_check()
         if not ok:
             return ImageTaskResult(False, error=detail, detail={"stage": "health"})
         if not prompt_file.exists():
             return ImageTaskResult(False, error=f"image_prompt.txt 不存在：{prompt_file}", detail={"stage": "input"})
+
+        # ImageJob 的锁外检查只能优化单进程路径；跨进程排队后必须在同一
+        # 生图 mutex 内重新确认，避免两个执行者依次重复生成同一张图。
+        if not force:
+            existing_ok, _ = verify_image(output_path)
+            if existing_ok:
+                return ImageTaskResult(
+                    True,
+                    image_path=output_path,
+                    detail={
+                        "stage": "existing",
+                        "recovery_status": "existing_output_reused",
+                        "attempt_count": 0,
+                    },
+                )
 
         try:
             prompt_text = prompt_file.read_text(encoding="utf-8")
@@ -270,6 +301,19 @@ class CodexImageGenerator:
         if previous:
             history = list(previous.get("attempt_history") or [])
             previous_number = self._safe_attempt_number(previous.get("attempt_number"))
+            if previous.get("state") == "completed" and not force:
+                return ImageTaskResult(
+                    False,
+                    error="上次生图已确认完成但正式输出缺失，禁止自动重复生成",
+                    detail={
+                        "stage": "resume",
+                        "outcome_unknown": False,
+                        "attempt_count": previous_number,
+                        "recovery_status": "completed_output_missing",
+                        "candidate_diagnostics": previous.get("candidate_diagnostics") or [],
+                        "attempts": history,
+                    },
+                )
             if previous.get("state") == "exhausted":
                 return self._attempts_exhausted_result(previous_number, history, previous)
             if previous.get("state") == "blocked_process":
@@ -285,8 +329,40 @@ class CodexImageGenerator:
                         "attempts": history,
                     },
                 )
+            if previous.get("state") == "result_unknown":
+                return ImageTaskResult(
+                    False,
+                    error="上次 Codex 生图已启动但结果未知，禁止自动重复生成",
+                    detail={
+                        "stage": "resume",
+                        "outcome_unknown": True,
+                        "attempt_count": previous_number,
+                        "recovery_status": "result_unknown_hold",
+                        "candidate_diagnostics": previous.get("candidate_diagnostics") or [],
+                        "attempts": history,
+                    },
+                )
             if previous.get("state") == "retrying":
-                next_attempt = previous_number + 1
+                if previous.get("outcome") == "start_failed":
+                    next_attempt = previous_number + 1
+                else:
+                    previous.update(
+                        state="result_unknown",
+                        recovery_reason="旧重试记录无法证明外部调用未发生，已转人工复核",
+                    )
+                    self._write_attempt_manifest(manifest_path, previous)
+                    return ImageTaskResult(
+                        False,
+                        error="旧 Codex 生图重试记录结果未知，禁止自动重复生成",
+                        detail={
+                            "stage": "resume",
+                            "outcome_unknown": True,
+                            "attempt_count": previous_number,
+                            "recovery_status": "legacy_retry_result_unknown",
+                            "candidate_diagnostics": previous.get("candidate_diagnostics") or [],
+                            "attempts": history,
+                        },
+                    )
             if previous.get("state") == "running":
                 source, diagnostics, reason = self._reconcile_attempt(previous, task_dir)
                 recovered_history = [
@@ -318,8 +394,27 @@ class CodexImageGenerator:
                             "attempts": history,
                         },
                     )
-                history = recovered_history
-                next_attempt = previous_number + 1
+                previous.update(
+                    state="result_unknown",
+                    finished_at=datetime_now_iso(),
+                    outcome="interrupted",
+                    recovery_reason="进程已停止但没有可信候选，外部调用结果未知",
+                    attempt_history=recovered_history,
+                    candidate_diagnostics=diagnostics,
+                )
+                self._write_attempt_manifest(manifest_path, previous)
+                return ImageTaskResult(
+                    False,
+                    error="上次 Codex 生图进程已停止但结果未知，禁止自动重试",
+                    detail={
+                        "stage": "resume",
+                        "outcome_unknown": True,
+                        "attempt_count": previous_number,
+                        "recovery_status": "interrupted_result_unknown",
+                        "candidate_diagnostics": diagnostics,
+                        "attempts": recovered_history,
+                    },
+                )
 
         environment = os.environ.copy()
         environment["CODEX_HOME"] = str(self.codex_home)
@@ -408,6 +503,32 @@ class CodexImageGenerator:
                         "outcome_unknown": True,
                         "attempt_count": attempt_number,
                         "recovery_status": "timeout_process_still_running",
+                        "candidate_diagnostics": diagnostics,
+                        "attempts": history,
+                    },
+                )
+
+            if outcome != "start_failed":
+                reason = reason or "外部生图已启动但没有可信结果"
+                audit["recovery_reason"] = reason
+                attempt.update(
+                    state="result_unknown",
+                    finished_at=datetime_now_iso(),
+                    outcome=outcome,
+                    exit_code=exit_code,
+                    recovery_reason=reason,
+                    attempt_history=history,
+                    candidate_diagnostics=diagnostics,
+                )
+                self._write_attempt_manifest(manifest_path, attempt)
+                return ImageTaskResult(
+                    False,
+                    error="Codex 生图已启动但结果未知，已禁止自动重试",
+                    detail={
+                        "stage": "ambiguous" if len(diagnostics) > 1 else "exec",
+                        "outcome_unknown": True,
+                        "attempt_count": attempt_number,
+                        "recovery_status": "result_unknown_hold",
                         "candidate_diagnostics": diagnostics,
                         "attempts": history,
                     },

@@ -8,8 +8,8 @@
 
 from __future__ import annotations
 
-import smtplib
-import time
+import smtplib  # 兼容旧测试注入；真实发送实现在 email_delivery
+import time  # 兼容旧测试注入；真实退避实现在 email_delivery
 from dataclasses import dataclass, field
 from email.message import EmailMessage
 from pathlib import Path
@@ -22,6 +22,7 @@ from app.db import repository as repo
 from app.db.models import GroupRun, Report, Run
 from app.image.image_task import detect_image_format, verify_image
 from app.scheduler.calendar_rules import email_subject, get_report_window
+from app.services.email_delivery import EmailDeliveryLedger, deliver_email
 from app.services.handoff_service import safe_dir_name
 
 logger = get_logger("groupbrief.email")
@@ -67,8 +68,13 @@ class EmailBuildResult:
 
 
 class EmailService:
-    def __init__(self, settings: Settings | None = None):
+    def __init__(
+        self,
+        settings: Settings | None = None,
+        delivery_ledger: EmailDeliveryLedger | None = None,
+    ):
         self.settings = settings or get_settings()
+        self.delivery_ledger = delivery_ledger
 
     def build_email(self, session: Session, run: Run | None = None) -> EmailBuildResult:
         """读取各群邮件数据；body 只拼接排行榜原文，不再额外包装。"""
@@ -146,7 +152,8 @@ class EmailService:
             return False, f"存在失败群且 SEND_PARTIAL_REPORT=false：{result.missing[0]}"
 
         sent_count = 0
-        failed_count = 0
+        # 允许发送部分报告不等于可以把缺失群伪装成全量成功。
+        failed_count = len(result.missing)
         details: list[str] = []
         for block in result.blocks:
             try:
@@ -225,46 +232,15 @@ class EmailService:
         return message
 
     def _send_group_message(self, message: EmailMessage, max_attempts: int = 2) -> tuple[bool, str]:
-        """单群 SMTP 失败最多重试两次，最终结果交给 send() 汇总。"""
-        last_error = ""
-        for attempt in range(1, max_attempts + 1):
-            server = None
-            attempt_error: Exception | None = None
-            try:
-                if self.settings.email_use_ssl:
-                    server = smtplib.SMTP_SSL(
-                        self.settings.email_smtp_host,
-                        self.settings.email_smtp_port,
-                        timeout=30,
-                    )
-                else:
-                    server = smtplib.SMTP(
-                        self.settings.email_smtp_host,
-                        self.settings.email_smtp_port,
-                        timeout=30,
-                    )
-                    server.starttls()
-                if self.settings.email_smtp_user:
-                    server.login(
-                        self.settings.email_smtp_user,
-                        self.settings.email_smtp_password,
-                    )
-                server.send_message(message)
-            except Exception as exc:
-                attempt_error = exc
-                last_error = str(exc)
-            finally:
-                if server is not None:
-                    try:
-                        quit_method = getattr(server, "quit", None)
-                        if quit_method is not None:
-                            quit_method()
-                    except Exception as exc:
-                        # send_message 已成功时，QUIT 异常不能触发重复发送。
-                        logger.warning("SMTP 连接关闭失败：%s", str(exc)[:200])
-            if attempt_error is None:
-                return True, ""
-            logger.warning("邮件发送 attempt %d 失败：%s", attempt, last_error[:200])
-            if attempt < max_attempts:
-                time.sleep(3)
-        return False, last_error
+        """兼容 V1 调用形态；实际幂等和重试策略由统一交付模块负责。"""
+        result = deliver_email(
+            message,
+            self.settings,
+            ledger=self.delivery_ledger,
+            max_attempts=max_attempts,
+        )
+        if result.success:
+            return True, result.detail
+        if result.outcome_unknown:
+            return False, f"结果未知，已禁止自动重发：{result.detail}"
+        return False, result.detail

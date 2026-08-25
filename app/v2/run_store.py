@@ -34,6 +34,7 @@ from app.v2.constants import (
     FILE_RANKING_TXT,
     FILE_RUN,
     PENDING,
+    PROMPT_READY,
     RUN_STATE_CORRUPT,
     STATUS_FLOW,
 )
@@ -246,6 +247,195 @@ class RunStore:
             if self._is_corrupt(data):
                 raise RunStateCorruptionError("运行状态文件损坏，禁止自动覆盖")
             data.update(fields)
+            return self.save_run(group_name, run_date, data)
+
+    # ---------- Prompt 外部调用 claim / result ----------
+
+    def claim_prompt_operation(
+        self,
+        group_name: str,
+        run_date: str,
+        *,
+        input_hash: str,
+        force: bool = False,
+    ) -> tuple[str | None, dict, str]:
+        """原子领取一次 Prompt 生成操作。
+
+        已开始但没有完成/结果记录的调用一律转为 unknown；普通恢复不得再次
+        调用外部模型。结果已先写入 run.json 时可由调用方无费用地继续提交文件。
+        """
+        path = self.run_path(group_name, run_date)
+        with _run_mutex(path):
+            data = self.load_run(group_name, run_date)
+            if self._is_corrupt(data):
+                return None, data, "state_corrupt"
+
+            operation_status = str(data.get("prompt_operation_status") or "")
+            same_input = data.get("prompt_operation_input_hash") == input_hash
+            if operation_status == "result_recorded" and same_input:
+                result = data.get("prompt_operation_result")
+                if isinstance(result, dict) and isinstance(result.get("prompt"), str):
+                    return None, data, "result_recorded"
+            if operation_status == "result_recorded" and not same_input:
+                data.update(
+                    prompt_operation_status="unknown",
+                    prompt_hold=True,
+                    prompt_hold_reason="PROMPT_INPUT_CHANGED_AFTER_RESULT",
+                    prompt_operation_error="AI 结果已记录但恢复输入发生变化，需人工复核",
+                    needs_manual_review=True,
+                )
+                self.save_run(group_name, run_date, data)
+                return None, data, "result_unknown"
+            if (
+                operation_status == "succeeded"
+                and same_input
+                and self.prompt_path(group_name, run_date).is_file()
+                and not force
+            ):
+                return None, data, "already_completed"
+            if operation_status == "unknown":
+                return None, data, "result_unknown"
+            if (
+                operation_status == "started"
+                and not data.get("prompt_operation_finished_at")
+            ):
+                data.update(
+                    prompt_operation_status="unknown",
+                    prompt_hold=True,
+                    prompt_hold_reason="PROMPT_RESULT_UNKNOWN",
+                    prompt_operation_error="上次 AI 调用已开始但没有可信结果，禁止自动重复调用",
+                    needs_manual_review=True,
+                )
+                self.save_run(group_name, run_date, data)
+                return None, data, "result_unknown"
+
+            operation_id = uuid.uuid4().hex
+            data.update(
+                prompt_operation_id=operation_id,
+                prompt_operation_input_hash=input_hash,
+                prompt_operation_status="started",
+                prompt_operation_started_at=datetime.now().astimezone().isoformat(),
+                prompt_operation_finished_at="",
+                prompt_operation_error="",
+                prompt_operation_result=None,
+                prompt_hold=False,
+                prompt_hold_reason="",
+            )
+            self.save_run(group_name, run_date, data)
+            return operation_id, data, "claimed"
+
+    def record_prompt_result(
+        self,
+        group_name: str,
+        run_date: str,
+        operation_id: str,
+        *,
+        prompt: str,
+        meta: dict | None,
+    ) -> dict:
+        """在写最终 Prompt 文件前，先持久化已付费调用的结果。"""
+        path = self.run_path(group_name, run_date)
+        with _run_mutex(path):
+            data = self.load_run(group_name, run_date)
+            if self._is_corrupt(data):
+                raise RunStateCorruptionError("运行状态文件损坏，禁止记录 Prompt 结果")
+            if data.get("prompt_operation_id") != operation_id:
+                raise RuntimeError("Prompt 操作 claim 已失效")
+            data.update(
+                prompt_operation_status="result_recorded",
+                prompt_operation_result={
+                    "prompt": prompt,
+                    "meta": dict(meta or {}),
+                    "sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+                },
+            )
+            return self.save_run(group_name, run_date, data)
+
+    def commit_recorded_prompt(
+        self,
+        group_name: str,
+        run_date: str,
+        operation_id: str,
+    ) -> dict:
+        """把已记录结果原子提升为 image_prompt.txt，并完成操作状态。"""
+        run_path = self.run_path(group_name, run_date)
+        with _run_mutex(run_path):
+            data = self.load_run(group_name, run_date)
+            if self._is_corrupt(data):
+                raise RunStateCorruptionError("运行状态文件损坏，禁止提交 Prompt 结果")
+            if data.get("prompt_operation_id") != operation_id:
+                raise RuntimeError("Prompt 操作 claim 已失效")
+            result = data.get("prompt_operation_result")
+            if not isinstance(result, dict) or not isinstance(result.get("prompt"), str):
+                raise RuntimeError("Prompt 操作没有可提交的已记录结果")
+
+            prompt = result["prompt"]
+            expected_hash = str(result.get("sha256") or "")
+            if hashlib.sha256(prompt.encode("utf-8")).hexdigest() != expected_hash:
+                raise RunStateCorruptionError("已记录 Prompt 结果哈希不一致")
+            prompt_path = self.prompt_path(group_name, run_date)
+            prompt_path.parent.mkdir(parents=True, exist_ok=True)
+            temp_path = prompt_path.with_name(f".{prompt_path.name}.{operation_id}.tmp")
+            temp_path.write_text(prompt, encoding="utf-8")
+            os.replace(temp_path, prompt_path)
+
+            data.update(
+                status=PROMPT_READY,
+                prompt_meta=dict(result.get("meta") or {}),
+                prompt_operation_status="succeeded",
+                prompt_operation_finished_at=datetime.now().astimezone().isoformat(),
+                prompt_operation_result=None,
+                prompt_operation_error="",
+                prompt_hold=False,
+                prompt_hold_reason="",
+            )
+            return self.save_run(group_name, run_date, data)
+
+    def fail_prompt_operation(
+        self,
+        group_name: str,
+        run_date: str,
+        operation_id: str,
+        *,
+        error: str,
+    ) -> dict:
+        """记录可确认的失败；该状态可以由显式重试重新领取。"""
+        path = self.run_path(group_name, run_date)
+        with _run_mutex(path):
+            data = self.load_run(group_name, run_date)
+            if data.get("prompt_operation_id") != operation_id:
+                raise RuntimeError("Prompt 操作 claim 已失效")
+            data.update(
+                prompt_operation_status="failed",
+                prompt_operation_finished_at=datetime.now().astimezone().isoformat(),
+                prompt_operation_error=str(error)[:300],
+                prompt_operation_result=None,
+                prompt_hold=False,
+                prompt_hold_reason="",
+            )
+            return self.save_run(group_name, run_date, data)
+
+    def mark_prompt_result_unknown(
+        self,
+        group_name: str,
+        run_date: str,
+        operation_id: str,
+        *,
+        error: str,
+    ) -> dict:
+        """提交后结果不明时进入人工 hold，finished_at 故意保持为空。"""
+        path = self.run_path(group_name, run_date)
+        with _run_mutex(path):
+            data = self.load_run(group_name, run_date)
+            if data.get("prompt_operation_id") != operation_id:
+                raise RuntimeError("Prompt 操作 claim 已失效")
+            data.update(
+                prompt_operation_status="unknown",
+                prompt_operation_error=str(error)[:300],
+                prompt_hold=True,
+                prompt_hold_reason="PROMPT_RESULT_UNKNOWN",
+                needs_manual_review=True,
+            )
             return self.save_run(group_name, run_date, data)
 
     def previous_theme_signature(self, group_name: str, run_date: str) -> str:

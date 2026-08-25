@@ -267,7 +267,7 @@ def test_codex_prompt_uses_stdin_and_explicit_output_contract(tmp_path, monkeypa
     assert result.detail["recovery_status"] == "completed"
 
 
-def test_codex_stdout_old_paths_are_not_candidates_and_retry_once(tmp_path, monkeypatch):
+def test_codex_stdout_old_paths_are_not_candidates_and_hold_unknown(tmp_path, monkeypatch):
     generator, prompt = _codex_test_generator(tmp_path, monkeypatch)
     old = tmp_path / "generated_images" / "old.png"
     old.write_bytes(_PNG_1PX)
@@ -284,8 +284,9 @@ def test_codex_stdout_old_paths_are_not_candidates_and_retry_once(tmp_path, monk
     result = generator.generate(prompt, prompt.parent / "daily_image.png")
 
     assert result.success is False
-    assert len(calls) == 2
-    assert result.detail["attempt_count"] == 2
+    assert len(calls) == 1
+    assert result.detail["attempt_count"] == 1
+    assert result.detail["outcome_unknown"] is True
     assert result.detail["candidate_diagnostics"] == []
 
 
@@ -306,7 +307,8 @@ def test_codex_rejects_structured_path_outside_allowed_roots(tmp_path, monkeypat
     result = generator.generate(prompt, prompt.parent / "daily_image.png")
 
     assert result.success is False
-    assert calls == 2
+    assert calls == 1
+    assert result.detail["outcome_unknown"] is True
     assert result.detail["candidate_diagnostics"] == []
 
 
@@ -325,7 +327,8 @@ def test_codex_rejects_relative_structured_path(tmp_path, monkeypatch):
     result = generator.generate(prompt, prompt.parent / "daily_image.png")
 
     assert result.success is False
-    assert calls == 2
+    assert calls == 1
+    assert result.detail["outcome_unknown"] is True
     assert result.detail["candidate_diagnostics"] == []
 
 
@@ -349,7 +352,8 @@ def test_codex_rejects_missing_or_stale_structured_path(tmp_path, monkeypatch, c
     result = generator.generate(prompt, prompt.parent / "daily_image.png")
 
     assert result.success is False
-    assert calls == 2
+    assert calls == 1
+    assert result.detail["outcome_unknown"] is True
     assert result.detail["candidate_diagnostics"] == []
 
 
@@ -370,7 +374,8 @@ def test_codex_does_not_guess_between_different_images(tmp_path, monkeypatch):
     result = generator.generate(prompt, prompt.parent / "daily_image.png")
 
     assert result.success is False
-    assert calls == 2
+    assert calls == 1
+    assert result.detail["outcome_unknown"] is True
     assert result.detail["stage"] == "ambiguous"
     assert len(result.detail["candidate_diagnostics"]) == 2
 
@@ -442,7 +447,7 @@ def test_codex_recovers_single_staged_image_after_timeout(tmp_path, monkeypatch)
     assert result.detail["recovery_status"] == "recovered_after_timeout"
 
 
-def test_codex_retry_budget_survives_next_call(tmp_path, monkeypatch):
+def test_codex_unknown_result_survives_next_call_without_second_process(tmp_path, monkeypatch):
     generator, prompt = _codex_test_generator(tmp_path, monkeypatch)
     calls = 0
 
@@ -458,9 +463,26 @@ def test_codex_retry_budget_survives_next_call(tmp_path, monkeypatch):
 
     assert first.success is False
     assert second.success is False
-    assert calls == 2
-    assert manifest["state"] == "exhausted"
+    assert calls == 1
+    assert manifest["state"] == "result_unknown"
     assert "包含引号" not in json.dumps(manifest, ensure_ascii=False)
+
+
+def test_codex_completed_manifest_with_missing_output_requires_explicit_force(tmp_path, monkeypatch):
+    generator, prompt = _codex_test_generator(tmp_path, monkeypatch)
+    attempt = generator._new_attempt(prompt.parent, 1, [])
+    attempt.update(state="completed", outcome="completed", finished_at="2026-08-25T12:00:00+08:00")
+    generator._write_attempt_manifest(prompt.parent / ".codex-image-attempt.json", attempt)
+    monkeypatch.setattr(
+        codex_generator,
+        "_run_codex_process",
+        lambda *args, **kwargs: pytest.fail("已完成产物缺失时不得自动再次调用"),
+    )
+
+    result = generator.generate(prompt, prompt.parent / "daily_image.png")
+
+    assert result.success is False
+    assert result.detail["recovery_status"] == "completed_output_missing"
 
 
 def test_codex_recovers_interrupted_attempt_before_new_process(tmp_path, monkeypatch):
@@ -492,7 +514,7 @@ def test_codex_rejects_corrupt_image_without_overwriting_existing(tmp_path, monk
         return _Proc()
 
     monkeypatch.setattr(codex_generator, "_run_codex_process", fake_run)
-    result = generator.generate(prompt, output)
+    result = generator.generate(prompt, output, force=True)
 
     assert result.success is False
     assert output.read_bytes() == original

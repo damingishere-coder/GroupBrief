@@ -9,6 +9,7 @@ from sqlmodel import Session, select
 from app.config.settings import Settings, get_settings
 from app.db import repository as repo
 from app.db.models import Group, GroupRun
+from app.services.email_delivery import EmailDeliveryLedger
 from app.services.email_service import EmailBuildResult, EmailService, GroupMailBlock
 from app.services.history_service import HistoryService
 from app.services.prompt_service import PromptService
@@ -123,6 +124,36 @@ def test_email_partial_flag_aborts_before_smtp(monkeypatch):
     assert not smtp_calls
 
 
+def test_email_partial_delivery_does_not_report_full_success(monkeypatch):
+    settings2 = Settings(
+        email_enabled=True,
+        email_smtp_host="smtp.example.com",
+        email_recipient="to@example.com",
+        email_from="from@example.com",
+        email_send_partial_report=True,
+    )
+    service = EmailService(settings2)
+    block = GroupMailBlock(group_name="可发送群", ranking_text="排行榜")
+    monkeypatch.setattr(
+        service,
+        "build_email",
+        lambda session, run=None: EmailBuildResult(
+            subject="unused",
+            body="unused",
+            blocks=[block],
+            missing=["缺失群：报告数据缺失"],
+        ),
+    )
+    monkeypatch.setattr(service, "_send_group_message", lambda message: (True, ""))
+
+    with Session(repo.engine) as session:
+        ok, detail = service.send(session)
+
+    assert not ok
+    assert "成功 1 个群" in detail
+    assert "失败 1 个群" in detail
+
+
 def test_email_invalid_config_aborts_before_smtp(monkeypatch):
     settings2 = Settings(
         _env_file=None,
@@ -147,9 +178,12 @@ def test_email_invalid_config_aborts_before_smtp(monkeypatch):
     assert not smtp_calls
 
 
-def test_email_quit_failure_does_not_retry(monkeypatch):
+def test_email_quit_failure_does_not_retry(tmp_path, monkeypatch):
     settings2 = Settings(email_enabled=True, email_smtp_host="smtp.example.com")
-    service = EmailService(settings2)
+    service = EmailService(
+        settings2,
+        delivery_ledger=EmailDeliveryLedger(tmp_path / "ledger"),
+    )
     calls = {"connect": 0, "send": 0, "sleep": 0}
 
     class FakeSMTP:
@@ -189,7 +223,10 @@ def test_email_send_is_per_group_and_attaches_valid_poster(tmp_path, monkeypatch
         email_recipient="to@example.com",
         email_from="from@example.com",
     )
-    service = EmailService(settings2)
+    service = EmailService(
+        settings2,
+        delivery_ledger=EmailDeliveryLedger(tmp_path / "ledger"),
+    )
     blocks = [
         GroupMailBlock(
             group_name="失败群",
@@ -233,7 +270,7 @@ def test_email_send_is_per_group_and_attaches_valid_poster(tmp_path, monkeypatch
     assert not ok
     assert "成功 1 个群" in detail
     all_messages = [message for instance in FakeSMTP.instances for message in instance.messages]
-    assert sum("失败群" in str(message["Subject"]) for message in all_messages) == 2
+    assert sum("失败群" in str(message["Subject"]) for message in all_messages) == 1
     successful = [message for message in all_messages if "成功群" in str(message["Subject"])]
     assert len(successful) == 1
     assert successful[0].get_body(preferencelist=("plain",)).get_content().strip() == "排行榜成功"

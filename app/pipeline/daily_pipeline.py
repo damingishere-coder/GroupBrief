@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, time, timedelta
@@ -35,6 +36,7 @@ from app.db import repository as repo
 from app.db.models import Group
 from app.image.codex_generator import CodexImageGenerator
 from app.image.image_task import ImageJob, SerialImageQueue, verify_image
+from app.providers.ai.base import ExternalCallResultUnknownError
 from app.ranking.engine import RankingEngine
 from app.ranking.renderer import RankingRenderer
 from app.scheduler.period import PeriodResolver
@@ -203,6 +205,28 @@ class DailyPipeline:
     @staticmethod
     def _group_name(group: Group) -> str:
         return group.display_name or group.wechat_group_name
+
+    def _prompt_operation_hash(self, data: PromptInput) -> str:
+        """生成稳定输入指纹；不把 API Key 或原始输入写入运行状态。"""
+        payload = dict(vars(data))
+        payload["messages"] = [
+            message.to_dict() if hasattr(message, "to_dict") else str(message)
+            for message in data.messages
+        ]
+        payload["provider_config"] = {
+            "primary": self.settings.summary_provider_primary,
+            "fallback": self.settings.summary_provider_fallback,
+            "codex_model": self.settings.codex_summary_model,
+            "deepseek_model": self.settings.ai_model,
+        }
+        canonical = json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
     def _record_group_failure(
         self,
@@ -567,17 +591,89 @@ class DailyPipeline:
             ),
             recent_layout_history=store.recent_layout_history(group_name, run_date, limit=3),
         )
+        prompt_input_hash = self._prompt_operation_hash(prompt_input)
+        operation_id, operation_state, claim_reason = store.claim_prompt_operation(
+            group_name,
+            run_date,
+            input_hash=prompt_input_hash,
+            force=force,
+        )
+        if claim_reason == "state_corrupt":
+            return finish({
+                "group_name": group_name,
+                "status": "blocked",
+                "error_type": RUN_STATE_CORRUPT,
+                "detail": "运行状态文件损坏，已阻止 AI 调用",
+            })
+        if claim_reason == "result_unknown":
+            return finish({
+                "group_name": group_name,
+                "status": "held",
+                "error_type": "PROMPT_RESULT_UNKNOWN",
+                "detail": "上次 AI 调用结果未知，需人工核对后才能再次生成",
+            })
+
         prompt_started = perf_counter()
-        prompt_out = self.prompt_builder.build(prompt_input)
+        if claim_reason == "result_recorded":
+            operation_id = str(operation_state.get("prompt_operation_id") or "")
+            committed = store.commit_recorded_prompt(group_name, run_date, operation_id)
+            prompt_meta = committed.get("prompt_meta")
+        elif claim_reason == "already_completed":
+            prompt_meta = operation_state.get("prompt_meta")
+            store.update(group_name, run_date, status=PROMPT_READY)
+        else:
+            if not operation_id:
+                raise RuntimeError(f"无法领取 Prompt 操作：{claim_reason}")
+            try:
+                prompt_out = self.prompt_builder.build(prompt_input)
+            except ExternalCallResultUnknownError as exc:
+                store.mark_prompt_result_unknown(
+                    group_name,
+                    run_date,
+                    operation_id,
+                    error=str(exc),
+                )
+                timings["summary_ms"] = round((perf_counter() - prompt_started) * 1000)
+                timings["deepseek_ms"] = timings["summary_ms"]
+                store.update(
+                    group_name,
+                    run_date,
+                    failed_stage="prompt",
+                    error=str(exc)[:300],
+                    error_type="PROMPT_RESULT_UNKNOWN",
+                )
+                return finish({
+                    "group_name": group_name,
+                    "status": "held",
+                    "error_type": "PROMPT_RESULT_UNKNOWN",
+                    "detail": str(exc)[:300],
+                })
+            if not prompt_out.success:
+                store.fail_prompt_operation(
+                    group_name,
+                    run_date,
+                    operation_id,
+                    error=prompt_out.error,
+                )
+                timings["summary_ms"] = round((perf_counter() - prompt_started) * 1000)
+                timings["deepseek_ms"] = timings["summary_ms"]
+                store.update(group_name, run_date, status=FAILED, failed_stage="prompt",
+                             error=prompt_out.error, error_type=PROMPT_FAILED)
+                return finish({"group_name": group_name, "status": "failed", "error_type": PROMPT_FAILED,
+                        "detail": prompt_out.error})
+            store.record_prompt_result(
+                group_name,
+                run_date,
+                operation_id,
+                prompt=prompt_out.prompt,
+                meta=prompt_out.meta,
+            )
+            committed = store.commit_recorded_prompt(group_name, run_date, operation_id)
+            prompt_meta = committed.get("prompt_meta")
         timings["summary_ms"] = round((perf_counter() - prompt_started) * 1000)
         timings["deepseek_ms"] = timings["summary_ms"]  # 旧运行分析字段兼容
-        if not prompt_out.success:
-            store.update(group_name, run_date, status=FAILED, failed_stage="prompt",
-                         error=prompt_out.error, error_type=PROMPT_FAILED)
-            return finish({"group_name": group_name, "status": "failed", "error_type": PROMPT_FAILED,
-                    "detail": prompt_out.error})
-        store.prompt_path(group_name, run_date).write_text(prompt_out.prompt, encoding="utf-8")
-        store.update(group_name, run_date, status=PROMPT_READY, prompt_meta=prompt_out.meta)
+        if isinstance(prompt_meta, dict):
+            store.update(group_name, run_date, prompt_meta=prompt_meta)
 
         # Prompt 落盘后重新读取群配置，避免流水线开始后用户打开/关闭生图
         # 时仍使用旧的 group 对象和 image_enabled 快照。

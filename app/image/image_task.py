@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import inspect
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -114,7 +115,16 @@ class ImageJob:
                     "error_type": "",
                 }
         try:
-            result = self.generator.generate(self.prompt_file, self.output_path)
+            generate_parameters = inspect.signature(self.generator.generate).parameters
+            if "force" in generate_parameters:
+                result = self.generator.generate(
+                    self.prompt_file,
+                    self.output_path,
+                    force=self.force,
+                )
+            else:
+                # 保留第三方/测试 Generator 的两参数协议；正式 Codex 实现支持 force。
+                result = self.generator.generate(self.prompt_file, self.output_path)
         except Exception as e:  # 生成器内部异常
             return {
                 "group_name": self.group_name,

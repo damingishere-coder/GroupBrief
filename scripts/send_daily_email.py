@@ -14,9 +14,9 @@ from __future__ import annotations
 
 import argparse
 import json
-import smtplib
+import smtplib  # 兼容旧测试注入；真实发送实现在 app.services.email_delivery
 import sys
-import time
+import time  # 兼容旧测试注入；真实退避实现在 app.services.email_delivery
 from dataclasses import dataclass
 from datetime import datetime
 from email.message import EmailMessage
@@ -30,6 +30,12 @@ from sqlmodel import Session
 from app.config.settings import get_settings
 from app.db import repository as repo
 from app.image.image_task import detect_image_format, verify_image
+from app.scheduler.outcome import ProcessExitCode
+from app.services.email_delivery import (
+    EmailDeliveryLedger,
+    EmailDeliveryResult,
+    deliver_email,
+)
 from app.services.email_service import email_delivery_config_error
 from app.services.handoff_service import safe_dir_name
 
@@ -201,47 +207,40 @@ def collect_group_inputs(settings, groups, run_date: str) -> tuple[list[GroupMai
     return blocks, skipped
 
 
-def _send_with_retry(message: EmailMessage, settings, max_attempts: int = 2) -> tuple[bool, str]:
-    """单群最多重试两次；失败后交回调用方继续下一个群。"""
-    last_error = ""
-    for attempt in range(1, max_attempts + 1):
-        server = None
-        attempt_error: Exception | None = None
-        try:
-            if settings.email_use_ssl:
-                server = smtplib.SMTP_SSL(
-                    settings.email_smtp_host,
-                    settings.email_smtp_port,
-                    timeout=30,
-                )
-            else:
-                server = smtplib.SMTP(
-                    settings.email_smtp_host,
-                    settings.email_smtp_port,
-                    timeout=30,
-                )
-                server.starttls()
-            if settings.email_smtp_user:
-                server.login(settings.email_smtp_user, settings.email_smtp_password)
-            server.send_message(message)
-        except Exception as exc:
-            attempt_error = exc
-            last_error = str(exc)
-        finally:
-            if server is not None:
-                try:
-                    quit_method = getattr(server, "quit", None)
-                    if quit_method is not None:
-                        quit_method()
-                except Exception as exc:
-                    # send_message 已成功时，QUIT 异常不能触发重复发送。
-                    print(f"  SMTP 连接关闭失败（邮件已提交）: {str(exc)[:200]}")
-        if attempt_error is None:
-            return True, ""
-        print(f"  发送 attempt {attempt} 失败: {last_error[:200]}")
-        if attempt < max_attempts:
-            time.sleep(3)
-    return False, last_error
+def _send_with_retry(
+    message: EmailMessage,
+    settings,
+    max_attempts: int = 2,
+    *,
+    ledger: EmailDeliveryLedger | None = None,
+) -> EmailDeliveryResult:
+    """兼容旧函数名；真实重试所有权统一到 email_delivery。"""
+    return deliver_email(
+        message,
+        settings,
+        ledger=ledger,
+        max_attempts=max_attempts,
+    )
+
+
+def _delivery_exit_code(
+    *,
+    sent_count: int,
+    already_sent_count: int,
+    failed_count: int,
+    unknown_count: int,
+    skipped_count: int,
+) -> int:
+    """把逐群交付结果聚合为稳定退出码；跳过项不能伪装成全量成功。"""
+    if unknown_count:
+        return int(ProcessExitCode.BLOCKED)
+    completed_count = sent_count + already_sent_count
+    unsent_count = failed_count + skipped_count
+    if completed_count > 0 and unsent_count == 0:
+        return int(ProcessExitCode.SUCCESS)
+    if completed_count > 0 and unsent_count > 0:
+        return int(ProcessExitCode.PARTIAL)
+    return int(ProcessExitCode.FAILED)
 
 
 def main() -> int:
@@ -304,8 +303,11 @@ def main() -> int:
         return 0
 
     sent_count = 0
+    already_sent_count = 0
     failed_count = 0
+    unknown_count = 0
     summary: list[str] = []
+    ledger = EmailDeliveryLedger(Path(settings.output_dir) / ".email-delivery")
     for block in blocks:
         try:
             message = build_message(block, settings)
@@ -315,24 +317,36 @@ def main() -> int:
             summary.append(detail)
             print(f"❌ {detail}")
             continue
-        ok, detail = _send_with_retry(message, settings)
-        if ok:
+        delivery = _send_with_retry(message, settings, ledger=ledger)
+        if delivery.status == "sent":
             sent_count += 1
             summary.append(f"{block.group_name}：发送成功")
             print(f"✅ {block.group_name} 邮件发送成功")
+        elif delivery.status == "already_sent":
+            already_sent_count += 1
+            summary.append(f"{block.group_name}：已发送，幂等跳过")
+            print(f"✅ {block.group_name} 邮件已确认发送，本次跳过")
+        elif delivery.outcome_unknown:
+            unknown_count += 1
+            summary.append(f"{block.group_name}：结果未知（{delivery.detail[:200]}）")
+            print(f"⏸️ {block.group_name} 邮件结果未知，已禁止自动重发: {delivery.detail[:300]}")
         else:
             failed_count += 1
-            summary.append(f"{block.group_name}：发送失败（{detail[:200]}）")
-            print(f"❌ {block.group_name} 邮件发送失败: {detail[:300]}")
+            summary.append(f"{block.group_name}：提交前失败（{delivery.detail[:200]}）")
+            print(f"❌ {block.group_name} 邮件提交前失败: {delivery.detail[:300]}")
 
     print("\n===== 逐群发送汇总 =====")
     for item in summary:
         print(f"- {item}")
     if skipped:
         print(f"- 跳过 {len(skipped)} 个不可发送群（不建立 SMTP 发送尝试）")
-    if sent_count > 0 and failed_count == 0:
-        return 0
-    return 1
+    return _delivery_exit_code(
+        sent_count=sent_count,
+        already_sent_count=already_sent_count,
+        failed_count=failed_count,
+        unknown_count=unknown_count,
+        skipped_count=len(skipped),
+    )
 
 
 if __name__ == "__main__":

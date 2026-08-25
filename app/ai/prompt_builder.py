@@ -70,6 +70,7 @@ from app.ai.topic_selection import (
     selected_topics_json,
 )
 from app.config.settings import Settings, get_settings
+from app.providers.ai.base import ExternalCallResultUnknownError
 from app.providers.ai.codex import build_summary_provider
 
 logger = logging.getLogger("groupbrief.ai")
@@ -623,6 +624,9 @@ class DeepSeekImagePromptBuilder:
         except (ImagePromptTemplateError, ImageThemeError, LayoutPlanError, ValueError) as e:
             logger.warning("Prompt 模板错误：%s", e)
             return PromptOutput(success=False, error=str(e)[:300], model=api_model)
+        except ExternalCallResultUnknownError:
+            # Pipeline 需要把提交后断线/超时持久化为 result_unknown，不能降格成普通失败。
+            raise
         except Exception as e:  # 主备模型调用失败等
             logger.exception("ImagePromptBuilder 生成失败")
             return PromptOutput(success=False, error=str(e)[:300], model=api_model)

@@ -8,17 +8,21 @@ stdin 传递，执行目录是一次性空目录，模型工具运行在只读 s
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import shutil
 import subprocess
 import tempfile
-import time
 from pathlib import Path
 
 from app.ai.concurrency import bounded_slot, normalized_limit
 from app.config.settings import Settings
 from app.core.logging import get_logger
-from app.providers.ai.base import PromptGeneratorProvider
+from app.providers.ai.base import (
+    ExternalCallNotSubmittedError,
+    ExternalCallResultUnknownError,
+    PromptGeneratorProvider,
+)
 from app.providers.ai.deepseek import DeepSeekV4FlashProvider
 
 logger = get_logger("groupbrief.ai")
@@ -144,11 +148,14 @@ class CodexGPTProvider(DeepSeekV4FlashProvider):
     ) -> str:
         try:
             return self._codex_chat(messages, response_format=response_format)
-        except Exception as primary_exc:
-            logger.warning("Codex GPT 主调用失败，将检查 DeepSeek 备用：%s", str(primary_exc)[:200])
+        except ExternalCallResultUnknownError:
+            # 主请求可能已经产生费用；此时切备用会形成第二次收费调用。
+            raise
+        except ExternalCallNotSubmittedError as primary_exc:
+            logger.warning("Codex GPT 确认未提交，将检查 DeepSeek 备用：%s", str(primary_exc)[:200])
             if self._fallback is None or not self._fallback.health_check()[0]:
                 raise RuntimeError(
-                    f"Codex GPT 主模型失败，DeepSeek 备用未配置：{str(primary_exc)[:180]}"
+                    f"Codex GPT 未提交，DeepSeek 备用未配置：{str(primary_exc)[:180]}"
                 ) from primary_exc
             try:
                 result = self._fallback._chat(
@@ -157,82 +164,95 @@ class CodexGPTProvider(DeepSeekV4FlashProvider):
                     temperature=temperature,
                     max_tokens=max_tokens,
                 )
-                logger.info("Codex GPT 失败后已由 DeepSeek 备用完成本次调用")
+                logger.info("Codex GPT 未提交，已由 DeepSeek 备用完成本次调用")
                 return result
+            except ExternalCallResultUnknownError:
+                raise
             except Exception as fallback_exc:
                 raise RuntimeError(
-                    "Codex GPT 主模型与 DeepSeek 备用均失败："
+                    "Codex GPT 未提交且 DeepSeek 备用失败："
                     f"Codex={str(primary_exc)[:120]}；DeepSeek={str(fallback_exc)[:120]}"
                 ) from fallback_exc
 
     def _codex_chat(self, messages: list[dict], *, response_format: str = "text") -> str:
         resolved = self._resolve_binary()
         if not resolved:
-            raise RuntimeError(f"未找到 Codex CLI：{self.codex_path}")
+            raise ExternalCallNotSubmittedError(f"未找到 Codex CLI：{self.codex_path}")
 
         prompt = self._build_codex_prompt(messages, response_format=response_format)
-        attempts = max(1, int(self.settings.codex_summary_max_retries))
-        last_error = ""
-        for attempt in range(1, attempts + 1):
+        request_id = hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:24]
+        with tempfile.TemporaryDirectory(prefix="groupbrief-codex-summary-") as temp_dir:
+            output_path = Path(temp_dir) / "final.txt"
+            command = [
+                resolved,
+                "exec",
+                "-C",
+                temp_dir,
+                "--sandbox",
+                "read-only",
+                "--skip-git-repo-check",
+                "--ephemeral",
+                "--model",
+                self.model,
+                "--output-last-message",
+                str(output_path),
+                "-",
+            ]
+            environment = os.environ.copy()
+            environment["CODEX_HOME"] = str(self.codex_home)
             try:
-                with tempfile.TemporaryDirectory(prefix="groupbrief-codex-summary-") as temp_dir:
-                    output_path = Path(temp_dir) / "final.txt"
-                    command = [
-                        resolved,
-                        "exec",
-                        "-C",
-                        temp_dir,
-                        "--sandbox",
-                        "read-only",
-                        "--skip-git-repo-check",
-                        "--ephemeral",
-                        "--model",
-                        self.model,
-                        "--output-last-message",
-                        str(output_path),
-                        "-",
-                    ]
-                    environment = os.environ.copy()
-                    environment["CODEX_HOME"] = str(self.codex_home)
-                    with bounded_slot(
-                        "codex_summary_request",
-                        normalized_limit(self.settings.codex_summary_request_concurrency, 2),
-                    ):
-                        proc = subprocess.run(
-                            command,
-                            capture_output=True,
-                            text=True,
-                            encoding="utf-8",
-                            errors="replace",
-                            timeout=max(1, int(self.settings.codex_summary_timeout_seconds)),
-                            cwd=temp_dir,
-                            input=prompt,
-                            env=environment,
+                with bounded_slot(
+                    "codex_summary_request",
+                    normalized_limit(self.settings.codex_summary_request_concurrency, 2),
+                ):
+                    proc = subprocess.run(
+                        command,
+                        capture_output=True,
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
+                        timeout=max(1, int(self.settings.codex_summary_timeout_seconds)),
+                        cwd=temp_dir,
+                        input=prompt,
+                        env=environment,
                     )
-                    if proc.returncode != 0:
-                        # stderr/stdout 由外部 CLI 产生，不能假定其中绝不回显输入；
-                        # 错误只保留退出码，避免聊天正文进入日志或 API 响应。
-                        raise RuntimeError(f"Codex CLI 退出码 {proc.returncode}")
-                    if not output_path.is_file():
-                        raise RuntimeError("Codex CLI 未生成最终文本")
-                    text = output_path.read_text(encoding="utf-8").strip()
-                    if not text:
-                        raise RuntimeError("Codex GPT 返回空内容")
-                    if response_format == "json_object":
-                        text = _strip_json_fence(text)
-                        parsed = json.loads(text)
-                        if not isinstance(parsed, dict):
-                            raise ValueError("Codex GPT JSON 输出不是对象")
-                    logger.info("Codex GPT 调用成功（model=%s attempt=%d）", self.model, attempt)
-                    return text
-            except subprocess.TimeoutExpired:
-                last_error = f"Codex GPT 超时（>{self.settings.codex_summary_timeout_seconds}s）"
-            except Exception as exc:
-                last_error = str(exc)[:240]
-            logger.warning("Codex GPT attempt %d 失败：%s", attempt, last_error)
-            if attempt < attempts:
-                time.sleep(min(4.0, float(2 ** (attempt - 1))))
-        raise RuntimeError(last_error or "Codex GPT 调用失败")
+            except subprocess.TimeoutExpired as exc:
+                raise ExternalCallResultUnknownError(
+                    f"Codex GPT 超时且结果未知（request_id={request_id}）"
+                ) from exc
+            except OSError as exc:
+                raise ExternalCallNotSubmittedError(
+                    f"Codex CLI 未能启动（request_id={request_id}）：{str(exc)[:160]}"
+                ) from exc
+
+            if proc.returncode != 0:
+                # CLI 已经启动，不能证明 Provider 没有接收请求；禁止内部重试和备用调用。
+                raise ExternalCallResultUnknownError(
+                    f"Codex CLI 退出码 {proc.returncode}，结果未知（request_id={request_id}）"
+                )
+            if not output_path.is_file():
+                raise ExternalCallResultUnknownError(
+                    f"Codex CLI 未生成最终文本，结果未知（request_id={request_id}）"
+                )
+            text = output_path.read_text(encoding="utf-8").strip()
+            if not text:
+                raise ExternalCallResultUnknownError(
+                    f"Codex GPT 返回空内容（request_id={request_id}）"
+                )
+            if response_format == "json_object":
+                try:
+                    text = _strip_json_fence(text)
+                    parsed = json.loads(text)
+                except (ValueError, json.JSONDecodeError) as exc:
+                    raise ExternalCallResultUnknownError(
+                        f"Codex GPT JSON 无效（request_id={request_id}）"
+                    ) from exc
+                if not isinstance(parsed, dict):
+                    raise ExternalCallResultUnknownError(
+                        f"Codex GPT JSON 输出不是对象（request_id={request_id}）"
+                    )
+            logger.info("Codex GPT 调用成功（model=%s request_id=%s）", self.model, request_id)
+            return text
 
     @staticmethod
     def _build_codex_prompt(messages: list[dict], *, response_format: str) -> str:
