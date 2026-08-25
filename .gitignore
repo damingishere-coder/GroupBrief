@@ -27,6 +27,8 @@ build/
 node_modules/
 frontend/dist/
 frontend/.vite/
+frontend/playwright-report/
+frontend/test-results/
 *.tsbuildinfo
 
 # --- 系统文件 ---

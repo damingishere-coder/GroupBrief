@@ -9,6 +9,7 @@
 """
 
 import os
+import random
 import tempfile
 import uuid
 from pathlib import Path
@@ -31,6 +32,26 @@ os.environ["AI_API_KEY"] = ""
 os.environ["SUMMARY_PROVIDER_PRIMARY"] = "deepseek"
 # 旧 V1 单测需要显式进入兼容维护模式；生产默认仍是 read_only。
 os.environ["LEGACY_V1_WRITE_MODE"] = "maintenance"
+
+
+def pytest_addoption(parser) -> None:
+    parser.addoption(
+        "--random-order-seed",
+        action="store",
+        type=int,
+        default=None,
+        help="使用给定整数 seed 随机重排测试收集顺序",
+    )
+
+
+def pytest_collection_modifyitems(config, items) -> None:
+    seed = config.getoption("--random-order-seed")
+    if seed is None:
+        return
+    random.Random(seed).shuffle(items)
+    reporter = config.pluginmanager.get_plugin("terminalreporter")
+    if reporter is not None:
+        reporter.write_line(f"random-order-seed={seed}")
 
 
 def pytest_sessionfinish(session, exitstatus) -> None:

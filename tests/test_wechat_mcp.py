@@ -41,6 +41,20 @@ WINDOW_START = datetime(2026, 8, 10, 0, 0, 0)
 WINDOW_END = datetime(2026, 8, 17, 23, 59, 59)
 
 
+@pytest.fixture(autouse=True)
+def _isolate_range_capability_cache():
+    """每个用例独立探测范围读取能力，避免模块缓存污染测试顺序。"""
+
+    cache = wechat_data_analysis._RANGE_CAPABILITY_CACHE
+    original = dict(cache)
+    cache.clear()
+    try:
+        yield
+    finally:
+        cache.clear()
+        cache.update(original)
+
+
 # ---------- 假 MCP 客户端 ----------
 
 
