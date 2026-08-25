@@ -28,6 +28,8 @@ Prompt 测试群
 【整体视觉】
 固定群聊漫画要求。
 根据当天真实聊天内容自由选择统一视觉风格。
+【漫画分镜】
+每个话题先作为一个独立漫画框，框内可拆成1～3个连续分镜。
 【版面1】
 {fact}
 【版面2】
@@ -47,6 +49,8 @@ def test_theme_replacement_preserves_facts_and_other_manual_content():
     )
 
     assert updated.count("【整体视觉】") == 1
+    assert updated.count("【漫画分镜】") == 1
+    assert "每个话题先作为一个独立漫画框" in updated
     assert "水墨留白漫画" in updated
     assert "小王发布 3 个版本，金额 128 元。" in updated
     assert "这句话必须保留。" in updated

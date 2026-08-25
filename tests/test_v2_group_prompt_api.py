@@ -24,6 +24,8 @@ def test_group_prompt_override_is_isolated_and_not_exposed_in_list():
             first_config = client.get(f"/api/groups/{first}/image-prompt").json()
             second_config = client.get(f"/api/groups/{second}/image-prompt").json()
             assert first_config["source"] == second_config["source"] == "global"
+            assert first_config["content"].count("【漫画分镜】") == 1
+            assert first_config["preview"].count("【漫画分镜】") == 1
 
             custom = DEFAULT_IMAGE_PROMPT_TEMPLATE.replace(
                 "生成一张竖版微信群日报漫画信息图。",
@@ -105,3 +107,4 @@ def test_named_theme_preview_only_replaces_canonical_theme_section():
         assert resolved["actual_key"] == "gouache_editorial"
         assert "不透明水粉社论" in resolved["prompt"]
         assert "张三说今天完成 3 项工作。" in resolved["prompt"]
+        assert resolved["prompt"].count("【漫画分镜】") == 1

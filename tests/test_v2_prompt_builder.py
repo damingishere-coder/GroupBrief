@@ -174,8 +174,12 @@ def test_build_renders_only_fixed_sections_and_real_multi_person_dialogue():
     headings = re.findall(r"(?m)^【([^\n】]+)】$", output.prompt)
     assert headings == [
         "任务", "群名称", "统计时间", "数据", "主标题", "副标题",
-        "整体视觉", "版面1", "版面2", "文字规则", "底部总结",
+        "整体视觉", "漫画分镜", "版面1", "版面2", "文字规则", "底部总结",
     ]
+    assert output.prompt.count("【漫画分镜】") == 1
+    assert output.prompt.index("【整体视觉】") < output.prompt.index("【漫画分镜】")
+    assert output.prompt.index("【漫画分镜】") < output.prompt.index("【版面1】")
+    assert "每个话题先作为一个独立漫画框" in output.prompt
     assert "示例交流群 A（实时名）" in output.prompt
     assert "2026-08-17 00:00:00 ~ 2026-08-17 23:59:59" in output.prompt
     assert output.prompt.count("人物旁清晰标注“张三”") == 2
@@ -254,6 +258,76 @@ def test_default_template_file_and_builtin_are_synchronized():
     assert "{{subtitle}}" in file_body
     assert "{{panels}}" in file_body
     assert "{{footer_summary}}" in file_body
+    assert file_body.count("【漫画分镜】") == 1
+
+
+def test_fixed_storyboard_contract_supports_two_five_and_seven_panels():
+    output = _builder().build(_input())
+    assert output.success
+    for panel_count in (2, 5, 7):
+        panels = "\n\n".join(
+            f"【版面{index}】\n真实话题{index}"
+            for index in range(1, panel_count + 1)
+        )
+        prompt = re.sub(
+            r"(?ms)^【版面1】.*?(?=^【文字规则】)",
+            panels + "\n\n",
+            output.prompt,
+        )
+        assert validate_fixed_prompt_contract(
+            prompt,
+            expected_panel_count=panel_count,
+        ) == panel_count
+        assert prompt.count("【漫画分镜】") == 1
+        assert prompt.index("【漫画分镜】") < prompt.index("【版面1】")
+
+
+def test_fixed_storyboard_heading_is_required_in_exact_position():
+    output = _builder().build(_input())
+    assert output.success
+    invalid = output.prompt.replace("【漫画分镜】", "【分镜说明】", 1)
+    try:
+        validate_fixed_prompt_contract(invalid, expected_panel_count=2)
+    except PosterCopyError as exc:
+        assert "区块名称、顺序" in str(exc)
+    else:
+        raise AssertionError("缺少固定漫画分镜区块必须被拒绝")
+
+
+def test_template_rejects_missing_or_misordered_storyboard_section(tmp_path):
+    service = ImagePromptTemplateService(templates_dir=tmp_path / "image_prompt")
+    missing = DEFAULT_IMAGE_PROMPT_TEMPLATE.replace("【漫画分镜】", "【分镜说明】", 1)
+    storyboard_start = DEFAULT_IMAGE_PROMPT_TEMPLATE.index("【漫画分镜】")
+    panels_start = DEFAULT_IMAGE_PROMPT_TEMPLATE.index("{{panels}}")
+    storyboard = DEFAULT_IMAGE_PROMPT_TEMPLATE[storyboard_start:panels_start]
+    without_storyboard = (
+        DEFAULT_IMAGE_PROMPT_TEMPLATE[:storyboard_start]
+        + DEFAULT_IMAGE_PROMPT_TEMPLATE[panels_start:]
+    )
+    misordered = without_storyboard.replace("【整体视觉】", storyboard + "【整体视觉】", 1)
+
+    for name, content in (("missing", missing), ("misordered", misordered)):
+        try:
+            service.save(name, content)
+        except Exception as exc:
+            assert "模板区块必须严格为" in str(exc)
+        else:
+            raise AssertionError(f"{name} 漫画分镜模板必须被拒绝")
+
+
+def test_default_reset_restores_fixed_storyboard_section(tmp_path):
+    service = ImagePromptTemplateService(templates_dir=tmp_path / "image_prompt")
+    changed = DEFAULT_IMAGE_PROMPT_TEMPLATE.replace(
+        "漫画分镜负责强化真实聊天中的动作、误会、吐槽、反差和群友反应",
+        "临时修改的漫画分镜规则",
+    )
+    service.save("default", changed)
+
+    restored = service.reset()
+
+    assert restored == DEFAULT_IMAGE_PROMPT_TEMPLATE
+    assert restored.count("【漫画分镜】") == 1
+    assert service.read("default") == DEFAULT_IMAGE_PROMPT_TEMPLATE
 
 
 def test_invalid_legacy_template_is_rejected_instead_of_exposing_extra_sections(tmp_path):
