@@ -12,12 +12,30 @@ from zoneinfo import ZoneInfo
 from app.config.settings import Settings
 from app.core.logging import get_logger
 from app.scheduler.daily_v2_job import DailyScheduleState, run_daily_v2_job
+from app.scheduler.outcome import require_scheduler_success
 from app.scheduler.send_job import run_send_due_job
 
 logger = get_logger("groupbrief.scheduler")
 
 _scheduler: BackgroundScheduler | None = None
 _DEFAULT_GENERATE_TIME = time(0, 15)
+
+
+def run_scheduled_daily_v2_job(
+    run_date: str | None = None,
+    *,
+    skip_email: bool = False,
+) -> dict:
+    """APScheduler 包装器：业务非成功时必须让调度器记录异常。"""
+    result = run_daily_v2_job(run_date, skip_email=skip_email)
+    logger.info(
+        "APScheduler 每日任务结果：status=%s outcome=%s exit_code=%s",
+        result.get("status"),
+        result.get("outcome_status"),
+        result.get("exit_code"),
+    )
+    require_scheduler_success(result)
+    return result
 
 
 def _parse_generate_time(value: str) -> time:
@@ -42,7 +60,7 @@ def start_scheduler(settings: Settings) -> BackgroundScheduler:
     generate_time = _parse_generate_time(settings.schedule_generate_time)
     scheduler = BackgroundScheduler(timezone=tz)
     scheduler.add_job(
-        run_daily_v2_job,
+        run_scheduled_daily_v2_job,
         trigger=CronTrigger(
             hour=generate_time.hour,
             minute=generate_time.minute,
@@ -117,7 +135,7 @@ def _schedule_startup_catchup(
     if state.get("generation_completed_at"):
         return False
     scheduler.add_job(
-        run_daily_v2_job,
+        run_scheduled_daily_v2_job,
         trigger=DateTrigger(run_date=now + timedelta(seconds=3), timezone=tz),
         args=[run_date],
         kwargs={"skip_email": True},

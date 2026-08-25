@@ -19,6 +19,13 @@ from app.db import repository
 APP_VERSION = "1.0.0"
 
 
+def _should_start_scheduler(settings) -> bool:
+    return (
+        settings.scheduler_owner == "fastapi"
+        and os.environ.get("GROUPBRIEF_NO_SCHEDULER", "") != "1"
+    )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
@@ -34,12 +41,15 @@ async def lifespan(app: FastAPI):
     except Exception:
         app.state.startup_checks = []
     # P9：日志轮转清理已在 setup_logging 中执行
-    if os.environ.get("GROUPBRIEF_NO_SCHEDULER", "") != "1":
+    scheduler_started = _should_start_scheduler(settings)
+    app.state.scheduler_owner = settings.scheduler_owner
+    app.state.scheduler_active = scheduler_started
+    if scheduler_started:
         from app.scheduler.manager import start_scheduler
 
         start_scheduler(settings)
     yield
-    if os.environ.get("GROUPBRIEF_NO_SCHEDULER", "") != "1":
+    if scheduler_started:
         from app.scheduler.manager import stop_scheduler
 
         stop_scheduler()

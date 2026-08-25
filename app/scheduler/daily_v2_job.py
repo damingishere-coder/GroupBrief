@@ -22,6 +22,7 @@ from app.db import repository as repo
 from app.pipeline.daily_pipeline import DailyPipeline, parse_date
 from app.services.generation_runtime import GenerationBusyError, generation_mutex
 from app.v2.constants import SCHEDULER_STATE_CORRUPT
+from app.scheduler.outcome import attach_outcome, summarize_results
 
 logger = get_logger("groupbrief.scheduler")
 _STATE_LOCK = threading.RLock()
@@ -83,6 +84,7 @@ class DailyScheduleState:
             "generation_recovered_at",
             "email_started_at",
             "email_completed_at",
+            "last_invocation_completed_at",
             "updated_at",
         )
         for field in timestamp_fields:
@@ -103,6 +105,14 @@ class DailyScheduleState:
             value = data.get(field)
             if value is not None and not isinstance(value, bool):
                 return f"{field}_invalid"
+        exit_code = data.get("last_invocation_exit_code")
+        if exit_code is not None and (isinstance(exit_code, bool) or not isinstance(exit_code, int)):
+            return "last_invocation_exit_code_invalid"
+        invocation_status = data.get("last_invocation_status")
+        if invocation_status is not None and (
+            not isinstance(invocation_status, str) or not invocation_status.strip()
+        ):
+            return "last_invocation_status_invalid"
         generation_results = data.get("generation_results")
         if generation_results is not None and (
             not isinstance(generation_results, list)
@@ -156,17 +166,49 @@ def run_daily_v2_job(
     run_date = run_date or datetime.now(tz).date().isoformat()
     parsed_date = parse_date(run_date)
     if parsed_date is None:
-        return {"status": "failed", "error_type": "INVALID_RUN_DATE", "detail": "run_date 格式无效"}
+        return attach_outcome(
+            {"status": "failed", "error_type": "INVALID_RUN_DATE", "detail": "run_date 格式无效"}
+        )
 
     try:
         with _daily_mutex():
-            return _run_locked(settings, parsed_date, skip_email=skip_email)
+            result = _run_locked(settings, parsed_date, skip_email=skip_email)
     except GenerationBusyError as exc:
         logger.info("V2 每日任务未领取：%s", exc)
-        return {"status": "already_running", "detail": str(exc)}
+        result = {"status": "already_running", "detail": str(exc)}
     except Exception as exc:
         logger.exception("V2 每日任务异常")
-        return {"status": "failed", "detail": str(exc)[:300]}
+        result = {"status": "failed", "detail": str(exc)[:300]}
+    return _finalize_invocation(settings, parsed_date.isoformat(), result)
+
+
+def _finalize_invocation(settings: Settings, run_date: str, result: dict) -> dict:
+    finalized = attach_outcome(result)
+    logger.info(
+        "V2 每日任务终态：run_date=%s source_status=%s outcome=%s exit_code=%d",
+        run_date,
+        finalized.get("status"),
+        finalized["outcome_status"],
+        finalized["exit_code"],
+    )
+    if finalized["outcome_status"] == "already_running":
+        return finalized
+
+    state_store = DailyScheduleState(settings.output_dir)
+    path = state_store.path(run_date)
+    if not path.is_file():
+        return finalized
+    state = state_store.load(run_date)
+    if state.get("state_status") == "corrupt":
+        return finalized
+    state_store.update(
+        run_date,
+        last_invocation_source_status=str(finalized.get("status") or ""),
+        last_invocation_status=finalized["outcome_status"],
+        last_invocation_exit_code=finalized["exit_code"],
+        last_invocation_completed_at=_now_iso(),
+    )
+    return finalized
 
 
 def _run_locked(settings: Settings, run_date: date, *, skip_email: bool) -> dict:
@@ -244,11 +286,40 @@ def _run_locked(settings: Settings, run_date: date, *, skip_email: bool) -> dict
             "email_status": "skipped_by_request",
         }
 
-    if state.get("email_completed_at"):
+    generation_status = str(state.get("generation_status") or "failed")
+    if generation_status in {"failed", "blocked", "not_run"}:
+        state_store.update(
+            run_date_text,
+            email_status="skipped_generation_not_successful",
+            email_completed_at=_now_iso(),
+            email_detail=f"生成终态为 {generation_status}，未调用邮件",
+        )
         return {
-            "status": "already_completed",
+            "status": generation_status,
             "run_date": run_date_text,
-            "generation_status": state.get("generation_status"),
+            "generation_status": generation_status,
+            "email_status": "skipped_generation_not_successful",
+        }
+    if generation_status == "partial" and not settings.email_send_partial_report:
+        state_store.update(
+            run_date_text,
+            email_status="skipped_partial_disabled",
+            email_completed_at=_now_iso(),
+            email_detail="生成部分成功且未启用部分报告邮件",
+        )
+        return {
+            "status": "partial",
+            "run_date": run_date_text,
+            "generation_status": "partial",
+            "email_status": "skipped_partial_disabled",
+        }
+
+    if state.get("email_completed_at"):
+        completed_status = generation_status if generation_status != "success" else "already_completed"
+        return {
+            "status": completed_status,
+            "run_date": run_date_text,
+            "generation_status": generation_status,
             "email_status": state.get("email_status"),
         }
     if not settings.email_enabled or not settings.email_smtp_host:
@@ -259,7 +330,7 @@ def _run_locked(settings: Settings, run_date: date, *, skip_email: bool) -> dict
             email_detail="邮件未启用或 SMTP 未配置",
         )
         return {
-            "status": state.get("generation_status", "completed"),
+            "status": generation_status,
             "run_date": run_date_text,
             "email_status": "skipped_disabled",
         }
@@ -330,22 +401,15 @@ def _run_locked(settings: Settings, run_date: date, *, skip_email: bool) -> dict
         email_detail=output_tail,
     )
     return {
-        "status": "success" if proc.returncode == 0 else "partial",
+        "status": generation_status if proc.returncode == 0 else "partial",
         "run_date": run_date_text,
-        "generation_status": state.get("generation_status"),
+        "generation_status": generation_status,
         "email_status": email_status,
     }
 
 
 def _generation_status(results: list[dict]) -> str:
-    statuses = {str(item.get("status") or "") for item in results}
-    if statuses and statuses <= {"ready_to_send", "skipped", "no_groups"}:
-        return "success"
-    if "failed" in statuses and len(statuses) == 1:
-        return "failed"
-    if "failed" in statuses:
-        return "partial"
-    return "success"
+    return str(summarize_results(results)["outcome_status"])
 
 
 def _compact_results(results: list[dict]) -> list[dict]:

@@ -1,7 +1,10 @@
 """P7 测试：Scheduler 配置与任务函数。"""
 
 from datetime import datetime, time
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
+
+import pytest
 
 from app.scheduler.manager import (
     _parse_generate_time,
@@ -57,6 +60,18 @@ def test_generate_job_runs_every_day():
     repo.init_db(settings)  # 该测试不依赖其他测试文件的副作用，独立初始化
     result = run_generate_job()
     assert result["status"] in ("success", "partial", "failed")
+
+
+def test_scheduler_owner_controls_fastapi_registration(monkeypatch):
+    from app.config.settings import Settings
+    from app.main import _should_start_scheduler
+
+    monkeypatch.delenv("GROUPBRIEF_NO_SCHEDULER", raising=False)
+    assert _should_start_scheduler(Settings(_env_file=None, scheduler_owner="fastapi")) is True
+    assert _should_start_scheduler(Settings(_env_file=None, scheduler_owner="external")) is False
+    assert _should_start_scheduler(Settings(_env_file=None, scheduler_owner="disabled")) is False
+    monkeypatch.setenv("GROUPBRIEF_NO_SCHEDULER", "1")
+    assert _should_start_scheduler(Settings(_env_file=None, scheduler_owner="fastapi")) is False
 
 
 def test_daily_v2_job_persists_generation_and_email_idempotency(tmp_path, monkeypatch):
@@ -171,6 +186,171 @@ def test_daily_v2_job_exception_keeps_generation_incomplete_for_startup_resume(t
     assert "generation_completed_at" not in state
     assert state["generation_status"] == "interrupted"
     assert state["generation_hold"] is True
+
+
+def test_daily_v2_job_reports_busy_as_not_executed(monkeypatch):
+    from app.config.settings import Settings
+    from app.scheduler import daily_v2_job as daily
+    from app.services.generation_runtime import GenerationBusyError
+
+    class BusyContext:
+        def __enter__(self):
+            raise GenerationBusyError("已有实例")
+
+        def __exit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(daily, "_daily_mutex", lambda: BusyContext())
+
+    result = daily.run_daily_v2_job(
+        "2026-08-25",
+        settings=Settings(_env_file=None),
+        skip_email=True,
+    )
+
+    assert result["status"] == "already_running"
+    assert result["outcome_status"] == "already_running"
+    assert result["exit_code"] == 4
+
+
+def test_partial_generation_stays_partial_even_when_email_succeeds(tmp_path, monkeypatch):
+    from app.config.settings import Settings
+    from app.scheduler import daily_v2_job as daily
+
+    settings = Settings(
+        _env_file=None,
+        email_enabled=True,
+        email_smtp_host="smtp.example.com",
+        email_send_partial_report=True,
+    )
+    real_state_class = daily.DailyScheduleState
+
+    class TempState(real_state_class):
+        def __init__(self, _output_root):
+            super().__init__(tmp_path)
+
+    class PartialPipeline:
+        def __init__(self, settings):
+            pass
+
+        def generate_all(self, run_date, acquire_lock=True):
+            return [
+                {"group_name": "群A", "status": "ready_to_send"},
+                {"group_name": "群B", "status": "failed"},
+            ]
+
+    monkeypatch.setattr(daily, "DailyScheduleState", TempState)
+    monkeypatch.setattr(daily, "DailyPipeline", PartialPipeline)
+    monkeypatch.setattr(daily.repo, "init_db", lambda settings: None)
+    monkeypatch.setattr(daily.repo, "apply_db_settings", lambda settings: [])
+    monkeypatch.setattr(
+        daily.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout="sent", stderr=""),
+    )
+
+    result = daily.run_daily_v2_job("2026-08-25", settings=settings)
+
+    assert result["status"] == "partial"
+    assert result["outcome_status"] == "partial"
+    assert result["exit_code"] == 2
+    assert result["email_status"] == "sent"
+
+
+def test_no_groups_is_not_run_and_never_calls_email(tmp_path, monkeypatch):
+    from app.config.settings import Settings
+    from app.scheduler import daily_v2_job as daily
+
+    settings = Settings(_env_file=None, email_enabled=True, email_smtp_host="smtp.example.com")
+    real_state_class = daily.DailyScheduleState
+
+    class TempState(real_state_class):
+        def __init__(self, _output_root):
+            super().__init__(tmp_path)
+
+    class EmptyPipeline:
+        def __init__(self, settings):
+            pass
+
+        def generate_all(self, run_date, acquire_lock=True):
+            return [{"status": "no_groups", "reason": "无启用群"}]
+
+    monkeypatch.setattr(daily, "DailyScheduleState", TempState)
+    monkeypatch.setattr(daily, "DailyPipeline", EmptyPipeline)
+    monkeypatch.setattr(daily.repo, "init_db", lambda settings: None)
+    monkeypatch.setattr(daily.repo, "apply_db_settings", lambda settings: [])
+    monkeypatch.setattr(
+        daily.subprocess,
+        "run",
+        lambda *args, **kwargs: pytest.fail("no_groups 不得调用邮件"),
+    )
+
+    result = daily.run_daily_v2_job("2026-08-25", settings=settings)
+
+    assert result["status"] == "not_run"
+    assert result["exit_code"] == 5
+    assert result["email_status"] == "skipped_generation_not_successful"
+
+
+@pytest.mark.parametrize(
+    ("results", "expected"),
+    [
+        ([{"status": "ready_to_send"}], "success"),
+        ([{"status": "no_groups"}], "not_run"),
+        ([{"status": "blocked"}], "blocked"),
+        ([{"status": "held"}], "blocked"),
+        ([{"status": "unexpected"}], "failed"),
+    ],
+)
+def test_generation_status_fails_closed(results, expected):
+    from app.scheduler.daily_v2_job import _generation_status
+
+    assert _generation_status(results) == expected
+
+
+def test_apscheduler_daily_wrapper_raises_for_partial(monkeypatch):
+    from app.scheduler import manager
+    from app.scheduler.outcome import SchedulerOutcomeError
+
+    monkeypatch.setattr(
+        manager,
+        "run_daily_v2_job",
+        lambda *args, **kwargs: {"status": "partial", "outcome_status": "partial", "exit_code": 2},
+    )
+
+    with pytest.raises(SchedulerOutcomeError):
+        manager.run_scheduled_daily_v2_job("2026-08-25")
+
+
+def test_send_due_scheduler_allows_empty_scan_but_rejects_failure(monkeypatch):
+    from app.scheduler import send_job
+    from app.scheduler.outcome import SchedulerOutcomeError
+
+    class EmptyPipeline:
+        def __init__(self, settings):
+            pass
+
+        def send_due(self):
+            return []
+
+    monkeypatch.setattr(send_job, "DailyPipeline", EmptyPipeline)
+    assert send_job.run_send_due_job()["outcome_status"] == "not_run"
+
+    class FailedPipeline(EmptyPipeline):
+        def send_due(self):
+            return [{"group_name": "群A", "status": "failed"}]
+
+    monkeypatch.setattr(send_job, "DailyPipeline", FailedPipeline)
+    with pytest.raises(SchedulerOutcomeError):
+        send_job.run_send_due_job()
+
+    class BrokenPipeline(EmptyPipeline):
+        def send_due(self):
+            raise RuntimeError("simulated send scan failure")
+
+    monkeypatch.setattr(send_job, "DailyPipeline", BrokenPipeline)
+    with pytest.raises(RuntimeError, match="simulated send scan failure"):
+        send_job.run_send_due_job()
 
 
 def test_corrupt_scheduler_state_blocks_generation_email_and_overwrite(tmp_path, monkeypatch):

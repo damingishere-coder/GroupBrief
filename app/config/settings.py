@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -110,6 +110,9 @@ class Settings(BaseSettings):
     email_send_partial_report: bool = True
 
     # 自动任务
+    # fastapi：8766 内 APScheduler 是唯一 owner；external：仅允许外部调度；
+    # disabled：不注册任何自动任务。该字段只由环境配置，不通过设置 API 修改。
+    scheduler_owner: Literal["fastapi", "external", "disabled"] = "fastapi"
     schedule_generate_time: str = "00:15"
     schedule_email_time: str = "after_generate"
     schedule_startup_catchup_enabled: bool = True

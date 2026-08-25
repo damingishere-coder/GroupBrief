@@ -80,6 +80,8 @@ def stats(session: Session = Depends(repo.get_session)):
 
 @router.get("/status")
 def status(session: Session = Depends(repo.get_session), settings: Settings = Depends(get_settings)):
+    from app.scheduler.manager import get_scheduler
+
     try:
         tz = ZoneInfo(settings.app_timezone)
         now = datetime.now(tz)
@@ -103,6 +105,8 @@ def status(session: Session = Depends(repo.get_session), settings: Settings = De
     return {
         "version": "1.0.0",
         "status": "running",
+        "scheduler_owner": settings.scheduler_owner,
+        "scheduler_active": get_scheduler() is not None,
         "now": now.isoformat() if tz else None,
         "timezone": settings.app_timezone,
         "report_date": window.report_date.isoformat(),
