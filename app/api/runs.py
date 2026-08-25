@@ -7,7 +7,7 @@ from sqlmodel import Session
 
 from app.db import repository as repo
 
-router = APIRouter(prefix="/api/runs", tags=["runs"])
+router = APIRouter(prefix="/api/runs", tags=["runs"], deprecated=True)
 
 
 @router.get("/{run_id}")

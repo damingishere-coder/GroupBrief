@@ -9,6 +9,9 @@ from typing import Any, Literal
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+_ENVIRONMENT_ONLY_FIELDS = frozenset(
+    {"allow_test_providers", "legacy_v1_write_mode", "scheduler_owner"}
+)
 
 
 class Settings(BaseSettings):
@@ -24,6 +27,9 @@ class Settings(BaseSettings):
     app_timezone: str = "Asia/Shanghai"
     # 测试 Provider 安全闸门：真实运行默认关闭，且不通过设置 API/数据库修改。
     allow_test_providers: bool = False
+    # 旧 V1 数据库流水线默认只读；短期兼容只能通过环境显式进入 maintenance。
+    # 该字段不得加入设置 API/数据库，避免运行时误开双写。
+    legacy_v1_write_mode: Literal["read_only", "maintenance"] = "read_only"
 
     # 数据库
     database_url: str = "sqlite:///data/groupbrief.db"
@@ -162,7 +168,7 @@ class Settings(BaseSettings):
         applied: list[str] = []
         field_map = Settings.model_fields
         for key, raw in values.items():
-            if key not in field_map:
+            if key not in field_map or key in _ENVIRONMENT_ONLY_FIELDS:
                 continue
             if isinstance(raw, str) and raw.strip() == "******":
                 continue

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+import logging
 import os
 from pathlib import Path
 
@@ -31,6 +32,14 @@ async def lifespan(app: FastAPI):
     settings = get_settings()
     settings.ensure_dirs()
     setup_logging(settings.logs_dir)
+    if settings.legacy_v1_write_mode == "maintenance":
+        logging.getLogger("groupbrief.legacy_v1").warning(
+            "旧 V1 写入 maintenance 模式已启用；正式生成与发送仍应使用 V2"
+        )
+    else:
+        logging.getLogger("groupbrief.legacy_v1").info(
+            "旧 V1 写入已冻结为只读模式"
+        )
     repository.init_db(settings)
     app.state.settings = settings
     # P9：启动检查（记录日志，不阻止启动）

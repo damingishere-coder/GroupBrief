@@ -8,12 +8,17 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlmodel import Session
 
+from app.config.settings import Settings, get_settings
 from app.db import repository as repo
 from app.db.models import GroupRun, Report
 from app.services.report_service import ReportService
 from app.services.generation_runtime import GenerationBusyError
+from app.services.legacy_v1_policy import (
+    LegacyV1WriteBlockedError,
+    require_legacy_v1_write,
+)
 
-router = APIRouter(prefix="/api/reports", tags=["reports"])
+router = APIRouter(prefix="/api/reports", tags=["reports"], deprecated=True)
 
 
 class GenerateRequest(BaseModel):
@@ -26,9 +31,29 @@ class PromptUpdate(BaseModel):
     text: str
 
 
+def _require_write(settings: Settings, *, operation: str, replacement: str) -> None:
+    try:
+        require_legacy_v1_write(
+            settings,
+            operation=operation,
+            replacement=replacement,
+        )
+    except LegacyV1WriteBlockedError as exc:
+        raise HTTPException(status_code=410, detail=exc.as_detail()) from exc
+
+
 @router.post("/generate")
-def generate(payload: GenerateRequest, session: Session = Depends(repo.get_session)):
-    service = ReportService()
+def generate(
+    payload: GenerateRequest,
+    session: Session = Depends(repo.get_session),
+    settings: Settings = Depends(get_settings),
+):
+    _require_write(
+        settings,
+        operation="report.generate",
+        replacement="POST /api/v2/pipeline/generate",
+    )
+    service = ReportService(settings=settings)
     group = None
     if payload.group_id is not None:
         group = repo.get_active_group(session, payload.group_id)
@@ -82,7 +107,17 @@ def latest(session: Session = Depends(repo.get_session)):
 
 
 @router.put("/{report_id}/prompt")
-def update_prompt(report_id: int, payload: PromptUpdate, session: Session = Depends(repo.get_session)):
+def update_prompt(
+    report_id: int,
+    payload: PromptUpdate,
+    session: Session = Depends(repo.get_session),
+    settings: Settings = Depends(get_settings),
+):
+    _require_write(
+        settings,
+        operation="report.prompt.update",
+        replacement="PUT /api/v2/runs/{group}/{run_date}/prompt",
+    )
     report = session.get(Report, report_id)
     if not report:
         raise HTTPException(404, "报告不存在")

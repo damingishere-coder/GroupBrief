@@ -48,7 +48,7 @@ def providers(
     }
 
 
-@router.get("/stats")
+@router.get("/stats", deprecated=True)
 def stats(session: Session = Depends(repo.get_session)):
     """仪表盘统计卡数据：最近一次成功 run 的消息总数 / 发言人数。"""
     from sqlmodel import select
@@ -107,6 +107,8 @@ def status(session: Session = Depends(repo.get_session), settings: Settings = De
         "status": "running",
         "scheduler_owner": settings.scheduler_owner,
         "scheduler_active": get_scheduler() is not None,
+        "legacy_v1_write_mode": settings.legacy_v1_write_mode,
+        "legacy_v1_writes_active": settings.legacy_v1_write_mode == "maintenance",
         "now": now.isoformat() if tz else None,
         "timezone": settings.app_timezone,
         "report_date": window.report_date.isoformat(),

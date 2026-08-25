@@ -29,6 +29,8 @@ os.environ["WECHAT_MCP_ACCOUNT"] = ""
 os.environ["AI_API_KEY"] = ""
 # 默认集成测试强制使用无需外部调用的旧兼容分支；Codex 主备路由由专门单测覆盖。
 os.environ["SUMMARY_PROVIDER_PRIMARY"] = "deepseek"
+# 旧 V1 单测需要显式进入兼容维护模式；生产默认仍是 read_only。
+os.environ["LEGACY_V1_WRITE_MODE"] = "maintenance"
 
 
 def pytest_sessionfinish(session, exitstatus) -> None:

@@ -13,7 +13,7 @@ from time import perf_counter
 from sqlmodel import Session
 
 from app.ai.concurrency import bounded_slot, normalized_limit
-from app.config.settings import get_settings
+from app.config.settings import Settings, get_settings
 from app.core.logging import get_logger
 from app.db import repository as repo
 from app.db.models import Group, GroupRun, Report, Run
@@ -24,14 +24,22 @@ from app.services.message_normalizer import normalize_messages
 from app.services.ranking_service import RankingEngine
 from app.services.prompt_service import PromptService
 from app.services.generation_runtime import generation_mutex
+from app.services.legacy_v1_policy import require_legacy_v1_write
 
 logger = get_logger("app")
 
 
 class ReportService:
-    def __init__(self, history: HistoryService | None = None, prompt: PromptService | None = None):
+    def __init__(
+        self,
+        history: HistoryService | None = None,
+        prompt: PromptService | None = None,
+        *,
+        settings: Settings | None = None,
+    ):
         self.history = history or HistoryService()
         self.prompt = prompt or PromptService()
+        self.settings = settings or get_settings()
         self.ranking = RankingEngine()
         self.handoff = HandoffService()
 
@@ -46,6 +54,11 @@ class ReportService:
         acquire_lock: bool = True,
     ) -> Run:
         """生成群报。group=None 表示全部启用群。"""
+        require_legacy_v1_write(
+            self.settings,
+            operation="report.generate",
+            replacement="POST /api/v2/pipeline/generate",
+        )
         if acquire_lock:
             with generation_mutex():
                 return self.generate(
@@ -85,7 +98,7 @@ class ReportService:
         )
 
         group_specs = [(int(g.id), g.display_name or g.wechat_group_name) for g in groups if g.id is not None]
-        settings = get_settings()
+        settings = self.settings
         group_limit = normalized_limit(settings.generation_group_concurrency, 5)
         logger.info(
             "V1 开始并行生成：groups=%d group_limit=%d fetch_limit=%d ai_limit=%d",
@@ -192,7 +205,7 @@ class ReportService:
         # 1. 读取聊天
         wechat_id = group.wechat_group_id or group.wechat_group_name or group.display_name
         fetch_started = perf_counter()
-        with bounded_slot("wechat_fetch", get_settings().wechat_fetch_concurrency):
+        with bounded_slot("wechat_fetch", self.settings.wechat_fetch_concurrency):
             outcome = self.history.fetch(
                 group.wechat_group_id or wechat_id,
                 group.wechat_group_name or group.display_name,

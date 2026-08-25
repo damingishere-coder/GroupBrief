@@ -9,7 +9,7 @@ from app.config.settings import Settings, get_settings
 from app.core.path_security import resolve_within
 from app.services.handoff_service import HandoffService
 
-router = APIRouter(prefix="/api/files", tags=["files"])
+router = APIRouter(prefix="/api/files", tags=["files"], deprecated=True)
 
 ALLOWED_RAW_FILES = frozenset(
     {

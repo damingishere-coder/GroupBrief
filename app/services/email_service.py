@@ -24,6 +24,7 @@ from app.image.image_task import detect_image_format, verify_image
 from app.scheduler.calendar_rules import email_subject, get_report_window
 from app.services.email_delivery import EmailDeliveryLedger, deliver_email
 from app.services.handoff_service import safe_dir_name
+from app.services.legacy_v1_policy import require_legacy_v1_write
 
 logger = get_logger("groupbrief.email")
 
@@ -141,6 +142,11 @@ class EmailService:
         )
 
     def send(self, session: Session, run: Run | None = None) -> tuple[bool, str]:
+        require_legacy_v1_write(
+            self.settings,
+            operation="email.send",
+            replacement="V2 每日任务或 scripts/send_daily_email.py",
+        )
         config_error = email_delivery_config_error(self.settings)
         if config_error:
             return False, config_error
