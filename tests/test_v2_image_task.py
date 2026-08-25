@@ -232,8 +232,11 @@ def test_codex_prompt_uses_stdin_and_explicit_output_contract(tmp_path, monkeypa
         captured["command"] = command
         captured["input"] = kwargs["input"]
         staging, result_path = _attempt_paths(command)
-        staging.write_bytes(_PNG_1PX)
-        result_path.write_text(json.dumps({"image_path": str(staging)}), encoding="utf-8")
+        generated = tmp_path / "generated_images" / "execution-1" / "final.png"
+        generated.parent.mkdir()
+        generated.write_bytes(_PNG_1PX)
+        result_path.write_text(json.dumps({"image_path": str(generated.resolve())}), encoding="utf-8")
+        assert not staging.exists()
         return _Proc()
 
     monkeypatch.setattr(codex_generator, "_run_codex_process", fake_run)
@@ -246,6 +249,9 @@ def test_codex_prompt_uses_stdin_and_explicit_output_contract(tmp_path, monkeypa
     assert captured["command"][-1] == "-"
     assert "包含引号" not in " ".join(captured["command"])
     assert "包含引号" in captured["input"]
+    assert "复制到这个精确路径" not in captured["input"]
+    assert "不要复制或另存" in captured["input"]
+    assert "绝对路径" in captured["input"]
     assert result.detail["attempt_count"] == 1
     assert result.detail["recovery_status"] == "completed"
 
@@ -293,6 +299,49 @@ def test_codex_rejects_structured_path_outside_allowed_roots(tmp_path, monkeypat
     assert result.detail["candidate_diagnostics"] == []
 
 
+def test_codex_rejects_relative_structured_path(tmp_path, monkeypatch):
+    generator, prompt = _codex_test_generator(tmp_path, monkeypatch)
+    calls = 0
+
+    def fake_run(command, **kwargs):
+        nonlocal calls
+        calls += 1
+        _, result_path = _attempt_paths(command)
+        result_path.write_text(json.dumps({"image_path": "final.png"}), encoding="utf-8")
+        return _Proc()
+
+    monkeypatch.setattr(codex_generator, "_run_codex_process", fake_run)
+    result = generator.generate(prompt, prompt.parent / "daily_image.png")
+
+    assert result.success is False
+    assert calls == 2
+    assert result.detail["candidate_diagnostics"] == []
+
+
+@pytest.mark.parametrize("create_before", [False, True], ids=["missing", "stale"])
+def test_codex_rejects_missing_or_stale_structured_path(tmp_path, monkeypatch, create_before):
+    generator, prompt = _codex_test_generator(tmp_path, monkeypatch)
+    candidate = tmp_path / "generated_images" / "execution-old" / "final.png"
+    candidate.parent.mkdir()
+    if create_before:
+        candidate.write_bytes(_PNG_1PX)
+    calls = 0
+
+    def fake_run(command, **kwargs):
+        nonlocal calls
+        calls += 1
+        _, result_path = _attempt_paths(command)
+        result_path.write_text(json.dumps({"image_path": str(candidate.resolve())}), encoding="utf-8")
+        return _Proc()
+
+    monkeypatch.setattr(codex_generator, "_run_codex_process", fake_run)
+    result = generator.generate(prompt, prompt.parent / "daily_image.png")
+
+    assert result.success is False
+    assert calls == 2
+    assert result.detail["candidate_diagnostics"] == []
+
+
 def test_codex_does_not_guess_between_different_images(tmp_path, monkeypatch):
     generator, prompt = _codex_test_generator(tmp_path, monkeypatch)
     calls = 0
@@ -313,6 +362,33 @@ def test_codex_does_not_guess_between_different_images(tmp_path, monkeypatch):
     assert calls == 2
     assert result.detail["stage"] == "ambiguous"
     assert len(result.detail["candidate_diagnostics"]) == 2
+
+
+def test_codex_structured_path_selects_one_of_multiple_candidates(tmp_path, monkeypatch):
+    generator, prompt = _codex_test_generator(tmp_path, monkeypatch)
+
+    def fake_run(command, **kwargs):
+        _, result_path = _attempt_paths(command)
+        execution = tmp_path / "generated_images" / "execution-1"
+        execution.mkdir()
+        selected = execution / "selected.png"
+        selected.write_bytes(_PNG_1PX)
+        (execution / "alternate.png").write_bytes(_PNG_1PX + b"different")
+        result_path.write_text(json.dumps({"image_path": str(selected.resolve())}), encoding="utf-8")
+        return _Proc()
+
+    monkeypatch.setattr(codex_generator, "_run_codex_process", fake_run)
+    output = prompt.parent / "daily_image.png"
+    result = generator.generate(prompt, output)
+
+    assert result.success is True
+    assert len(result.detail["candidate_diagnostics"]) == 2
+    structured = next(
+        item
+        for item in result.detail["candidate_diagnostics"]
+        if "structured" in item["sources"]
+    )
+    assert structured["relative_path"] == "execution-1/selected.png"
 
 
 def test_codex_deduplicates_staging_and_generated_copy_by_hash(tmp_path, monkeypatch):

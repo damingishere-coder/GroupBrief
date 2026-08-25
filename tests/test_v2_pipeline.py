@@ -490,6 +490,43 @@ def test_force_generate_image_failure_returns_failed_state(tmp_path):
     assert result["error_type"] == IMAGE_GENERATION_FAILED
     run = pipeline.store.load_run("测试群", "2026-08-18")
     assert run["status"] == FAILED
+    assert run["failed_stage"] == "image"
+    assert run["error"] == "生图失败"
+    assert run["image_error"] == "生图失败"
+
+
+def test_image_success_clears_stale_failure_fields(tmp_path):
+    pipeline, group = _make_pipeline(tmp_path)
+    pipeline.generate_all(run_date="2026-08-18")
+    pipeline.store.update(
+        "测试群",
+        "2026-08-18",
+        status=FAILED,
+        failed_stage="image",
+        error="旧生图失败",
+        error_type=IMAGE_GENERATION_FAILED,
+        image_error="旧生图失败",
+    )
+    job = pipeline._make_image_job(group, "2026-08-18", force=True)
+
+    pipeline._image_hook(
+        job,
+        {
+            "success": True,
+            "status": "success",
+            "detail": "图片已落盘",
+            "error_type": "",
+            "imagegen_ms": 1,
+            "generator_detail": {},
+        },
+    )
+
+    run = pipeline.store.load_run("测试群", "2026-08-18")
+    assert run["status"] == IMAGE_READY
+    assert run["failed_stage"] is None
+    assert run["error"] is None
+    assert run["error_type"] is None
+    assert run["image_error"] is None
 
 
 def test_generate_data_failure_marks_failed(tmp_path):

@@ -600,6 +600,11 @@ class DailyPipeline:
         # 每群生图完成后更新 run.json（不在此处判断 need_image）
         status = IMAGE_READY if result["success"] else FAILED
         error_type = result.get("error_type") or IMAGE_GENERATION_FAILED
+        error_detail = (
+            str(result.get("detail") or "图片生成失败")[:300]
+            if not result["success"]
+            else None
+        )
         current = self.store.load_run(job.group_name, job.output_path.parent.name)
         stage_timings = dict(current.get("stage_timings") or {})
         imagegen_ms = int(result.get("imagegen_ms") or 0)
@@ -611,7 +616,9 @@ class DailyPipeline:
         self.store.update(
             job.group_name, job.output_path.parent.name,
             status=status,
-            image_error=result.get("detail") if not result["success"] else None,
+            failed_stage="image" if not result["success"] else None,
+            error=error_detail,
+            image_error=error_detail,
             image_status=result["status"],
             error_type=error_type if not result["success"] else None,
             stage_timings=stage_timings,

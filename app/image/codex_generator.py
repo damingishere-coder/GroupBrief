@@ -338,7 +338,7 @@ class CodexImageGenerator:
                     command,
                     timeout=self.timeout,
                     cwd=str(task_dir),
-                    input=self._attempt_prompt(prompt_text, Path(attempt["staging_path"])),
+                    input=self._attempt_prompt(prompt_text),
                     env=environment,
                     on_start=lambda pid, record=attempt: self._record_attempt_pid(
                         manifest_path, record, pid
@@ -483,12 +483,13 @@ class CodexImageGenerator:
             return 1
 
     @staticmethod
-    def _attempt_prompt(prompt_text: str, staging_path: Path) -> str:
+    def _attempt_prompt(prompt_text: str) -> str:
         return (
             "$imagegen " + prompt_text + "\n\n"
-            "只为本次任务生成一张最终图片。不要读取、引用或复用任何已有图片。"
-            f"完成后把最终图片复制到这个精确路径：{staging_path.resolve()}。"
-            "最终回复必须严格符合 output schema，并在 image_path 中返回该最终图片路径。"
+            "只为本次任务调用一次 ImageGen，并只生成、选择一张最终图片。"
+            "不要读取、引用或复用任何已有图片，也不要复制或另存生成结果。"
+            "最终回复必须严格符合 output schema，并在 image_path 中返回 "
+            "ImageGen 产生的这张最终图片当前存在的绝对路径。"
         )
 
     def _new_attempt(self, task_dir: Path, attempt_number: int, history: list[dict]) -> dict:
@@ -579,7 +580,8 @@ class CodexImageGenerator:
             or int(old.get("size") or -1) != stat.st_size
         )
 
-    def _structured_result_path(self, result_path: Path, task_dir: Path) -> Path | None:
+    @staticmethod
+    def _structured_result_path(result_path: Path) -> Path | None:
         try:
             parsed = json.loads(result_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
@@ -591,7 +593,7 @@ class CodexImageGenerator:
             return None
         candidate = Path(raw.strip()).expanduser()
         if not candidate.is_absolute():
-            candidate = task_dir / candidate
+            return None
         return candidate
 
     @staticmethod
@@ -609,7 +611,7 @@ class CodexImageGenerator:
         paths: list[tuple[Path, str]] = []
         if self._is_new_candidate(staging_path, task_dir, before):
             paths.append((staging_path, "staging"))
-        structured = self._structured_result_path(result_path, task_dir)
+        structured = self._structured_result_path(result_path)
         if structured is not None and self._is_new_candidate(structured, task_dir, before):
             paths.append((structured, "structured"))
         current = self._snapshot(task_dir)
