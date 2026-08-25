@@ -21,6 +21,7 @@ from app.core.logging import get_logger
 from app.db import repository as repo
 from app.pipeline.daily_pipeline import DailyPipeline, parse_date
 from app.services.generation_runtime import GenerationBusyError, generation_mutex
+from app.services.email_service import email_delivery_config_error
 from app.v2.constants import SCHEDULER_STATE_CORRUPT
 from app.scheduler.outcome import attach_outcome, summarize_results
 
@@ -322,7 +323,7 @@ def _run_locked(settings: Settings, run_date: date, *, skip_email: bool) -> dict
             "generation_status": generation_status,
             "email_status": state.get("email_status"),
         }
-    if not settings.email_enabled or not settings.email_smtp_host:
+    if not settings.email_enabled:
         state_store.update(
             run_date_text,
             email_status="skipped_disabled",
@@ -333,6 +334,23 @@ def _run_locked(settings: Settings, run_date: date, *, skip_email: bool) -> dict
             "status": generation_status,
             "run_date": run_date_text,
             "email_status": "skipped_disabled",
+        }
+    email_config_error = email_delivery_config_error(settings)
+    if email_config_error:
+        state_store.update(
+            run_date_text,
+            email_status="failed_config",
+            email_completed_at=_now_iso(),
+            email_error=email_config_error,
+            email_detail="邮件配置无效，未启动发送子进程",
+        )
+        return {
+            "status": "partial",
+            "run_date": run_date_text,
+            "generation_status": generation_status,
+            "email_status": "failed_config",
+            "error_type": "EMAIL_PROVIDER_CONFIG_INVALID",
+            "detail": email_config_error,
         }
     if state.get("email_started_at"):
         state_store.update(

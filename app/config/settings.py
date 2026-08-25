@@ -22,14 +22,16 @@ class Settings(BaseSettings):
     app_host: str = "127.0.0.1"
     app_port: int = 8766
     app_timezone: str = "Asia/Shanghai"
+    # 测试 Provider 安全闸门：真实运行默认关闭，且不通过设置 API/数据库修改。
+    allow_test_providers: bool = False
 
     # 数据库
     database_url: str = "sqlite:///data/groupbrief.db"
 
-    # 微信历史读取
+    # V1 兼容历史读取；正式 V2 使用下方 WeChatDataAnalysis MCP/导出配置。
     history_provider_primary: str = "wechat_data_analysis"
     history_provider_fallback: str = "wechat_cli"
-    history_provider_mock_enabled: bool = True
+    history_provider_mock_enabled: bool = False
     wechat_data_dir: str = ""
     wechat_export_dir: str = ""
     wechat_cli_path: str = ""
@@ -60,6 +62,8 @@ class Settings(BaseSettings):
     codex_summary_request_concurrency: int = 2
 
     # DeepSeek 备用
+    # 旧设置兼容字段；真实路由只使用 summary_provider_primary/fallback。
+    # 不再通过设置 API 暴露，保留一版以兼容旧 .env/数据库。
     ai_provider: str = "deepseek"
     ai_base_url: str = "https://api.deepseek.com"
     ai_api_key: str = ""
@@ -185,7 +189,7 @@ def _coerce_setting_value(key: str, raw: Any, annotation: Any) -> Any:
             return True
         if text in _BOOL_FALSE:
             return False
-        return bool(text)
+        raise ValueError(f"{key} 必须是 true/false")
     if annotation is int or annotation == int:
         if isinstance(raw, bool):
             return int(raw)

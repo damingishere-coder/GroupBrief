@@ -27,6 +27,27 @@ from app.services.handoff_service import safe_dir_name
 logger = get_logger("groupbrief.email")
 
 
+def email_delivery_config_error(settings: Settings) -> str:
+    """返回真实邮件发送前的配置错误；空字符串表示配置完整。"""
+    if not settings.email_enabled:
+        return "邮件未启用"
+    if not str(settings.email_smtp_host or "").strip():
+        return "邮件 SMTP 主机未配置"
+    try:
+        port = int(settings.email_smtp_port)
+    except (TypeError, ValueError):
+        return "邮件 SMTP 端口无效"
+    if not 1 <= port <= 65535:
+        return "邮件 SMTP 端口无效"
+    if not str(settings.email_recipient or "").strip():
+        return "邮件收件人未配置"
+    if not str(settings.email_from or settings.email_smtp_user or "").strip():
+        return "邮件发件人未配置"
+    if settings.email_smtp_user and not settings.email_smtp_password:
+        return "邮件 SMTP 用户已配置但密码缺失"
+    return ""
+
+
 @dataclass
 class GroupMailBlock:
     group_name: str
@@ -114,8 +135,9 @@ class EmailService:
         )
 
     def send(self, session: Session, run: Run | None = None) -> tuple[bool, str]:
-        if not self.settings.email_enabled or not self.settings.email_smtp_host:
-            return False, "邮件未启用或未配置 SMTP"
+        config_error = email_delivery_config_error(self.settings)
+        if config_error:
+            return False, config_error
 
         result = self.build_email(session, run)
         if not result.blocks:

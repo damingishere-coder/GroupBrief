@@ -27,8 +27,12 @@ from app.providers.history.base import (
 class WechatCliProvider(ChatHistoryProvider):
     name = "wechat_cli"
 
-    def __init__(self, cli_path: str | None = None):
-        settings: Settings = get_settings()
+    def __init__(
+        self,
+        cli_path: str | None = None,
+        settings: Settings | None = None,
+    ):
+        settings = settings or get_settings()
         self.cli_path = cli_path or settings.wechat_cli_path or "wechat-cli"
         self.export_dir = settings.data_dir / "wechat_cli_export"
 

@@ -10,11 +10,14 @@ from app.sender.wechat_native import (
     OcrLine,
     WechatNativeSender,
     WindowsWechatDriver,
+    create_wechat_sender,
     _main_chat_horizontal_bounds,
     _selected_header_matches,
     _select_group_search_match,
     _title_matches,
 )
+
+import pytest
 
 
 class FakeNativeDriver:
@@ -46,6 +49,13 @@ def _settings(tmp_path) -> Settings:
         database_url=f"sqlite:///{tmp_path / 'test.db'}",
         wechat_native_mutex_timeout_seconds=1,
     )
+
+
+def test_sender_factory_rejects_unknown_mode(tmp_path):
+    settings = _settings(tmp_path)
+    settings.wechat_sender_mode = "typo_sender"
+    with pytest.raises(ValueError, match="不支持的微信发送 Provider"):
+        create_wechat_sender(settings=settings, dry_run=True)
 
 
 def test_title_match_only_accepts_exact_name_or_member_count():

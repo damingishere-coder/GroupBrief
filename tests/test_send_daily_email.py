@@ -282,3 +282,23 @@ def test_dry_run_does_not_require_smtp_or_connect(tmp_path, monkeypatch, capsys)
 
     assert mail_script.main() == 0
     assert "预览群" in capsys.readouterr().out
+
+
+def test_main_invalid_email_config_aborts_before_smtp(tmp_path, monkeypatch, capsys):
+    settings = _settings(tmp_path)
+    settings.email_recipient = ""
+    smtp_calls = []
+
+    def fail_smtp(*args, **kwargs):
+        smtp_calls.append((args, kwargs))
+        raise AssertionError("配置无效时不应连接 SMTP")
+
+    monkeypatch.setattr(mail_script, "get_settings", lambda: settings)
+    monkeypatch.setattr(mail_script.repo, "init_db", lambda settings: None)
+    monkeypatch.setattr(mail_script.repo, "apply_db_settings", lambda settings: None)
+    monkeypatch.setattr(mail_script.smtplib, "SMTP_SSL", fail_smtp)
+    monkeypatch.setattr("sys.argv", ["send_daily_email.py", "--run-date", "2026-08-21"])
+
+    assert mail_script.main() == 1
+    assert "收件人" in capsys.readouterr().out
+    assert not smtp_calls

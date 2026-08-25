@@ -93,3 +93,15 @@ def test_default_factory_builds_codex_gpt_provider():
     provider = build_summary_provider(_settings())
     assert isinstance(provider, CodexGPTProvider)
     assert provider.model == "gpt-5.6-sol"
+
+
+@pytest.mark.parametrize(
+    "overrides, message",
+    [
+        ({"summary_provider_primary": "unknown-ai"}, "主 Provider"),
+        ({"summary_provider_fallback": "unknown-ai"}, "备用 Provider"),
+    ],
+)
+def test_summary_factory_rejects_unknown_provider_names(overrides, message):
+    with pytest.raises(ValueError, match=message):
+        build_summary_provider(_settings(**overrides))

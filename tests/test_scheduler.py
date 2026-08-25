@@ -116,7 +116,13 @@ def test_daily_v2_job_resumes_interrupted_generation_without_email(tmp_path, mon
     from app.config.settings import Settings
     from app.scheduler import daily_v2_job as daily
 
-    settings = Settings(_env_file=None, email_enabled=True, email_smtp_host="smtp.example.com")
+    settings = Settings(
+        _env_file=None,
+        email_enabled=True,
+        email_smtp_host="smtp.example.com",
+        email_recipient="to@example.com",
+        email_from="from@example.com",
+    )
     real_state_class = daily.DailyScheduleState
 
     class TempState(real_state_class):
@@ -221,6 +227,8 @@ def test_partial_generation_stays_partial_even_when_email_succeeds(tmp_path, mon
         _env_file=None,
         email_enabled=True,
         email_smtp_host="smtp.example.com",
+        email_recipient="to@example.com",
+        email_from="from@example.com",
         email_send_partial_report=True,
     )
     real_state_class = daily.DailyScheduleState
@@ -257,11 +265,58 @@ def test_partial_generation_stays_partial_even_when_email_succeeds(tmp_path, mon
     assert result["email_status"] == "sent"
 
 
+def test_invalid_email_config_fails_before_subprocess(tmp_path, monkeypatch):
+    from app.config.settings import Settings
+    from app.scheduler import daily_v2_job as daily
+
+    settings = Settings(
+        _env_file=None,
+        email_enabled=True,
+        email_smtp_host="smtp.example.com",
+        email_recipient="",
+        email_from="from@example.com",
+    )
+    real_state_class = daily.DailyScheduleState
+
+    class TempState(real_state_class):
+        def __init__(self, _output_root):
+            super().__init__(tmp_path)
+
+    class SuccessPipeline:
+        def __init__(self, settings):
+            pass
+
+        def generate_all(self, run_date, acquire_lock=True):
+            return [{"group_name": "群A", "status": "ready_to_send"}]
+
+    monkeypatch.setattr(daily, "DailyScheduleState", TempState)
+    monkeypatch.setattr(daily, "DailyPipeline", SuccessPipeline)
+    monkeypatch.setattr(daily.repo, "init_db", lambda settings: None)
+    monkeypatch.setattr(daily.repo, "apply_db_settings", lambda settings: [])
+    monkeypatch.setattr(
+        daily.subprocess,
+        "run",
+        lambda *args, **kwargs: pytest.fail("配置无效时不得启动邮件子进程"),
+    )
+
+    result = daily.run_daily_v2_job("2026-08-25", settings=settings)
+
+    assert result["status"] == "partial"
+    assert result["error_type"] == "EMAIL_PROVIDER_CONFIG_INVALID"
+    assert result["email_status"] == "failed_config"
+
+
 def test_no_groups_is_not_run_and_never_calls_email(tmp_path, monkeypatch):
     from app.config.settings import Settings
     from app.scheduler import daily_v2_job as daily
 
-    settings = Settings(_env_file=None, email_enabled=True, email_smtp_host="smtp.example.com")
+    settings = Settings(
+        _env_file=None,
+        email_enabled=True,
+        email_smtp_host="smtp.example.com",
+        email_recipient="to@example.com",
+        email_from="from@example.com",
+    )
     real_state_class = daily.DailyScheduleState
 
     class TempState(real_state_class):
@@ -429,7 +484,13 @@ def test_email_started_without_completion_remains_result_unknown(tmp_path, monke
     from app.config.settings import Settings
     from app.scheduler import daily_v2_job as daily
 
-    settings = Settings(_env_file=None, email_enabled=True, email_smtp_host="smtp.example.com")
+    settings = Settings(
+        _env_file=None,
+        email_enabled=True,
+        email_smtp_host="smtp.example.com",
+        email_recipient="to@example.com",
+        email_from="from@example.com",
+    )
     real_state_class = daily.DailyScheduleState
 
     class TempState(real_state_class):

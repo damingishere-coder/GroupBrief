@@ -10,6 +10,8 @@ from app.config.settings import Settings, get_settings
 from app.db import repository as repo
 from app.db.models import Group, GroupRun
 from app.services.email_service import EmailBuildResult, EmailService, GroupMailBlock
+from app.services.history_service import HistoryService
+from app.services.prompt_service import PromptService
 from app.services.report_service import ReportService
 
 settings = get_settings()
@@ -22,7 +24,19 @@ def _prepare_run(session: Session) -> int:
         session,
         Group(display_name="示例UED-4群", wechat_group_id="group-a"),
     )
-    service = ReportService()
+    test_settings = Settings(
+        _env_file=None,
+        allow_test_providers=True,
+        history_provider_primary="mock",
+        history_provider_fallback="",
+        history_provider_mock_enabled=True,
+        summary_provider_primary="deepseek",
+        ai_api_key="",
+    )
+    service = ReportService(
+        history=HistoryService(test_settings),
+        prompt=PromptService(test_settings),
+    )
     run = service.generate(session, group=group, report_date="2026-08-13", force=True)
     return run.id
 
@@ -78,6 +92,8 @@ def test_email_partial_flag_aborts_before_smtp(monkeypatch):
     settings2 = Settings(
         email_enabled=True,
         email_smtp_host="smtp.example.com",
+        email_recipient="to@example.com",
+        email_from="from@example.com",
         email_send_partial_report=False,
     )
     service = EmailService(settings2)
@@ -104,6 +120,30 @@ def test_email_partial_flag_aborts_before_smtp(monkeypatch):
 
     assert not ok
     assert "SEND_PARTIAL_REPORT=false" in detail
+    assert not smtp_calls
+
+
+def test_email_invalid_config_aborts_before_smtp(monkeypatch):
+    settings2 = Settings(
+        _env_file=None,
+        email_enabled=True,
+        email_smtp_host="smtp.example.com",
+        email_recipient="",
+        email_from="from@example.com",
+    )
+    service = EmailService(settings2)
+    smtp_calls = []
+
+    def fail_if_connected(*args, **kwargs):
+        smtp_calls.append((args, kwargs))
+        raise AssertionError("配置无效时不应连接 SMTP")
+
+    monkeypatch.setattr(email_module.smtplib, "SMTP_SSL", fail_if_connected)
+    with Session(repo.engine) as session:
+        ok, detail = service.send(session)
+
+    assert not ok
+    assert "收件人" in detail
     assert not smtp_calls
 
 

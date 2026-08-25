@@ -193,7 +193,7 @@ class WeChatDataAnalysisProvider(ChatHistoryProvider):
         )
 
     def _find_wechat_dir(self) -> Path | None:
-        settings = get_settings()
+        settings = self._settings
         if settings.wechat_data_dir:
             p = Path(settings.wechat_data_dir)
             if p.exists():

@@ -46,7 +46,7 @@ def test_providers_writes_health_db():
         assert resp.status_code == 200
         data = resp.json()
         assert "wechat_data_analysis" in data
-        assert "mock" in data
+        assert "mock" not in data
 
 
 def test_resolve_api():

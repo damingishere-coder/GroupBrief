@@ -234,6 +234,11 @@ class CodexImageGenerator:
     # ---------- 生成 ----------
 
     def generate(self, prompt_file: Path, output_path: Path) -> ImageTaskResult:
+        # 配置/可执行性错误不应排队等待全局生图锁；进入锁后仍会再次检查，
+        # 以覆盖等待期间 CLI 状态发生变化的情况。
+        ok, detail = self.health_check()
+        if not ok:
+            return ImageTaskResult(False, error=detail, detail={"stage": "health"})
         try:
             with _imagegen_mutex((self.timeout * _MAX_ATTEMPTS) + 60):
                 return self._generate_locked(Path(prompt_file), Path(output_path))

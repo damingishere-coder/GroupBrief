@@ -24,6 +24,19 @@ from app.providers.ai.deepseek import DeepSeekV4FlashProvider
 logger = get_logger("groupbrief.ai")
 
 _CODEX_PROVIDER_NAMES = frozenset({"codex", "codex_gpt", "gpt"})
+_DISABLED_FALLBACK_NAMES = frozenset({"", "none", "disabled"})
+_SUMMARY_FALLBACK_NAMES = _DISABLED_FALLBACK_NAMES | {"deepseek"}
+
+
+def validate_summary_provider_config(settings: Settings) -> tuple[str, str]:
+    """校验 V1/V2 共用的总结 Provider 配置，未知值禁止静默回退。"""
+    primary = str(settings.summary_provider_primary or "").strip().lower()
+    fallback = str(settings.summary_provider_fallback or "").strip().lower()
+    if primary not in (_CODEX_PROVIDER_NAMES | {"deepseek"}):
+        raise ValueError(f"不支持的群聊总结主 Provider：{settings.summary_provider_primary}")
+    if fallback not in _SUMMARY_FALLBACK_NAMES:
+        raise ValueError(f"不支持的群聊总结备用 Provider：{settings.summary_provider_fallback}")
+    return primary, fallback
 
 
 def _strip_json_fence(text: str) -> str:
@@ -49,6 +62,7 @@ class CodexGPTProvider(DeepSeekV4FlashProvider):
         # 不调用父类初始化：父类会把 ai_model（DeepSeek 备用模型）写入
         # self.model。这里的主模型必须与备用模型配置完全分离。
         self.settings = settings
+        _, fallback = validate_summary_provider_config(settings)
         self.model = (settings.codex_summary_model or self.model).strip() or self.model
         self.codex_path = settings.codex_path or "codex"
         configured_home = (
@@ -60,7 +74,7 @@ class CodexGPTProvider(DeepSeekV4FlashProvider):
         self._resolved_binary = ""
         self._fallback = (
             DeepSeekV4FlashProvider(settings)
-            if (settings.summary_provider_fallback or "").strip().lower() == "deepseek"
+            if fallback == "deepseek"
             else None
         )
 
@@ -239,9 +253,9 @@ class CodexGPTProvider(DeepSeekV4FlashProvider):
 
 def build_summary_provider(settings: Settings) -> PromptGeneratorProvider:
     """按配置构造 V1/V2 共用的群聊总结 Provider。"""
-    primary = (settings.summary_provider_primary or "codex").strip().lower()
+    primary, _ = validate_summary_provider_config(settings)
     if primary in _CODEX_PROVIDER_NAMES:
         return CodexGPTProvider(settings)
     if primary == "deepseek":
         return DeepSeekV4FlashProvider(settings)
-    raise ValueError(f"不支持的群聊总结主 Provider：{settings.summary_provider_primary}")
+    raise AssertionError("总结 Provider 配置校验未覆盖已知类型")

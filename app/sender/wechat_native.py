@@ -859,10 +859,21 @@ class WechatNativeSender(WechatSender):
             return SendResult(False, str(exc), _now()), None
 
 
+def validate_wechat_sender_mode(settings: Settings) -> str:
+    """返回规范化 sender mode；未知值禁止默认落到 native。"""
+    mode = str(settings.wechat_sender_mode or "").strip().lower()
+    if mode not in {"native", "legacy_cli"}:
+        raise ValueError(f"不支持的微信发送 Provider：{settings.wechat_sender_mode}")
+    return mode
+
+
 def create_wechat_sender(settings: Settings | None = None, dry_run: bool = False) -> WechatSender:
     settings = settings or get_settings()
-    if settings.wechat_sender_mode.strip().lower() == "legacy_cli":
+    mode = validate_wechat_sender_mode(settings)
+    if mode == "legacy_cli":
         from app.sender.wechat_automation import WechatAutomationSender
 
         return WechatAutomationSender(settings=settings, dry_run=dry_run)
-    return WechatNativeSender(settings=settings, dry_run=dry_run)
+    if mode == "native":
+        return WechatNativeSender(settings=settings, dry_run=dry_run)
+    raise AssertionError("微信 sender 配置校验未覆盖已知类型")

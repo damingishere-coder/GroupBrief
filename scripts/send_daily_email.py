@@ -30,6 +30,7 @@ from sqlmodel import Session
 from app.config.settings import get_settings
 from app.db import repository as repo
 from app.image.image_task import detect_image_format, verify_image
+from app.services.email_service import email_delivery_config_error
 from app.services.handoff_service import safe_dir_name
 
 
@@ -259,9 +260,11 @@ def main() -> int:
     repo.init_db(settings)
     repo.apply_db_settings(settings)  # 数据库设置优先（收件人/发件人/SMTP 等）
 
-    if not args.dry_run and (not settings.email_enabled or not settings.email_smtp_host):
-        print("❌ 邮件未启用或未配置 SMTP（请检查数据库/环境设置）")
-        return 1
+    if not args.dry_run:
+        config_error = email_delivery_config_error(settings)
+        if config_error:
+            print(f"❌ {config_error}（请检查数据库/环境设置）")
+            return 1
 
     run_date = args.run_date or datetime.now().date().isoformat()
 

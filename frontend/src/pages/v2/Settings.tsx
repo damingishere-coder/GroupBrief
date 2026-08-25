@@ -26,13 +26,10 @@ import { useToast } from "../../components/ui";
 type SettingsTab = "settings" | "health" | "startup" | "recovery";
 
 const SENSITIVE_KEYS = new Set(["ai_api_key", "email_smtp_password", "email_smtp_user", "email_from", "wechat_mcp_token"]);
-const BOOLEAN_KEYS = new Set(["history_provider_mock_enabled", "email_enabled", "email_use_ssl", "email_send_partial_report"]);
+const BOOLEAN_KEYS = new Set(["email_enabled", "email_use_ssl", "email_send_partial_report"]);
 const NUMBER_KEYS = new Set(["wechat_mcp_timeout_seconds", "wechat_mcp_range_timeout_seconds", "codex_summary_timeout_seconds", "codex_summary_max_retries", "codex_summary_request_concurrency", "ai_timeout_seconds", "ai_max_retries", "max_context_chars", "generation_group_concurrency", "wechat_fetch_concurrency", "ai_request_concurrency", "email_smtp_port"]);
 
 const LABELS: Record<string, string> = {
-  history_provider_primary: "主历史数据 Provider",
-  history_provider_fallback: "备用历史数据 Provider",
-  history_provider_mock_enabled: "启用 Mock 数据源",
   wechat_data_dir: "微信数据目录",
   wechat_export_dir: "微信导出目录",
   wechat_cli_path: "wechat-cli 路径",
@@ -48,7 +45,6 @@ const LABELS: Record<string, string> = {
   codex_summary_timeout_seconds: "Codex 总结超时（秒）",
   codex_summary_max_retries: "Codex 最大重试次数",
   codex_summary_request_concurrency: "Codex 总结并发数",
-  ai_provider: "DeepSeek Provider（备用）",
   ai_base_url: "DeepSeek Base URL（备用）",
   ai_api_key: "DeepSeek API Key（备用）",
   ai_model: "DeepSeek 模型 ID（备用）",
@@ -78,9 +74,6 @@ const SETTING_GROUPS = [
     description: "只编辑当前后端设置 API 返回的 Provider、MCP 与本地读取字段。",
     icon: Database,
     keys: [
-      "history_provider_primary",
-      "history_provider_fallback",
-      "history_provider_mock_enabled",
       "wechat_data_dir",
       "wechat_export_dir",
       "wechat_cli_path",
@@ -97,7 +90,7 @@ const SETTING_GROUPS = [
     title: "模型与 Prompt",
     description: "Codex GPT 主用；单次失败时自动切换到已配置的 DeepSeek 备用。",
     icon: PlugsConnected,
-    keys: ["summary_provider_primary", "summary_provider_fallback", "codex_summary_model", "codex_summary_timeout_seconds", "codex_summary_max_retries", "ai_provider", "ai_base_url", "ai_model", "ai_api_key", "ai_timeout_seconds", "ai_max_retries", "max_context_chars"],
+    keys: ["summary_provider_primary", "summary_provider_fallback", "codex_summary_model", "codex_summary_timeout_seconds", "codex_summary_max_retries", "ai_base_url", "ai_model", "ai_api_key", "ai_timeout_seconds", "ai_max_retries", "max_context_chars"],
   },
   {
     id: "advanced",

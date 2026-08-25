@@ -3,7 +3,7 @@
 Codex GPT 主负责：群聊内容 → 理解事件 → 整理话题 → 生成 GPT 生图 Prompt；
 主调用失败时使用 DeepSeek 备用。
 不负责排行榜计算 / 微信读取 / 邮件 / 调度。
-主备都不可用时优雅降级到本地模板，不阻塞其余流程。
+主备都不可用时真实运行返回失败；本地模板只允许显式测试安全闸门。
 """
 
 from __future__ import annotations
@@ -40,8 +40,12 @@ class PromptService:
     def _get_provider(self) -> PromptGeneratorProvider:
         if self._provider is not None:
             return self._provider
-        primary = (self.settings.summary_provider_primary or "codex").strip().lower()
-        if primary == "deepseek" and not self.settings.ai_api_key:
+        primary = str(self.settings.summary_provider_primary or "").strip().lower()
+        if (
+            primary == "deepseek"
+            and not self.settings.ai_api_key
+            and self.settings.allow_test_providers
+        ):
             self._provider = TemplatePromptProvider()
         else:
             self._provider = build_summary_provider(self.settings)
@@ -54,7 +58,16 @@ class PromptService:
         ranking: RankingResult,
         normalized: list[NormalizedMessage],
     ) -> PromptOutcome:
-        provider = self._get_provider()
+        try:
+            provider = self._get_provider()
+        except ValueError as exc:
+            logger.error("Prompt Provider 配置无效：%s", str(exc)[:200])
+            return PromptOutcome(
+                False,
+                "",
+                str(exc),
+                {"error_type": "SUMMARY_PROVIDER_CONFIG_INVALID"},
+            )
 
         message_items = self._build_message_items(normalized)
         context_text = "\n".join(
@@ -76,7 +89,7 @@ class PromptService:
         result: ImagePromptResult = provider.generate_image_prompt(context)
         if result.success:
             return PromptOutcome(True, result.prompt, meta=result.meta)
-        if provider.name != "template":
+        if provider.name != "template" and self.settings.allow_test_providers:
             template_result = TemplatePromptProvider().generate_image_prompt(context)
             if template_result.success:
                 logger.warning("主备模型均未完成 Prompt，V1 已降级到本地模板")

@@ -6,6 +6,7 @@ CodexImageGenerator health_check 不可用判定。
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 import json
 from pathlib import Path
 import subprocess
@@ -188,10 +189,18 @@ def test_codex_health_rejects_existing_but_unexecutable_binary(tmp_path):
     assert "执行" in detail or "无法" in detail
 
 
-def test_codex_generate_returns_failure_when_unavailable(tmp_path):
+def test_codex_generate_returns_failure_when_unavailable_before_waiting_for_mutex(
+    tmp_path,
+    monkeypatch,
+):
     gen = CodexImageGenerator(codex_path="definitely-not-existing-codex-cmd")
     prompt = tmp_path / "p.txt"
     prompt.write_text("test", encoding="utf-8")
+    monkeypatch.setattr(
+        codex_generator,
+        "_imagegen_mutex",
+        lambda *_args, **_kwargs: pytest.fail("Provider 不可用时不得等待生图锁"),
+    )
     result = gen.generate(prompt, tmp_path / "out.png")
     assert result.success is False
     assert "不可用" in result.error
@@ -214,6 +223,8 @@ def _codex_test_generator(tmp_path, monkeypatch) -> tuple[CodexImageGenerator, P
         generated_images_dir=str(generated_root),
     )
     monkeypatch.setattr(generator, "health_check", lambda: (True, "ok"))
+    # 单元测试验证命令/产物契约，不应与 8766 的真实生图任务争抢系统 mutex。
+    monkeypatch.setattr(codex_generator, "_imagegen_mutex", lambda *_args: nullcontext())
     monkeypatch.setattr(codex_generator, "_RECOVERY_POLL_ROUNDS", 0)
     return generator, prompt
 
@@ -525,7 +536,14 @@ def test_codex_timeout_terminates_process_tree(monkeypatch):
     assert process.communicate_calls == 2
 
 
-def test_codex_imagegen_mutex_serializes_concurrent_requests():
+def test_codex_imagegen_mutex_serializes_concurrent_requests(monkeypatch):
+    # 使用独立的进程内锁和 Windows mutex 名，避免与 8766 的真实生图互相阻塞。
+    monkeypatch.setattr(codex_generator, "_PROCESS_IMAGE_LOCK", threading.Lock())
+    monkeypatch.setattr(
+        codex_generator,
+        "_MUTEX_NAME",
+        f"Local\\GroupBrief.ImageGen.Test.{id(monkeypatch)}",
+    )
     from app.image.codex_generator import _imagegen_mutex
 
     active = 0

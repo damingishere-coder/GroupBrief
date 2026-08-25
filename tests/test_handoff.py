@@ -5,16 +5,34 @@ from datetime import datetime
 
 from sqlmodel import Session
 
-from app.config.settings import get_settings
+from app.config.settings import Settings, get_settings
 from app.db import repository as repo
 from app.db.models import Group
 from app.scheduler.calendar_rules import get_report_window
 from app.services.handoff_service import safe_dir_name
+from app.services.history_service import HistoryService
+from app.services.prompt_service import PromptService
 from app.services.report_service import ReportService
 
 settings = get_settings()
 settings.ensure_dirs()
 repo.init_db(settings)
+
+
+def _test_report_service() -> ReportService:
+    test_settings = Settings(
+        _env_file=None,
+        allow_test_providers=True,
+        history_provider_primary="mock",
+        history_provider_fallback="",
+        history_provider_mock_enabled=True,
+        summary_provider_primary="deepseek",
+        ai_api_key="",
+    )
+    return ReportService(
+        history=HistoryService(test_settings),
+        prompt=PromptService(test_settings),
+    )
 
 
 def _get_or_create_group(session: Session, display_name: str, wechat_group_id: str) -> Group:
@@ -43,7 +61,7 @@ def test_safe_dir_name():
 def test_generate_writes_files():
     with Session(repo.engine) as session:
         group = _get_or_create_group(session, "示例UED-4群", "group-a")
-        service = ReportService()
+        service = _test_report_service()
         run = service.generate(session, group=group, report_date="2026-08-13", force=True)
         assert run.status == "success"
 
@@ -89,7 +107,7 @@ def test_generate_writes_files():
 def test_two_groups_isolated():
     with Session(repo.engine) as session:
         _get_or_create_group(session, "产品经理交流群", "group-b")
-        service = ReportService()
+        service = _test_report_service()
         run = service.generate(session, report_date="2026-08-13", trigger_type="auto", force=True)
         assert run.status == "success"
 
