@@ -27,6 +27,26 @@ def _should_start_scheduler(settings) -> bool:
     )
 
 
+def _capture_startup_checks(settings, runner=None) -> tuple[list[dict], str]:
+    if runner is None:
+        from app.core.startup_check import run_startup_checks
+
+        runner = run_startup_checks
+    try:
+        return runner(settings), ""
+    except Exception as exc:
+        logging.getLogger("app").exception("启动检查执行失败")
+        detail = str(exc)[:200]
+        return [
+            {
+                "name": "启动检查执行",
+                "ok": False,
+                "status": "ERROR",
+                "detail": detail,
+            }
+        ], detail
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
@@ -43,12 +63,9 @@ async def lifespan(app: FastAPI):
     repository.init_db(settings)
     app.state.settings = settings
     # P9：启动检查（记录日志，不阻止启动）
-    try:
-        from app.core.startup_check import run_startup_checks
-
-        app.state.startup_checks = run_startup_checks(settings)
-    except Exception:
-        app.state.startup_checks = []
+    app.state.startup_checks, app.state.startup_check_error = (
+        _capture_startup_checks(settings)
+    )
     # P9：日志轮转清理已在 setup_logging 中执行
     scheduler_started = _should_start_scheduler(settings)
     app.state.scheduler_owner = settings.scheduler_owner

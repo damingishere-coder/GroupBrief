@@ -146,6 +146,7 @@ export interface V2Run {
   status: string;
   period_start?: string;
   period_end?: string;
+  files?: string[];
   [key: string]: unknown;
 }
 
@@ -190,6 +191,12 @@ export interface ArchivedMessage {
 export interface SystemHealth {
   checks: Record<string, { ok: boolean; status: string; detail: string }>;
   warnings?: string[];
+}
+
+export interface SystemReadiness extends SystemHealth {
+  ready: boolean;
+  scheduler_owner: string;
+  scheduler_active: boolean;
 }
 
 export interface StartupCheck {
@@ -343,14 +350,20 @@ export const restoreGroup = (groupId: number) =>
 
 export const getDashboard = () => get<Dashboard>("/v2/dashboard");
 export const getArchiveGroups = () => get<ArchiveGroupsResponse>("/v2/archive/groups");
-export const getRuns = (runDate?: string) =>
-  get<{ runs: V2Run[]; total: number }>(`/v2/runs${runDate ? `?run_date=${runDate}` : ""}`);
+export const getRuns = (runDate?: string, options?: { includeFiles?: boolean }) => {
+  const params = new URLSearchParams();
+  if (runDate) params.set("run_date", runDate);
+  if (options?.includeFiles) params.set("include_files", "true");
+  const query = params.toString();
+  return get<{ runs: V2Run[]; total: number }>(`/v2/runs${query ? `?${query}` : ""}`);
+};
 export const getRunDetail = (group: string, date: string) =>
   get<V2RunDetail>(`/v2/runs/${encodeURIComponent(group)}/${date}`);
 export type SettingsValues = Record<string, string>;
 export const getSettings = () => get<SettingsValues>("/settings");
 export const saveSettings = (values: SettingsValues) => put<{ ok: boolean }>("/settings", { values });
 export const getSystemHealth = () => get<SystemHealth>("/v2/system/health");
+export const getSystemReadiness = () => get<SystemReadiness>("/system/ready");
 export const getStartupChecks = () => get<StartupCheck>("/v2/system/startup");
 export const getRecoveryInfo = () => get<RecoveryInfo>("/v2/system/recovery");
 export const retryFailed = (body: { group_id?: number; run_date?: string }) =>

@@ -146,9 +146,15 @@ export default function ChatRecords() {
   const loadEntries = () => {
     setLoading(true);
     setLoadError("");
-    getRuns(dateFilter || undefined)
+    getRuns(dateFilter || undefined, { includeFiles: true })
       .then(async (data) => {
         const detailed = await Promise.all(data.runs.map(async (run): Promise<RunEntry> => {
+          if (Array.isArray(run.files)) {
+            return {
+              run,
+              files: run.files.filter((file): file is string => typeof file === "string"),
+            };
+          }
           try {
             const detail = await getRunDetail(run.group_name, run.run_date);
             return { run: detail.run, files: detail.files };

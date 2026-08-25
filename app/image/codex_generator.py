@@ -214,8 +214,8 @@ class CodexImageGenerator:
             "generated_images_dir": str(self.generated_images_dir),
         }
 
-    def health_check(self) -> tuple[bool, str]:
-        report = self.health_report()
+    def health_check(self, report: dict | None = None) -> tuple[bool, str]:
+        report = report or self.health_report()
         if not report["binary"]["ok"]:
             return False, (
                 f"codex CLI 不可用（未找到命令：{self.codex_path}）。"

@@ -130,8 +130,8 @@ class CodexGPTProvider(DeepSeekV4FlashProvider):
             },
         }
 
-    def health_check(self) -> tuple[bool, str]:
-        report = self.health_report()
+    def health_check(self, report: dict | None = None) -> tuple[bool, str]:
+        report = report or self.health_report()
         fallback = report["fallback"]
         fallback_text = "已配置" if fallback["configured"] else "未配置"
         if not report["ok"]:

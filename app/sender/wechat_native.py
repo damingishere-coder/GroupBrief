@@ -753,10 +753,17 @@ class WechatNativeSender(WechatSender):
         self.driver = driver or WindowsWechatDriver(self.settings)
         self.dry_run = dry_run
 
-    def health_check(self) -> tuple[bool, str]:
+    def health_check(self, report: dict | None = None) -> tuple[bool, str]:
         if self.dry_run:
             return True, "Windows 微信原生发送器 dry-run"
-        return self.driver.health_check()
+        report = report or self.health_report()
+        if report["ok"]:
+            return True, "微信原生发送器可用（依赖、桌面、中文 OCR、剪贴板、唯一窗口均通过）"
+        for stage in ("dependencies", "desktop", "ocr", "clipboard", "window"):
+            item = report[stage]
+            if not item["ok"]:
+                return False, item["detail"]
+        return False, "微信原生发送器健康检查失败"
 
     def health_report(self) -> dict:
         if self.dry_run:

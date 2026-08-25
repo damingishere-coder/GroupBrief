@@ -1,7 +1,13 @@
 import { describe, expect, it } from "vitest";
 
 import type { GroupV2, V2Run } from "../../../api";
-import { describeLoadError, formatDateTime, renderGroupPreview, runKey } from "./model";
+import {
+  describeLoadError,
+  formatDateTime,
+  regenerationPollDelay,
+  renderGroupPreview,
+  runKey,
+} from "./model";
 
 describe("AI 图片视图模型", () => {
   it("使用群名与日期组成稳定且无歧义的运行键", () => {
@@ -33,5 +39,12 @@ describe("AI 图片视图模型", () => {
   it("将 ISO 时间压缩为页面使用的分钟精度", () => {
     expect(formatDateTime("2026-08-25T08:12:59+08:00")).toBe("2026-08-25 08:12");
     expect(formatDateTime(null)).toBe("—");
+  });
+
+  it("轮询失败时指数退避并限制在 30 秒", () => {
+    expect(regenerationPollDelay("running", 0)).toBe(2000);
+    expect(regenerationPollDelay("running", 1)).toBe(4000);
+    expect(regenerationPollDelay("running", 10)).toBe(30_000);
+    expect(regenerationPollDelay("fallback_queued", 1)).toBe(10_000);
   });
 });

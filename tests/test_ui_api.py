@@ -4,11 +4,11 @@ from datetime import datetime
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlmodel import Session
+from sqlmodel import Session, select
 
 from app.main import app
 from app.db import repository as repo
-from app.db.models import Group
+from app.db.models import Group, ProviderHealth
 
 client = TestClient(app)
 
@@ -40,13 +40,24 @@ def test_run_detail_endpoint():
         assert "group_runs" in data
 
 
-def test_providers_writes_health_db():
+def test_provider_health_refresh_is_explicit_and_get_is_passive():
     with client:
-        resp = client.get("/api/system/providers")
-        assert resp.status_code == 200
-        data = resp.json()
+        with Session(repo.engine) as session:
+            before_count = len(session.exec(select(ProviderHealth)).all())
+        before = client.get("/api/system/providers")
+        assert before.status_code == 200
+        with Session(repo.engine) as session:
+            assert len(session.exec(select(ProviderHealth)).all()) == before_count
+
+        refreshed = client.post("/api/system/providers/refresh")
+        assert refreshed.status_code == 200
+        data = refreshed.json()
         assert "wechat_data_analysis" in data
         assert "mock" not in data
+
+        cached = client.get("/api/system/providers")
+        assert cached.status_code == 200
+        assert cached.json()["wechat_data_analysis"]["checked_at"]
 
 
 def test_resolve_api():

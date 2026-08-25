@@ -19,10 +19,14 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+            requirements.lock
       - name: Install dependencies
-        run: python -m pip install -r requirements.txt -r requirements-dev.txt
-      - name: Run tests
-        run: python -m pytest tests -q
+        run: python -m pip install -r requirements.txt -r requirements-dev.txt -c requirements.lock
+      - name: Run tests and generate Sonar coverage
+        run: python -m pytest tests -q --cov=app --cov=scripts --cov-report=xml:coverage.xml
       - name: Run tests in deterministic random order
         run: python -m pytest tests -q --random-order-seed=20260825
       - name: Compile Python sources

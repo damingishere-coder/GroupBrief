@@ -131,11 +131,35 @@ def dashboard(
 def list_runs(
     settings: Settings = Depends(get_settings),
     run_date: str | None = None,
+    include_files: bool = False,
 ):
     if run_date is not None:
         _validate_run_date(run_date)
-    runs = _store(settings).list_runs(run_date)
+    store = _store(settings)
+    runs = store.list_runs(run_date)
+    if include_files:
+        for run in runs:
+            run["files"] = _run_files(
+                store,
+                str(run.get("group_name") or ""),
+                str(run.get("run_date") or ""),
+            )
     return {"runs": runs, "total": len(runs)}
+
+
+def _run_files(store, group: str, run_date: str) -> list[str]:
+    try:
+        _validate_run_date(run_date)
+        group_dir = _safe_group_dir(store, group, run_date)
+    except HTTPException:
+        return []
+    if not group_dir.exists():
+        return []
+    return sorted(
+        path.name
+        for path in group_dir.glob("*")
+        if path.is_file() and path.name in ALLOWED_FILES
+    )
 
 
 _ARCHIVE_RUN_FIELDS = (
@@ -326,18 +350,9 @@ def run_detail(
 ):
     _validate_run_date(run_date)
     store = _store(settings)
-    group_dir = _safe_group_dir(store, group, run_date)
+    _safe_group_dir(store, group, run_date)
     run = store.load_run(group, run_date)
-    files = (
-        sorted(
-            path.name
-            for path in group_dir.glob("*")
-            if path.is_file() and path.name in ALLOWED_FILES
-        )
-        if group_dir.exists()
-        else []
-    )
-    return {"run": run, "files": files}
+    return {"run": run, "files": _run_files(store, group, run_date)}
 
 
 @router.get("/files/{group}/{run_date}/{file_name}")

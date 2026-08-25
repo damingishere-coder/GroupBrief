@@ -10,7 +10,7 @@ import {
   getRunDetail,
   getRecoveryInfo,
   getRuns,
-  getSystemHealth,
+  getSystemReadiness,
   retryFailed,
   RecoveryInfo,
   V2Run,
@@ -80,7 +80,7 @@ function runGroupId(run: V2Run): number | undefined {
 
 export default function Tasks() {
   const { msg, toast } = useToast();
-  const health = useFetch(getSystemHealth);
+  const health = useFetch(getSystemReadiness);
   const [entries, setEntries] = useState<TaskEntry[]>([]);
   const [recovery, setRecovery] = useState<RecoveryInfo | null>(null);
   const [recoveryError, setRecoveryError] = useState("");
@@ -97,7 +97,7 @@ export default function Tasks() {
     setLoading(true);
     setLoadError("");
     Promise.all([
-      getRuns(dateFilter || undefined),
+      getRuns(dateFilter || undefined, { includeFiles: true }),
       getRecoveryInfo().catch((reason: unknown) => {
         setRecoveryError(`恢复完整性读取失败：${String(reason)}`);
         return null;
@@ -111,6 +111,13 @@ export default function Tasks() {
         const integrityMap = new Map<string, RecoveryInfo["integrity"][number]>();
         recoveryData?.integrity.forEach((item) => integrityMap.set(`${item.group_name}\u0000${item.run_date}`, item));
         const detailed = await Promise.all(runData.runs.map(async (run): Promise<TaskEntry> => {
+          if (Array.isArray(run.files)) {
+            return {
+              run,
+              files: run.files.filter((file): file is string => typeof file === "string"),
+              integrity: integrityMap.get(runKey(run)),
+            };
+          }
           try {
             const detail = await getRunDetail(run.group_name, run.run_date);
             return { run: detail.run, files: detail.files, integrity: integrityMap.get(runKey(detail.run)) || integrityMap.get(runKey(run)) };

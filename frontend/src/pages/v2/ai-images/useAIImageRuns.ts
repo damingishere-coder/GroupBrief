@@ -15,7 +15,12 @@ import {
   saveRunPrompt,
   V2Run,
 } from "../../../api";
-import { describeLoadError, ImageDetail, runKey } from "./model";
+import {
+  describeLoadError,
+  ImageDetail,
+  regenerationPollDelay,
+  runKey,
+} from "./model";
 import type { ToastFn } from "./useAIImageCatalogs";
 
 export function useAIImageRuns(groups: GroupV2[], toast: ToastFn) {
@@ -43,6 +48,7 @@ export function useAIImageRuns(groups: GroupV2[], toast: ToastFn) {
   const [imageVersion, setImageVersion] = useState(0);
   const [detailError, setDetailError] = useState("");
   const [runPromptError, setRunPromptError] = useState("");
+  const [regenPollError, setRegenPollError] = useState("");
   const [detailReloadVersion, setDetailReloadVersion] = useState(0);
 
   const loadRuns = () => {
@@ -138,20 +144,54 @@ export function useAIImageRuns(groups: GroupV2[], toast: ToastFn) {
     : "";
 
   useEffect(() => {
-    if (!detail || !["queued", "running", "fallback_queued"].includes(regenStatus)) return;
+    if (!detail || !["queued", "running", "fallback_queued"].includes(regenStatus)) {
+      setRegenPollError("");
+      return;
+    }
     const groupName = detail.run.group_name;
     const runDate = detail.run.run_date;
-    const timer = window.setInterval(() => {
-      getRunDetail(groupName, runDate).then((next) => {
-        setDetail(next);
-        const nextStatus = String(next.run.image_regen_status || "idle");
-        if (["ready_for_review", "failed"].includes(nextStatus)) {
-          setImageVersion((current) => current + 1);
-          loadRuns();
-        }
-      }).catch(() => undefined);
-    }, regenStatus === "fallback_queued" ? 5000 : 2000);
-    return () => window.clearInterval(timer);
+    let cancelled = false;
+    let timer: number | undefined;
+    let consecutiveFailures = 0;
+
+    const schedule = (delay: number) => {
+      timer = window.setTimeout(poll, delay);
+    };
+    const poll = () => {
+      let continuePolling = true;
+      let nextDelay = regenerationPollDelay(regenStatus, consecutiveFailures);
+      getRunDetail(groupName, runDate)
+        .then((next) => {
+          if (cancelled) return;
+          consecutiveFailures = 0;
+          setRegenPollError("");
+          setDetail(next);
+          const nextStatus = String(next.run.image_regen_status || "idle");
+          continuePolling = ["queued", "running", "fallback_queued"].includes(nextStatus);
+          nextDelay = regenerationPollDelay(nextStatus, 0);
+          if (["ready_for_review", "failed"].includes(nextStatus)) {
+            setImageVersion((current) => current + 1);
+            loadRuns();
+          }
+        })
+        .catch((reason: unknown) => {
+          if (cancelled) return;
+          consecutiveFailures += 1;
+          nextDelay = regenerationPollDelay(regenStatus, consecutiveFailures);
+          setRegenPollError(
+            `重新生图状态刷新失败，将在 ${Math.round(nextDelay / 1000)} 秒后重试：${String(reason)}`,
+          );
+        })
+        .finally(() => {
+          if (!cancelled && continuePolling) schedule(nextDelay);
+        });
+    };
+
+    schedule(regenerationPollDelay(regenStatus, 0));
+    return () => {
+      cancelled = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
     // Polling is keyed by the persisted run identity and regeneration state.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [detail?.run.group_name, detail?.run.run_date, regenStatus]);
@@ -314,6 +354,7 @@ export function useAIImageRuns(groups: GroupV2[], toast: ToastFn) {
     setImageViewerOpen,
     detailError,
     runPromptError,
+    regenPollError,
     setDetailReloadVersion,
     filteredRuns,
     regenStatus,

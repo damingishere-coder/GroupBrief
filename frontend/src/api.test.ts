@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { get, pipelineGenerate, pipelineSend, readV2JsonFile } from "./api";
+import { get, getRuns, pipelineGenerate, pipelineSend, readV2JsonFile } from "./api";
 
 function response(body: unknown, options: { ok?: boolean; status?: number; raw?: string } = {}): Response {
   return {
@@ -72,6 +72,18 @@ describe("frontend API contract", () => {
     vi.stubGlobal("fetch", vi.fn(async () => response({}, { raw: "not-json" })));
     await expect(readV2JsonFile("测试群", "2026-08-25", "run.json")).rejects.toThrow(
       "run.json 不是有效的 JSON 文件",
+    );
+  });
+
+  it("requests batched run files only when explicitly enabled", async () => {
+    const fetchMock = vi.fn(async () => response({ runs: [], total: 0 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await getRuns("2026-08-25", { includeFiles: true });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v2/runs?run_date=2026-08-25&include_files=true",
+      expect.any(Object),
     );
   });
 });

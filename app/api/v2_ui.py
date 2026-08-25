@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 from app.api.v2_ui_common import (
     ALLOWED_FILES,
@@ -62,7 +62,9 @@ def system_health(settings: Settings = Depends(get_settings)):
 
     codex_summary = CodexGPTProvider(settings)
     codex_summary_report = codex_summary.health_report()
-    codex_summary_ok, codex_summary_detail = codex_summary.health_check()
+    codex_summary_ok, codex_summary_detail = codex_summary.health_check(
+        codex_summary_report
+    )
     checks["codex_summary"] = {
         "ok": codex_summary_ok,
         "status": "OK" if codex_summary_ok else "UNAVAILABLE",
@@ -85,7 +87,7 @@ def system_health(settings: Settings = Depends(get_settings)):
 
     codex = CodexImageGenerator(settings=settings)
     codex_report = codex.health_report()
-    codex_ok, codex_detail = codex.health_check()
+    codex_ok, codex_detail = codex.health_check(codex_report)
     checks["codex_imagegen"] = {
         "ok": codex_ok,
         "status": "OK" if codex_ok else "UNAVAILABLE",
@@ -95,11 +97,15 @@ def system_health(settings: Settings = Depends(get_settings)):
         "last_image_smoke": codex_report["last_image_smoke"],
     }
 
-    from app.sender.wechat_native import create_wechat_sender
+    from app.sender.wechat_native import WechatNativeSender, create_wechat_sender
 
     sender = create_wechat_sender(settings=settings)
-    send_ok, send_detail = sender.health_check()
-    sender_report = getattr(sender, "health_report", lambda: {"ok": send_ok})()
+    if isinstance(sender, WechatNativeSender):
+        sender_report = sender.health_report()
+        send_ok, send_detail = sender.health_check(sender_report)
+    else:
+        send_ok, send_detail = sender.health_check()
+        sender_report = {"ok": send_ok}
     checks["wechat_sender"] = {
         "ok": send_ok,
         "status": "OK" if send_ok else "UNAVAILABLE",
@@ -179,10 +185,12 @@ def system_health(settings: Settings = Depends(get_settings)):
 
 
 @router.get("/system/startup")
-def startup_checks(settings: Settings = Depends(get_settings)):
-    from app.core.startup_check import run_startup_checks
-
-    return {"checks": run_startup_checks(settings)}
+def startup_checks(request: Request):
+    """返回服务启动时保存的检查快照，不在 GET 请求中重新探测外部依赖。"""
+    return {
+        "checks": list(getattr(request.app.state, "startup_checks", [])),
+        "error": str(getattr(request.app.state, "startup_check_error", "") or ""),
+    }
 
 
 @router.get("/system/recovery")
@@ -190,9 +198,10 @@ def recovery_info(settings: Settings = Depends(get_settings)):
     from app.v2.recovery import scan_incomplete, verify_output
 
     store = _store(settings)
+    runs = store.list_runs()
     return {
-        "incomplete": scan_incomplete(store),
-        "integrity": verify_output(store),
+        "incomplete": scan_incomplete(store, runs=runs),
+        "integrity": verify_output(store, runs=runs),
     }
 
 

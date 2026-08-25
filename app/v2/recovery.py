@@ -61,7 +61,12 @@ def _required_files(status: str, run: dict) -> list[str]:
     return required
 
 
-def scan_incomplete(store: RunStore, run_date: str | None = None) -> list[dict]:
+def scan_incomplete(
+    store: RunStore,
+    run_date: str | None = None,
+    *,
+    runs: list[dict] | None = None,
+) -> list[dict]:
     """找出未到终态的 run（需要恢复/重跑的）。
 
     排除 SENT（绝不重发）与 FAILED（保留错误，手动重跑）。
@@ -71,7 +76,8 @@ def scan_incomplete(store: RunStore, run_date: str | None = None) -> list[dict]:
     返回按更新时间排序的列表。
     """
     incomplete: list[dict] = []
-    for run in store.list_runs(run_date):
+    source_runs = store.list_runs(run_date) if runs is None else runs
+    for run in source_runs:
         status = run.get("status", "")
         if status == CORRUPT:
             item = dict(run)
@@ -95,10 +101,16 @@ def scan_incomplete(store: RunStore, run_date: str | None = None) -> list[dict]:
     return incomplete
 
 
-def verify_output(store: RunStore, run_date: str | None = None) -> list[dict]:
+def verify_output(
+    store: RunStore,
+    run_date: str | None = None,
+    *,
+    runs: list[dict] | None = None,
+) -> list[dict]:
     """检查所有 run 的输出文件完整性，返回 [{group_name, run_date, status, missing, ok}]。"""
     results: list[dict] = []
-    for run in store.list_runs(run_date):
+    source_runs = store.list_runs(run_date) if runs is None else runs
+    for run in source_runs:
         status = run.get("status", "")
         if status == CORRUPT:
             results.append(

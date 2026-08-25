@@ -19,8 +19,6 @@ from pathlib import Path
 
 _FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 
-_configured: set[str] = set()
-
 # P9：日志保留天数（超出即删除）
 LOG_RETENTION_DAYS = 30
 
@@ -58,21 +56,19 @@ def clean_old_logs(logs_dir: Path, max_days: int = LOG_RETENTION_DAYS) -> int:
 def setup_logging(logs_dir: Path, level: int = logging.INFO) -> None:
     logs_dir.mkdir(parents=True, exist_ok=True)
     # P9：启动时清理过期日志
+    removed = 0
+    cleanup_error: Exception | None = None
     try:
         removed = clean_old_logs(logs_dir)
-        if removed:
-            logging.getLogger("app").info("清理过期日志文件 %d 个（保留 %d 天）", removed, LOG_RETENTION_DAYS)
-    except Exception:
-        pass
+    except Exception as exc:
+        cleanup_error = exc
 
     root = logging.getLogger()
-    if root.handlers:
-        return
     root.setLevel(level)
-
-    console = logging.StreamHandler()
-    console.setFormatter(logging.Formatter(_FORMAT))
-    root.addHandler(console)
+    if not root.handlers:
+        console = logging.StreamHandler()
+        console.setFormatter(logging.Formatter(_FORMAT))
+        root.addHandler(console)
 
     for name, filename in (
         ("app", "app.log"),
@@ -83,20 +79,31 @@ def setup_logging(logs_dir: Path, level: int = logging.INFO) -> None:
     ):
         _configure_logger(name, logs_dir / filename, level)
 
+    app_logger = logging.getLogger("app")
+    if removed:
+        app_logger.info(
+            "清理过期日志文件 %d 个（保留 %d 天）",
+            removed,
+            LOG_RETENTION_DAYS,
+        )
+    if cleanup_error is not None:
+        app_logger.warning("清理过期日志失败：%s", cleanup_error, exc_info=True)
+
 
 def _configure_logger(name: str, file_path: Path, level: int) -> None:
-    if name in _configured:
-        return
     _ensure_file(file_path)
     logger = logging.getLogger(name)
     logger.setLevel(level)
+    target = str(file_path.resolve())
+    for existing in logger.handlers:
+        if isinstance(existing, RotatingFileHandler) and existing.baseFilename == target:
+            return
     handler = RotatingFileHandler(
         file_path, maxBytes=5 * 1024 * 1024, backupCount=5, encoding="utf-8"
     )
     handler.setFormatter(logging.Formatter(_FORMAT))
     logger.addHandler(handler)
     logger.propagate = False
-    _configured.add(name)
 
 
 def get_logger(name: str) -> logging.Logger:

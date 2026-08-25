@@ -38,6 +38,14 @@ export function formatDateTime(value: unknown): string {
   return String(value).replace("T", " ").slice(0, 16);
 }
 
+export function regenerationPollDelay(
+  status: string,
+  consecutiveFailures: number,
+): number {
+  const base = status === "fallback_queued" ? 5000 : 2000;
+  return Math.min(base * (2 ** Math.max(0, consecutiveFailures)), 30_000);
+}
+
 export function describeLoadError(scope: string, reason: unknown): string {
   const raw = reason instanceof Error ? reason.message : String(reason);
   let detail = raw;

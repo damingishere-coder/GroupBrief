@@ -71,6 +71,7 @@ export function AIImageRunWorkspace({
     setImageViewerOpen,
     detailError,
     runPromptError,
+    regenPollError,
     setDetailReloadVersion,
     filteredRuns,
     regenStatus,
@@ -104,6 +105,7 @@ export function AIImageRunWorkspace({
             <>
               <div className="ai-images-detail-head"><div><span className="ai-images-eyebrow">当天真实运行</span><h2>{detail.run.group_name} · {detail.run.run_date}</h2><p><StatusPill status={detail.run.status} /> · 更新 {formatDateTime(detail.run.updated_at)}</p></div></div>
               <div className={`ai-images-regen-state ${regenStatus}`}><strong>{REGEN_LABELS[regenStatus] || regenStatus}</strong><span>{String(detail.run.image_regen_error || detail.run.image_regen_detail || "messages.json 已按运行日期保存；重建 Prompt 和重新生图都不会再次读取微信，也不会自动发送。")}</span></div>
+              {regenPollError && <div className="ai-images-run-error" role="alert">{regenPollError}</div>}
               {runPrompt?.topic_selection && <section className="ai-images-topic-score-card" aria-label="选题评分">
                 <div className="ai-images-content-heading"><div><h3>选题评分</h3><span>候选 {runPrompt.topic_selection.candidate_count} · 入选 {runPrompt.topic_selection.selected_count}</span></div><span>v{runPrompt.topic_selection.topic_selection_version}</span></div>
                 <div className="ai-images-topic-score-list">{runPrompt.topic_selection.candidates.map((topic) => <article className={`ai-images-topic-score-item ${topic.selected ? "is-selected" : ""}`} key={topic.topic_id}>

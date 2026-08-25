@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 from datetime import datetime
+import os
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, Depends
-from sqlmodel import Session
+from fastapi import APIRouter, Depends, Request
+from fastapi.responses import JSONResponse
+from sqlalchemy import text
+from sqlmodel import Session, select
 
 from app.config.settings import Settings, get_settings
 from app.db import repository as repo
+from app.db.models import ProviderHealth as StoredProviderHealth
 from app.scheduler.calendar_rules import get_report_window
 
 router = APIRouter(prefix="/api/system", tags=["system"])
@@ -20,30 +24,158 @@ def health():
     return {"status": "ok"}
 
 
-@router.get("/providers")
-def providers(
+@router.get("/ready")
+def readiness(
+    request: Request,
     session: Session = Depends(repo.get_session),
     settings: Settings = Depends(get_settings),
 ):
-    from datetime import datetime
+    """只检查本地关键依赖；不调用外部 Provider，也不写文件或数据库。"""
+    checks: dict[str, dict] = {}
+    try:
+        session.exec(text("SELECT 1")).first()
+        checks["database"] = {
+            "ok": True,
+            "status": "OK",
+            "detail": "数据库连接可用",
+        }
+    except Exception as exc:
+        checks["database"] = {
+            "ok": False,
+            "status": "UNAVAILABLE",
+            "detail": str(exc)[:200],
+        }
 
-    from app.db.models import ProviderHealth
+    output_ok = settings.output_dir.is_dir() and os.access(
+        settings.output_dir,
+        os.W_OK,
+    )
+    checks["output"] = {
+        "ok": output_ok,
+        "status": "OK" if output_ok else "UNAVAILABLE",
+        "detail": "output 目录存在且可写" if output_ok else "output 目录不存在或不可写",
+    }
+
+    try:
+        from app.ai.prompt_templates import ImagePromptTemplateService
+        from app.ranking.template_service import RankingTemplateService
+
+        templates_ok = (
+            "default" in RankingTemplateService().list_templates()
+            and "default" in ImagePromptTemplateService().list_templates()
+        )
+        template_detail = "默认排行和生图模板可读" if templates_ok else "缺少默认模板"
+    except Exception as exc:
+        templates_ok = False
+        template_detail = str(exc)[:200]
+    checks["templates"] = {
+        "ok": templates_ok,
+        "status": "OK" if templates_ok else "UNAVAILABLE",
+        "detail": template_detail,
+    }
+
+    startup_error = str(
+        getattr(request.app.state, "startup_check_error", "") or ""
+    )
+    checks["startup_capture"] = {
+        "ok": not startup_error,
+        "status": "OK" if not startup_error else "ERROR",
+        "detail": startup_error or "启动检查结果已保留",
+    }
+    ready = all(item["ok"] for item in checks.values())
+    payload = {
+        "ready": ready,
+        "checks": checks,
+        "scheduler_owner": getattr(
+            request.app.state,
+            "scheduler_owner",
+            settings.scheduler_owner,
+        ),
+        "scheduler_active": bool(
+            getattr(request.app.state, "scheduler_active", False)
+        ),
+    }
+    return JSONResponse(payload, status_code=200 if ready else 503)
+
+
+def _provider_health_payload(row: StoredProviderHealth) -> dict:
+    return {
+        "status": row.status,
+        "detail": row.detail,
+        "ok": row.status == "OK",
+        "checked_at": row.checked_at.isoformat() if row.checked_at else "",
+    }
+
+
+def _prune_provider_health(
+    session: Session,
+    *,
+    max_per_provider: int = 100,
+) -> int:
+    rows = session.exec(
+        select(StoredProviderHealth).order_by(
+            StoredProviderHealth.provider,
+            StoredProviderHealth.checked_at.desc(),
+            StoredProviderHealth.id.desc(),
+        )
+    ).all()
+    counts: dict[str, int] = {}
+    removed = 0
+    for row in rows:
+        counts[row.provider] = counts.get(row.provider, 0) + 1
+        if counts[row.provider] <= max_per_provider:
+            continue
+        session.delete(row)
+        removed += 1
+    return removed
+
+
+@router.get("/providers")
+def providers(
+    session: Session = Depends(repo.get_session),
+):
+    """读取最近一次已保存的 Provider 健康结果，不执行外部检查。"""
+    rows = session.exec(
+        select(StoredProviderHealth).order_by(
+            StoredProviderHealth.checked_at.desc(),
+            StoredProviderHealth.id.desc(),
+        )
+    ).all()
+    latest: dict[str, StoredProviderHealth] = {}
+    for row in rows:
+        latest.setdefault(row.provider, row)
+    return {name: _provider_health_payload(row) for name, row in latest.items()}
+
+
+@router.post("/providers/refresh")
+def refresh_providers(
+    session: Session = Depends(repo.get_session),
+    settings: Settings = Depends(get_settings),
+):
+    """显式执行 Provider 深度检查，保存结果并限制历史记录数量。"""
     from app.providers.history.registry import check_all_health
 
     health = check_all_health(settings)
     now = datetime.now()
     for name, h in health.items():
         session.add(
-            ProviderHealth(
+            StoredProviderHealth(
                 provider=name,
                 status=h.status.value,
                 detail=h.detail[:500],
                 checked_at=now,
             )
         )
+    session.flush()
+    _prune_provider_health(session)
     session.commit()
     return {
-        name: {"status": h.status.value, "detail": h.detail, "ok": h.ok}
+        name: {
+            "status": h.status.value,
+            "detail": h.detail,
+            "ok": h.ok,
+            "checked_at": now.isoformat(),
+        }
         for name, h in health.items()
     }
 
