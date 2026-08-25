@@ -48,6 +48,7 @@ from app.services.group_name_sync import (
     send_target_mode,
 )
 from app.v2.constants import (
+    CORRUPT,
     DATA_READY,
     FAILED,
     IMAGE_GENERATION_FAILED,
@@ -61,6 +62,7 @@ from app.v2.constants import (
     RANKING_FAILED,
     RANKING_READY,
     READY_TO_SEND,
+    RUN_STATE_CORRUPT,
     SENT,
     WECHAT_DATA_UNAVAILABLE,
 )
@@ -1045,6 +1047,18 @@ class DailyPipeline:
                     "error": "run_date 必须是有效的 YYYY-MM-DD 日期",
                 }
             run_date = parsed_run_date.isoformat()
+        group = self._get_group(group_id)
+        if not group:
+            return {"status": "failed", "error": f"群不存在 {group_id}"}
+        group_name = self._group_name(group)
+        current = self.store.load_run(group_name, run_date)
+        if current.get("status") == CORRUPT:
+            return {
+                "group_name": group_name,
+                "status": "blocked",
+                "error_type": RUN_STATE_CORRUPT,
+                "detail": "运行状态文件损坏，需人工复核",
+            }
         self._last_name_sync_report = self._sync_group_names([group_id])
         group = self._get_group(group_id)
         if not group:

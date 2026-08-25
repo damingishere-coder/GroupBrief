@@ -21,11 +21,16 @@ from app.core.logging import get_logger
 from app.db import repository as repo
 from app.pipeline.daily_pipeline import DailyPipeline, parse_date
 from app.services.generation_runtime import GenerationBusyError, generation_mutex
+from app.v2.constants import SCHEDULER_STATE_CORRUPT
 
 logger = get_logger("groupbrief.scheduler")
 _STATE_LOCK = threading.RLock()
 # 兼容旧测试/调用名，底层已改为 V1/V2 共用锁。
 _daily_mutex = generation_mutex
+
+
+class ScheduleStateCorruptionError(RuntimeError):
+    """已有 scheduler 状态损坏；禁止用新任务状态覆盖。"""
 
 
 class DailyScheduleState:
@@ -39,17 +44,96 @@ class DailyScheduleState:
 
     def load(self, run_date: str) -> dict:
         path = self.path(run_date)
+        if not path.exists():
+            return {"run_date": run_date}
         try:
             parsed = json.loads(path.read_text(encoding="utf-8"))
-            if isinstance(parsed, dict):
-                return parsed
-        except (OSError, json.JSONDecodeError):
-            pass
-        return {"run_date": run_date}
+        except (OSError, UnicodeError):
+            return self._corrupt_state(run_date, path, "read_failed")
+        except json.JSONDecodeError:
+            return self._corrupt_state(run_date, path, "json_invalid")
+        schema_error = self._schema_error(parsed, run_date)
+        if schema_error:
+            return self._corrupt_state(run_date, path, schema_error)
+        return parsed
+
+    def _corrupt_state(self, run_date: str, path: Path, reason: str) -> dict:
+        return {
+            "run_date": run_date,
+            "state_status": "corrupt",
+            "error_type": SCHEDULER_STATE_CORRUPT,
+            "state_error_reason": reason,
+            "state_file": path.name,
+            "generation_hold": True,
+            "email_hold": True,
+            "needs_manual_review": True,
+            "detail": "调度状态文件损坏，已阻止自动补偿、生成和邮件发送",
+        }
+
+    @staticmethod
+    def _schema_error(data: object, run_date: str) -> str | None:
+        if not isinstance(data, dict):
+            return "root_not_object"
+        if data.get("run_date") != run_date:
+            return "run_date_invalid"
+        timestamp_fields = (
+            "generation_started_at",
+            "generation_completed_at",
+            "generation_resumed_at",
+            "generation_recovered_at",
+            "email_started_at",
+            "email_completed_at",
+            "updated_at",
+        )
+        for field in timestamp_fields:
+            value = data.get(field)
+            if value is None:
+                continue
+            if not isinstance(value, str) or not value.strip():
+                return f"{field}_invalid"
+            try:
+                datetime.fromisoformat(value.strip())
+            except ValueError:
+                return f"{field}_invalid"
+        for field in ("generation_status", "email_status"):
+            value = data.get(field)
+            if value is not None and (not isinstance(value, str) or not value.strip()):
+                return f"{field}_invalid"
+        for field in ("generation_hold", "email_hold"):
+            value = data.get(field)
+            if value is not None and not isinstance(value, bool):
+                return f"{field}_invalid"
+        generation_results = data.get("generation_results")
+        if generation_results is not None and (
+            not isinstance(generation_results, list)
+            or any(not isinstance(item, dict) for item in generation_results)
+        ):
+            return "generation_results_invalid"
+        if data.get("generation_started_at") and not data.get("generation_status"):
+            return "generation_status_missing"
+        if data.get("generation_completed_at") and not data.get("generation_status"):
+            return "generation_status_missing"
+        if data.get("email_started_at") and not data.get("email_status"):
+            return "email_status_missing"
+        if data.get("email_completed_at") and not data.get("email_status"):
+            return "email_status_missing"
+        if not any(
+            data.get(field)
+            for field in (
+                "generation_started_at",
+                "generation_completed_at",
+                "email_started_at",
+                "email_completed_at",
+            )
+        ):
+            return "lifecycle_marker_missing"
+        return None
 
     def update(self, run_date: str, **fields) -> dict:
         with _STATE_LOCK:
             data = self.load(run_date)
+            if data.get("state_status") == "corrupt":
+                raise ScheduleStateCorruptionError("调度状态文件损坏，禁止自动覆盖")
             data.update(fields)
             data["run_date"] = run_date
             data["updated_at"] = _now_iso()
@@ -89,6 +173,14 @@ def _run_locked(settings: Settings, run_date: date, *, skip_email: bool) -> dict
     run_date_text = run_date.isoformat()
     state_store = DailyScheduleState(settings.output_dir)
     state = state_store.load(run_date_text)
+    if state.get("state_status") == "corrupt":
+        logger.error("V2 每日任务已阻断：run_date=%s scheduler state corrupt", run_date_text)
+        return {
+            "status": "blocked",
+            "run_date": run_date_text,
+            "error_type": SCHEDULER_STATE_CORRUPT,
+            "detail": "调度状态文件损坏，需人工复核",
+        }
     repo.init_db(settings)
     repo.apply_db_settings(settings)
 

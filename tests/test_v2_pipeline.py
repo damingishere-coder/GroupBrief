@@ -482,6 +482,29 @@ def test_force_generate_runs_image_queue_and_returns_final_state(tmp_path):
     assert pipeline.store.load_run("测试群", "2026-08-18")["status"] == READY_TO_SEND
 
 
+def test_force_generate_blocks_corrupt_state_before_name_sync(tmp_path, monkeypatch):
+    pipeline, group = _make_pipeline(tmp_path)
+    run_path = pipeline.store.run_path("测试群", "2026-08-18")
+    run_path.parent.mkdir(parents=True, exist_ok=True)
+    original = b'{"status": "PENDING"'
+    run_path.write_bytes(original)
+    monkeypatch.setattr(
+        pipeline,
+        "_sync_group_names",
+        lambda *_args, **_kwargs: pytest.fail("损坏状态不得触发群名同步或生成"),
+    )
+
+    result = pipeline.force_generate(group.id, "2026-08-18")
+
+    assert result == {
+        "group_name": "测试群",
+        "status": "blocked",
+        "error_type": "RUN_STATE_CORRUPT",
+        "detail": "运行状态文件损坏，需人工复核",
+    }
+    assert run_path.read_bytes() == original
+
+
 def test_force_generate_image_failure_returns_failed_state(tmp_path):
     gen = FakeGenerator(fail=True)
     pipeline, group = _make_pipeline(tmp_path, gen=gen)

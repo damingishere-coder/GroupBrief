@@ -109,7 +109,11 @@ def test_daily_v2_job_resumes_interrupted_generation_without_email(tmp_path, mon
             super().__init__(tmp_path)
 
     state = TempState(tmp_path)
-    state.update("2026-08-21", generation_started_at="2026-08-21T00:15:00+08:00")
+    state.update(
+        "2026-08-21",
+        generation_started_at="2026-08-21T00:15:00+08:00",
+        generation_status="running",
+    )
     calls = []
 
     class FakePipeline:
@@ -169,6 +173,117 @@ def test_daily_v2_job_exception_keeps_generation_incomplete_for_startup_resume(t
     assert state["generation_hold"] is True
 
 
+def test_corrupt_scheduler_state_blocks_generation_email_and_overwrite(tmp_path, monkeypatch):
+    import pytest
+
+    from app.config.settings import Settings
+    from app.scheduler import daily_v2_job as daily
+
+    settings = Settings(_env_file=None, email_enabled=True, email_smtp_host="smtp.example.com")
+    real_state_class = daily.DailyScheduleState
+
+    class TempState(real_state_class):
+        def __init__(self, _output_root):
+            super().__init__(tmp_path)
+
+    state = TempState(tmp_path)
+    path = state.path("2026-08-25")
+    path.parent.mkdir(parents=True)
+    original = b"{broken"
+    path.write_bytes(original)
+
+    monkeypatch.setattr(daily, "DailyScheduleState", TempState)
+    monkeypatch.setattr(
+        daily,
+        "DailyPipeline",
+        lambda settings: pytest.fail("损坏调度状态不得启动 Pipeline"),
+    )
+    monkeypatch.setattr(
+        daily.repo,
+        "init_db",
+        lambda settings: pytest.fail("损坏调度状态应在数据库初始化前阻断"),
+    )
+    monkeypatch.setattr(
+        daily.subprocess,
+        "run",
+        lambda *args, **kwargs: pytest.fail("损坏调度状态不得启动邮件子进程"),
+    )
+
+    result = daily.run_daily_v2_job("2026-08-25", settings=settings)
+
+    assert result["status"] == "blocked"
+    assert result["error_type"] == "SCHEDULER_STATE_CORRUPT"
+    with pytest.raises(daily.ScheduleStateCorruptionError):
+        state.update("2026-08-25", generation_status="running")
+    assert path.read_bytes() == original
+
+
+def test_scheduler_schema_corruption_is_not_treated_as_new_run(tmp_path, monkeypatch):
+    from app.config.settings import Settings
+    from app.scheduler import daily_v2_job as daily
+
+    settings = Settings(_env_file=None, email_enabled=False, email_smtp_host="")
+    real_state_class = daily.DailyScheduleState
+
+    class TempState(real_state_class):
+        def __init__(self, _output_root):
+            super().__init__(tmp_path)
+
+    state = TempState(tmp_path)
+    path = state.path("2026-08-25")
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        '{"run_date":"2026-08-25","generation_started_at":"2026-08-25T00:15:00+08:00",'
+        '"generation_status":"running","generation_results":"not-a-list"}',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(daily, "DailyScheduleState", TempState)
+
+    result = daily.run_daily_v2_job("2026-08-25", settings=settings)
+
+    assert result["status"] == "blocked"
+    assert result["error_type"] == "SCHEDULER_STATE_CORRUPT"
+
+
+def test_email_started_without_completion_remains_result_unknown(tmp_path, monkeypatch):
+    from app.config.settings import Settings
+    from app.scheduler import daily_v2_job as daily
+
+    settings = Settings(_env_file=None, email_enabled=True, email_smtp_host="smtp.example.com")
+    real_state_class = daily.DailyScheduleState
+
+    class TempState(real_state_class):
+        def __init__(self, _output_root):
+            super().__init__(tmp_path)
+
+    state = TempState(tmp_path)
+    state.update(
+        "2026-08-25",
+        generation_started_at="2026-08-25T00:15:00+08:00",
+        generation_completed_at="2026-08-25T00:20:00+08:00",
+        generation_status="success",
+        generation_results=[],
+        email_started_at="2026-08-25T08:30:00+08:00",
+        email_status="running",
+    )
+    monkeypatch.setattr(daily, "DailyScheduleState", TempState)
+    monkeypatch.setattr(daily.repo, "init_db", lambda settings: None)
+    monkeypatch.setattr(daily.repo, "apply_db_settings", lambda settings: [])
+    monkeypatch.setattr(
+        daily.subprocess,
+        "run",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("结果未知时不得重发邮件")),
+    )
+
+    result = daily.run_daily_v2_job("2026-08-25", settings=settings)
+    saved = state.load("2026-08-25")
+
+    assert result["status"] == "blocked"
+    assert result["error_type"] == "EMAIL_RESULT_UNKNOWN"
+    assert saved["email_status"] == "unknown"
+    assert saved["email_hold"] is True
+
+
 def test_startup_catchup_is_added_only_when_today_is_incomplete(monkeypatch):
     from app.config.settings import Settings
     from app.scheduler import manager
@@ -206,3 +321,16 @@ def test_startup_catchup_is_added_only_when_today_is_incomplete(monkeypatch):
 
     monkeypatch.setattr(manager, "DailyScheduleState", CompletedState)
     assert _schedule_startup_catchup(FakeScheduler(), settings, now=now) is False
+
+    class CorruptState(IncompleteState):
+        def load(self, run_date):
+            return {
+                "run_date": run_date,
+                "state_status": "corrupt",
+                "error_type": "SCHEDULER_STATE_CORRUPT",
+            }
+
+    monkeypatch.setattr(manager, "DailyScheduleState", CorruptState)
+    captured.clear()
+    assert _schedule_startup_catchup(FakeScheduler(), settings, now=now) is False
+    assert captured == []

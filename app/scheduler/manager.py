@@ -111,6 +111,9 @@ def _schedule_startup_catchup(
         return False
     run_date = now.date().isoformat()
     state = DailyScheduleState(settings.output_dir).load(run_date)
+    if state.get("state_status") == "corrupt":
+        logger.error("跳过启动补偿：run_date=%s scheduler state corrupt", run_date)
+        return False
     if state.get("generation_completed_at"):
         return False
     scheduler.add_job(

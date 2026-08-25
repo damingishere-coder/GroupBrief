@@ -11,9 +11,9 @@ import pytest
 
 from app.core.logging import clean_old_logs
 from app.core.startup_check import run_startup_checks
-from app.v2.constants import FAILED, IMAGE_READY, READY_TO_SEND, SENT
-from app.v2.recovery import scan_incomplete, verify_output
-from app.v2.run_store import RunStore
+from app.v2.constants import CORRUPT, FAILED, IMAGE_READY, READY_TO_SEND, SENT
+from app.v2.recovery import recover_incomplete, scan_incomplete, verify_output
+from app.v2.run_store import RunStateCorruptionError, RunStore
 
 
 def _mk_run(
@@ -128,6 +128,116 @@ def test_recent_layout_history_skips_legacy_and_corrupt_runs_without_rewriting(t
         },
     )
     assert corrupt_path.read_text(encoding="utf-8") == before
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [b"", b"{broken", b"null", b"[]", b'"text"'],
+    ids=["empty", "truncated", "null", "array", "string"],
+)
+def test_corrupt_run_is_not_treated_as_pending_or_overwritten(tmp_path, raw):
+    store = RunStore(tmp_path / "output")
+    path = store.run_path("群A", "2026-08-21")
+    path.parent.mkdir(parents=True)
+    path.write_bytes(raw)
+
+    run = store.load_run("群A", "2026-08-21")
+
+    assert run["status"] == CORRUPT
+    assert run["error_type"] == "RUN_STATE_CORRUPT"
+    assert run["needs_manual_review"] is True
+    assert "{broken" not in str(run)
+    with pytest.raises(RunStateCorruptionError):
+        store.update("群A", "2026-08-21", status=READY_TO_SEND)
+    assert path.read_bytes() == raw
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"group_name": "群A", "run_date": "2026-08-21"},
+        {"group_name": "群A", "run_date": "wrong", "status": READY_TO_SEND},
+        {"group_name": None, "run_date": "2026-08-21", "status": READY_TO_SEND},
+        {"group_name": "群A", "run_date": "2026-08-21", "status": []},
+    ],
+    ids=["missing-status", "wrong-date", "bad-group", "bad-status"],
+)
+def test_run_schema_corruption_requires_manual_review(tmp_path, payload):
+    store = RunStore(tmp_path / "output")
+    path = store.run_path("群A", "2026-08-21")
+    path.parent.mkdir(parents=True)
+    original = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    path.write_bytes(original)
+
+    listed = store.list_runs("2026-08-21")
+    incomplete = scan_incomplete(store, "2026-08-21")
+    integrity = verify_output(store, "2026-08-21")
+
+    assert listed[0]["status"] == CORRUPT
+    assert incomplete[0]["recovery_type"] == "manual_review"
+    assert integrity[0]["ok"] is False
+    assert integrity[0]["error_type"] == "RUN_STATE_CORRUPT"
+    assert path.read_bytes() == original
+
+
+def test_recovery_never_executes_corrupt_run(tmp_path, monkeypatch):
+    store = RunStore(tmp_path / "output")
+    path = store.run_path("群A", "2026-08-21")
+    path.parent.mkdir(parents=True)
+    path.write_text("{broken", encoding="utf-8")
+
+    from app.pipeline import daily_pipeline
+
+    monkeypatch.setattr(
+        daily_pipeline,
+        "DailyPipeline",
+        lambda: pytest.fail("损坏状态不得构造自动恢复 Pipeline"),
+    )
+
+    result = recover_incomplete(store, run_date="2026-08-21")
+
+    assert result == [
+        {
+            "group_name": "群A",
+            "status": "blocked",
+            "error_type": "RUN_STATE_CORRUPT",
+            "detail": "运行状态文件损坏，需人工复核",
+        }
+    ]
+
+
+def test_retry_api_blocks_corrupt_run_before_group_lookup(tmp_path, monkeypatch):
+    from app.api import v2_ui
+    from app.pipeline import daily_pipeline
+
+    store = RunStore(tmp_path / "output")
+    path = store.run_path("群A", "2026-08-21")
+    path.parent.mkdir(parents=True)
+    path.write_text("{broken", encoding="utf-8")
+
+    class FakeSettings:
+        output_dir = tmp_path / "output"
+
+    monkeypatch.setattr(v2_ui, "_store", lambda settings: store)
+    monkeypatch.setattr(
+        daily_pipeline,
+        "DailyPipeline",
+        lambda: pytest.fail("损坏状态不得构造自动恢复 Pipeline"),
+    )
+
+    response = v2_ui.retry_failed(
+        v2_ui.RetryBody(run_date="2026-08-21"),
+        settings=FakeSettings(),
+    )
+
+    assert response["results"] == [
+        {
+            "group_name": "群A",
+            "status": "blocked",
+            "error_type": "RUN_STATE_CORRUPT",
+            "detail": "运行状态文件损坏，需人工复核",
+        }
+    ]
 
 
 def test_clean_old_logs_removes_expired(tmp_path):

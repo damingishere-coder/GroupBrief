@@ -18,7 +18,7 @@ from sqlmodel import Session
 from app.config.settings import Settings, get_settings
 from app.db import repository as repo
 from app.scheduler.period import PeriodResolver
-from app.v2.constants import FILE_IMAGE
+from app.v2.constants import FILE_IMAGE, RUN_STATE_CORRUPT
 from app.v2.run_store import RunStore, validate_run_date
 
 router = APIRouter(prefix="/api/v2", tags=["v2-ui"])
@@ -732,14 +732,27 @@ def retry_failed(body: RetryBody | None = None, settings: Settings = Depends(get
     body = body or RetryBody()
     if body.run_date is not None:
         _validate_run_date(body.run_date)
-    pipeline = DailyPipeline()
     if body.group_id:
+        pipeline = DailyPipeline()
         r = pipeline.force_generate(body.group_id, body.run_date)
         return {"results": [{"group_id": body.group_id, "status": r.get("status"), "detail": r.get("error") or ""}]}
     incomplete = scan_incomplete(_store(settings), body.run_date)
     results: list[dict] = []
+    pipeline = None
     for run in incomplete:
         group_name = run["group_name"]
+        if run.get("recovery_type") == "manual_review":
+            results.append(
+                {
+                    "group_name": group_name,
+                    "status": "blocked",
+                    "error_type": run.get("error_type") or RUN_STATE_CORRUPT,
+                    "detail": "运行状态文件损坏，需人工复核",
+                }
+            )
+            continue
+        if pipeline is None:
+            pipeline = DailyPipeline()
         from sqlmodel import Session, select
 
         from app.db import repository as repo

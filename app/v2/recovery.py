@@ -12,12 +12,14 @@ from pathlib import Path
 
 from app.core.logging import get_logger
 from app.v2.constants import (
+    CORRUPT,
     FILE_IMAGE,
     FILE_PROMPT,
     FILE_RANKING_TXT,
     FAILED,
     IMAGE_READY,
     READY_TO_SEND,
+    RUN_STATE_CORRUPT,
     SENT,
 )
 from app.v2.run_store import RunStore
@@ -71,6 +73,11 @@ def scan_incomplete(store: RunStore, run_date: str | None = None) -> list[dict]:
     incomplete: list[dict] = []
     for run in store.list_runs(run_date):
         status = run.get("status", "")
+        if status == CORRUPT:
+            item = dict(run)
+            item["recovery_type"] = "manual_review"
+            incomplete.append(item)
+            continue
         if status in (SENT, FAILED):
             continue
         item = dict(run)
@@ -87,6 +94,19 @@ def verify_output(store: RunStore, run_date: str | None = None) -> list[dict]:
     results: list[dict] = []
     for run in store.list_runs(run_date):
         status = run.get("status", "")
+        if status == CORRUPT:
+            results.append(
+                {
+                    "group_name": run.get("group_name", "未知群"),
+                    "run_date": run.get("run_date", ""),
+                    "status": CORRUPT,
+                    "missing": [],
+                    "ok": False,
+                    "error_type": RUN_STATE_CORRUPT,
+                    "detail": "运行状态文件损坏，需人工复核",
+                }
+            )
+            continue
         required = _required_files(status, run)
         missing = []
         for f in required:
@@ -122,13 +142,25 @@ def recover_incomplete(
     """
     from app.pipeline.daily_pipeline import DailyPipeline
 
-    pipeline = DailyPipeline()
     incomplete = scan_incomplete(store, run_date)
     if not incomplete:
         return [{"status": "ok", "detail": "无未完成任务"}]
     results: list[dict] = []
+    pipeline = None
     for run in incomplete:
         group_name = run["group_name"]
+        if run.get("recovery_type") == "manual_review":
+            results.append(
+                {
+                    "group_name": group_name,
+                    "status": "blocked",
+                    "error_type": RUN_STATE_CORRUPT,
+                    "detail": "运行状态文件损坏，需人工复核",
+                }
+            )
+            continue
+        if pipeline is None:
+            pipeline = DailyPipeline()
         # 找到群 id（按显示名）
         gid = _find_group_id_by_name(group_name)
         if gid is None:

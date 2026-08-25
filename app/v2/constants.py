@@ -15,6 +15,7 @@ IMAGE_READY = "IMAGE_READY"  # 图片已生成并落盘（daily_image.png）
 READY_TO_SEND = "READY_TO_SEND"  # 内容齐备，等待发送
 SENT = "SENT"  # 已发送完成
 FAILED = "FAILED"  # 失败（failed_stage 记录失败阶段）
+CORRUPT = "CORRUPT"  # 状态文件存在但损坏；只读隔离，禁止自动推进
 
 STATUS_FLOW = (
     PENDING,
@@ -25,11 +26,12 @@ STATUS_FLOW = (
     READY_TO_SEND,
     SENT,
     FAILED,
+    CORRUPT,
 )
 
 # 是否允许跳过生图直接进入发送就绪（image_enabled=false 时 PROMPT_READY → READY_TO_SEND）
 # 已发送状态不可再发送
-TERMINAL_STATUSES = frozenset({SENT, FAILED})
+TERMINAL_STATUSES = frozenset({SENT, FAILED, CORRUPT})
 
 
 # ---------- V2 错误类型 ----------
@@ -45,6 +47,8 @@ IMAGE_FILE_MISSING = "IMAGE_FILE_MISSING"
 WECHAT_OFFLINE = "WECHAT_OFFLINE"
 SEND_TEXT_FAILED = "SEND_TEXT_FAILED"
 SEND_IMAGE_FAILED = "SEND_IMAGE_FAILED"
+RUN_STATE_CORRUPT = "RUN_STATE_CORRUPT"
+SCHEDULER_STATE_CORRUPT = "SCHEDULER_STATE_CORRUPT"
 
 # ---------- V2 输出文件命名（output/{群}/{日期}/） ----------
 FILE_MESSAGES = "messages.json"

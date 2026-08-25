@@ -3,6 +3,7 @@
 run.json 是每个群每次运行的唯一状态文件（路线文档 §十）。
 状态机：PENDING → DATA_READY → RANKING_READY → PROMPT_READY →
 IMAGE_READY → READY_TO_SEND → SENT / FAILED。
+已有状态文件无法可信解析时进入合成的 CORRUPT 只读隔离态，不参与自动推进。
 
 同时统一管理该群该日期的输出文件命名与目录。
 """
@@ -22,6 +23,7 @@ from typing import Iterator
 from app.core.path_security import resolve_within, validate_iso_date, validate_path_label
 from app.services.handoff_service import safe_dir_name
 from app.v2.constants import (
+    CORRUPT,
     FILE_IMAGE,
     FILE_IMAGE_PREVIOUS,
     FILE_IMAGE_REGENERATING,
@@ -32,12 +34,19 @@ from app.v2.constants import (
     FILE_RANKING_TXT,
     FILE_RUN,
     PENDING,
+    RUN_STATE_CORRUPT,
+    STATUS_FLOW,
 )
 
 
 _RUN_WRITE_LOCK = threading.RLock()
 _WAIT_OBJECT_0 = 0
 _WAIT_ABANDONED = 0x80
+_PERSISTED_STATUSES = frozenset(STATUS_FLOW) - {CORRUPT}
+
+
+class RunStateCorruptionError(RuntimeError):
+    """已有 run.json 损坏；任何自动写入都必须 fail closed。"""
 
 
 def validate_run_date(value: str) -> str:
@@ -147,23 +156,83 @@ class RunStore:
 
     # ---------- run.json ----------
 
+    def _corrupt_run(self, group_name: str, run_date: str, path: Path, reason: str) -> dict:
+        try:
+            state_file = str(path.relative_to(self.root))
+        except ValueError:
+            state_file = path.name
+        try:
+            updated_at = datetime.fromtimestamp(path.stat().st_mtime).astimezone().isoformat()
+        except OSError:
+            updated_at = ""
+        return {
+            "group_name": group_name,
+            "run_date": run_date,
+            "status": CORRUPT,
+            "state_status": "corrupt",
+            "error_type": RUN_STATE_CORRUPT,
+            "state_error_reason": reason,
+            "state_file": state_file,
+            "updated_at": updated_at,
+            "send_hold": True,
+            "needs_manual_review": True,
+            "detail": "运行状态文件损坏，已阻止自动覆盖、生成和发送",
+        }
+
+    @staticmethod
+    def _run_schema_error(data: object, run_date: str) -> str | None:
+        if not isinstance(data, dict):
+            return "root_not_object"
+        group_name = data.get("group_name")
+        if not isinstance(group_name, str) or not group_name.strip():
+            return "group_name_invalid"
+        stored_date = data.get("run_date")
+        if not isinstance(stored_date, str) or stored_date != run_date:
+            return "run_date_invalid"
+        status = data.get("status")
+        if not isinstance(status, str) or status not in _PERSISTED_STATUSES:
+            return "status_invalid"
+        return None
+
+    def _read_run_file(self, path: Path, group_name: str, run_date: str) -> dict:
+        try:
+            raw = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            return self._corrupt_run(group_name, run_date, path, "read_failed")
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            return self._corrupt_run(group_name, run_date, path, "json_invalid")
+        schema_error = self._run_schema_error(data, run_date)
+        if schema_error:
+            return self._corrupt_run(group_name, run_date, path, schema_error)
+        return data
+
+    @staticmethod
+    def _is_corrupt(data: dict) -> bool:
+        return data.get("status") == CORRUPT and data.get("error_type") == RUN_STATE_CORRUPT
+
     def load_run(self, group_name: str, run_date: str) -> dict:
         path = self.run_path(group_name, run_date)
         if path.exists():
-            try:
-                data = json.loads(path.read_text(encoding="utf-8"))
-                if isinstance(data, dict):
-                    return data
-            except (json.JSONDecodeError, OSError):
-                pass
+            return self._read_run_file(path, group_name, run_date)
         return {"group_name": group_name, "run_date": run_date, "status": PENDING}
 
     def save_run(self, group_name: str, run_date: str, data: dict) -> dict:
         with _RUN_WRITE_LOCK:
             path = self.run_path(group_name, run_date)
+            if path.exists():
+                existing = self._read_run_file(path, group_name, run_date)
+                if self._is_corrupt(existing):
+                    raise RunStateCorruptionError("运行状态文件损坏，禁止自动覆盖")
             path.parent.mkdir(parents=True, exist_ok=True)
+            data = dict(data)
             data.setdefault("group_name", group_name)
+            data.setdefault("status", PENDING)
             data["run_date"] = run_date
+            schema_error = self._run_schema_error(data, run_date)
+            if schema_error:
+                raise ValueError(f"run.json 写入数据不符合 Schema：{schema_error}")
             data["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             temp = path.with_suffix(".json.tmp")
             temp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -174,6 +243,8 @@ class RunStore:
         """加载 → 合并字段 → 保存，返回最新 run。"""
         with _RUN_WRITE_LOCK:
             data = self.load_run(group_name, run_date)
+            if self._is_corrupt(data):
+                raise RunStateCorruptionError("运行状态文件损坏，禁止自动覆盖")
             data.update(fields)
             return self.save_run(group_name, run_date, data)
 
@@ -260,6 +331,8 @@ class RunStore:
         path = self.run_path(group_name, run_date)
         with _run_mutex(path):
             data = self.load_run(group_name, run_date)
+            if self._is_corrupt(data):
+                return None, data, "state_corrupt"
             if data.get("sent_at") and not allow_sent:
                 return None, data, "already_sent"
             if data.get("send_state") == "unknown":
@@ -309,6 +382,8 @@ class RunStore:
         path = self.run_path(group_name, run_date)
         with _run_mutex(path):
             data = self.load_run(group_name, run_date)
+            if self._is_corrupt(data):
+                return False, data
             if data.get("send_claim_id") != claim_id:
                 return False, data
             data.update(fields)
@@ -355,8 +430,17 @@ class RunStore:
                 run_path = d / FILE_RUN
                 if run_path.exists():
                     try:
-                        runs.append(json.loads(run_path.read_text(encoding="utf-8")))
-                    except (json.JSONDecodeError, OSError):
+                        valid_date = validate_run_date(d.name)
+                    except ValueError:
+                        runs.append(
+                            self._corrupt_run(
+                                group_dir.name,
+                                d.name,
+                                run_path,
+                                "directory_date_invalid",
+                            )
+                        )
                         continue
+                    runs.append(self._read_run_file(run_path, group_dir.name, valid_date))
         runs.sort(key=lambda r: r.get("updated_at", ""), reverse=True)
         return runs
