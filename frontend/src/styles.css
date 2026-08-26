@@ -5766,6 +5766,51 @@ textarea:focus-visible {
   background: var(--surface);
 }
 
+.ai-images-topic-score-card > .ai-images-content-heading > div:first-child {
+  min-width: 0;
+}
+
+.ai-images-topic-score-heading-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+}
+
+.ai-images-topic-score-heading-actions > span {
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.ai-images-topic-score-toggle {
+  display: inline-flex;
+  min-height: 30px;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  padding: 0 9px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--accent);
+  background: var(--surface-muted);
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.ai-images-topic-score-toggle:hover {
+  border-color: color-mix(in srgb, var(--accent) 28%, var(--border));
+  background: var(--accent-soft);
+}
+
+.ai-images-topic-score-toggle:focus-visible {
+  outline: 3px solid rgba(36, 120, 245, 0.28);
+  outline-offset: 2px;
+}
+
 .ai-images-topic-score-list {
   display: grid;
   gap: 10px;
@@ -5966,6 +6011,16 @@ textarea:focus-visible {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
+  .ai-images-topic-score-card > .ai-images-content-heading {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .ai-images-topic-score-heading-actions {
+    width: 100%;
+    justify-content: space-between;
+  }
+
   .ai-images-run-actions,
   .ai-images-review-actions,
   .ai-images-theme-footer > div {
@@ -6020,6 +6075,11 @@ textarea:focus-visible {
 
 .app-nav-item > :not(.app-nav-active-indicator),
 .workspace-tabs button > :not(.workspace-tab-indicator) {
+  position: relative;
+  z-index: 1;
+}
+
+.workspace-tabs button > .workspace-tab-label {
   position: relative;
   z-index: 1;
 }

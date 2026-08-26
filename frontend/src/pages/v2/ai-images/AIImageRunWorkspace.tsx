@@ -1,5 +1,7 @@
 import {
   ArrowCounterClockwise,
+  CaretDown,
+  CaretUp,
   Copy,
   FloppyDisk,
   ImageSquare,
@@ -8,6 +10,7 @@ import {
   Sparkle,
   WarningCircle,
 } from "@phosphor-icons/react";
+import { useEffect, useId, useState } from "react";
 
 import type { ImageThemeOption } from "../../../api";
 import {
@@ -88,6 +91,16 @@ export function AIImageRunWorkspace({
     claimCandidate,
     confirmSend,
   } = model;
+  const [topicsExpanded, setTopicsExpanded] = useState(false);
+  const topicScoreListId = useId();
+  const topicSelection = runPrompt?.topic_selection;
+  const topicCandidates = topicSelection?.candidates || [];
+  const hiddenTopicCount = Math.max(0, topicCandidates.length - 2);
+  const visibleTopicCandidates = topicsExpanded ? topicCandidates : topicCandidates.slice(0, 2);
+
+  useEffect(() => {
+    setTopicsExpanded(false);
+  }, [selectedKey]);
 
   return (
     <>
@@ -111,9 +124,9 @@ export function AIImageRunWorkspace({
               <div className="ai-images-detail-head"><div><span className="ai-images-eyebrow">当天真实运行</span><h2>{detail.run.group_name} · {detail.run.run_date}</h2><p><StatusPill status={detail.run.status} /> · 更新 {formatDateTime(detail.run.updated_at)}</p></div></div>
               <div className={`ai-images-regen-state ${regenStatus}`}><strong>{REGEN_LABELS[regenStatus] || regenStatus}</strong><span>{String(detail.run.image_regen_error || detail.run.image_regen_detail || "messages.json 已按运行日期保存；重建 Prompt 和重新生图都不会再次读取微信，也不会自动发送。")}</span></div>
               {regenPollError && <div className="ai-images-run-error" role="alert">{regenPollError}</div>}
-              {runPrompt?.topic_selection && <section className="ai-images-topic-score-card" aria-label="选题评分">
-                <div className="ai-images-content-heading"><div><h3>选题评分</h3><span>候选 {runPrompt.topic_selection.candidate_count} · 入选 {runPrompt.topic_selection.selected_count}</span></div><span>v{runPrompt.topic_selection.topic_selection_version}</span></div>
-                <div className="ai-images-topic-score-list">{runPrompt.topic_selection.candidates.map((topic) => <article className={`ai-images-topic-score-item ${topic.selected ? "is-selected" : ""}`} key={topic.topic_id}>
+              {topicSelection && <section className="ai-images-topic-score-card" aria-label="选题评分">
+                <div className="ai-images-content-heading"><div><h3>选题评分</h3><span>候选 {topicSelection.candidate_count} · 入选 {topicSelection.selected_count}</span></div><div className="ai-images-topic-score-heading-actions"><span>v{topicSelection.topic_selection_version}</span>{hiddenTopicCount > 0 && <button className="ai-images-topic-score-toggle" type="button" aria-expanded={topicsExpanded} aria-controls={topicScoreListId} onClick={() => setTopicsExpanded((current) => !current)}>{topicsExpanded ? <CaretUp size={15} aria-hidden="true" /> : <CaretDown size={15} aria-hidden="true" />}{topicsExpanded ? "收起至 2 个" : `展开其余 ${hiddenTopicCount} 个`}</button>}</div></div>
+                <div className="ai-images-topic-score-list" id={topicScoreListId}>{visibleTopicCandidates.map((topic) => <article className={`ai-images-topic-score-item ${topic.selected ? "is-selected" : ""}`} key={topic.topic_id}>
                   <div className="ai-images-topic-score-title"><span>#{topic.rank}</span><strong>{topic.title}</strong><StatusBadge tone={topic.selected ? "success" : "neutral"}>{topic.selected ? "已入选" : "候选"}</StatusBadge><b>{topic.scores.total.toFixed(1)}</b></div>
                   <p>{topic.summary}</p>
                   <div className="ai-images-topic-score-grid"><span>讨论 {topic.scores.discussion}</span><span>参与 {topic.scores.participation}</span><span>有趣 {topic.scores.comedy}</span><span>群内感 {topic.scores.group_recognition}</span><span>画面 {topic.scores.visual}</span><span>持续 {topic.scores.continuity}</span></div>

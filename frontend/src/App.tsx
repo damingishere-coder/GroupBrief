@@ -36,7 +36,7 @@ function WorkspaceTabs({
           onClick={() => onNavigate(tab.key)}
         >
           {active === tab.key && <m.span className="workspace-tab-indicator" layoutId="workspace-tab-indicator" aria-hidden="true" />}
-          {tab.label}
+          <span className="workspace-tab-label">{tab.label}</span>
         </button>
       ))}
     </div>
