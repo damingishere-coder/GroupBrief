@@ -19,6 +19,7 @@ import threading
 import time
 import uuid
 from contextlib import contextmanager
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterator
 
@@ -41,6 +42,28 @@ _MUTEX_NAME = "Local\\GroupBrief.CodexImagegen.v2"
 _WAIT_OBJECT_0 = 0
 _WAIT_ABANDONED = 0x80
 _JOB_ID_RE = re.compile(r"^[A-Za-z0-9_-]{8,80}$")
+_THREAD_ID_RE = re.compile(r"^[A-Za-z0-9-]{8,80}$")
+_PROCESS_CAPTURE_LIMIT = 256 * 1024
+_DIAGNOSTIC_TAIL_LIMIT = 2000
+
+
+@dataclass
+class _TextTail:
+    """线程安全的有界文本尾部，避免 Codex 长输出无限占用内存。"""
+
+    limit: int = _PROCESS_CAPTURE_LIMIT
+    _value: str = ""
+    _lock: threading.Lock = field(default_factory=threading.Lock)
+
+    def append(self, value: str) -> None:
+        if not value:
+            return
+        with self._lock:
+            self._value = (self._value + value)[-self.limit :]
+
+    def get(self) -> str:
+        with self._lock:
+            return self._value
 
 
 def re_fullmatch_job_id(value: str) -> bool:
@@ -81,8 +104,9 @@ def _run_codex_process(
     input: str,
     env: dict[str, str],
     on_start: Callable[[int], None] | None = None,
+    on_event: Callable[[dict], None] | None = None,
 ) -> subprocess.CompletedProcess:
-    """运行 Codex；超时时先杀进程树，再回收管道并抛出 TimeoutExpired。"""
+    """流式运行 Codex；持续解析 JSONL，超时后终止进程树并排空管道。"""
     popen_kwargs: dict = {
         "stdin": subprocess.PIPE,
         "stdout": subprocess.PIPE,
@@ -108,19 +132,93 @@ def _run_codex_process(
             except (subprocess.TimeoutExpired, OSError):
                 pass
             raise
+
+    stdout_tail = _TextTail()
+    stderr_tail = _TextTail()
+
+    def drain(stream, target: _TextTail, *, parse_jsonl: bool) -> None:
+        if stream is None:
+            return
+        try:
+            for line in iter(stream.readline, ""):
+                target.append(line)
+                if not parse_jsonl or on_event is None:
+                    continue
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(event, dict):
+                    try:
+                        on_event(event)
+                    except Exception:
+                        logger.warning("Codex JSONL 事件记录失败，继续等待进程", exc_info=True)
+        except (OSError, ValueError):
+            pass
+        finally:
+            try:
+                stream.close()
+            except (OSError, ValueError):
+                pass
+
+    readers = [
+        threading.Thread(
+            target=drain,
+            args=(process.stdout, stdout_tail),
+            kwargs={"parse_jsonl": True},
+            name="groupbrief-codex-stdout",
+            daemon=True,
+        ),
+        threading.Thread(
+            target=drain,
+            args=(process.stderr, stderr_tail),
+            kwargs={"parse_jsonl": False},
+            name="groupbrief-codex-stderr",
+            daemon=True,
+        ),
+    ]
+    for reader in readers:
+        reader.start()
+
     try:
-        stdout, stderr = process.communicate(input=input, timeout=timeout)
-    except subprocess.TimeoutExpired:
+        if process.stdin is not None:
+            try:
+                process.stdin.write(input)
+                process.stdin.flush()
+            except (BrokenPipeError, OSError):
+                pass
+            finally:
+                try:
+                    process.stdin.close()
+                except (OSError, ValueError):
+                    pass
+        process.wait(timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
         _terminate_process_tree(process)
         try:
-            process.communicate(timeout=5)
+            process.wait(timeout=5)
         except (subprocess.TimeoutExpired, OSError):
             try:
                 process.kill()
             except OSError:
                 pass
-        raise
-    return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+        for reader in readers:
+            reader.join(timeout=5)
+        raise subprocess.TimeoutExpired(
+            exc.cmd,
+            exc.timeout,
+            output=stdout_tail.get(),
+            stderr=stderr_tail.get(),
+        ) from None
+    finally:
+        for reader in readers:
+            reader.join(timeout=5)
+    return subprocess.CompletedProcess(
+        command,
+        process.returncode,
+        stdout_tail.get(),
+        stderr_tail.get(),
+    )
 
 
 @contextmanager
@@ -201,6 +299,7 @@ class CodexImageGenerator:
             self.generated_images_dir = self.codex_home / "generated_images"
 
         self._resolved_binary = ""
+        self._attempt_manifest_lock = threading.RLock()
 
     # ---------- 健康检查 ----------
 
@@ -295,6 +394,28 @@ class CodexImageGenerator:
         except Exception as exc:
             logger.exception("Codex 生图互斥阶段异常")
             return ImageTaskResult(False, error=str(exc)[:300], detail={"stage": "mutex"})
+
+    def can_reconcile_without_generation(self, prompt_file: Path, job_id: str) -> bool:
+        """仅在已有 attempt 能按 thread_id 找到可信图片时允许调度收口。"""
+        if not re_fullmatch_job_id(job_id):
+            return False
+        task_dir = prompt_file.parent.resolve()
+        manifest = task_dir / _JOB_DIR / job_id / _ATTEMPT_MANIFEST
+        attempt = self._load_attempt_manifest(manifest)
+        if not attempt or attempt.get("state") not in {"running", "result_unknown"}:
+            return False
+        thread_id = str(attempt.get("codex_thread_id") or "")
+        if not _THREAD_ID_RE.fullmatch(thread_id) or attempt.get("codex_thread_conflict"):
+            return False
+        try:
+            pid = int(attempt.get("pid") or 0)
+        except (TypeError, ValueError):
+            return False
+        if self._pid_is_running(pid):
+            return False
+        records = self._candidate_records(attempt, task_dir)
+        selected, _ = self._select_candidate(records)
+        return selected is not None
 
     def _generate_locked(
         self,
@@ -391,6 +512,38 @@ class CodexImageGenerator:
                     },
                 )
             if previous.get("state") == "result_unknown":
+                if not self._ensure_recorded_process_stopped(previous):
+                    return ImageTaskResult(
+                        False,
+                        error="上次 Codex 生图进程仍未确认结束，禁止恢复或重试",
+                        detail={
+                            "stage": "resume",
+                            "outcome_unknown": True,
+                            "attempt_count": previous_number,
+                            "recovery_status": "result_unknown_process_still_running",
+                            "codex_thread_id": str(previous.get("codex_thread_id") or ""),
+                            "candidate_diagnostics": previous.get("candidate_diagnostics") or [],
+                            "attempts": history,
+                        },
+                    )
+                source, diagnostics, reason = self._reconcile_attempt(previous, task_dir)
+                recovered_history = [
+                    *history,
+                    self._attempt_audit(previous, "result_unknown_reconcile", reason, diagnostics),
+                ]
+                recovered = self._promote_recovered_candidate(
+                    source,
+                    output_path,
+                    recovery_status="recovered_from_result_unknown",
+                    attempt_number=previous_number,
+                    diagnostics=diagnostics,
+                    attempts=recovered_history,
+                    manifest_path=manifest_path,
+                    attempt=previous,
+                    required_size=required_size,
+                )
+                if recovered is not None:
+                    return recovered
                 return ImageTaskResult(
                     False,
                     error="上次 Codex 生图已启动但结果未知，禁止自动重复生成",
@@ -399,8 +552,9 @@ class CodexImageGenerator:
                         "outcome_unknown": True,
                         "attempt_count": previous_number,
                         "recovery_status": "result_unknown_hold",
-                        "candidate_diagnostics": previous.get("candidate_diagnostics") or [],
-                        "attempts": history,
+                        "codex_thread_id": str(previous.get("codex_thread_id") or ""),
+                        "candidate_diagnostics": diagnostics,
+                        "attempts": recovered_history,
                     },
                 )
             if previous.get("state") == "retrying":
@@ -425,6 +579,20 @@ class CodexImageGenerator:
                         },
                     )
             if previous.get("state") == "running":
+                if not self._ensure_recorded_process_stopped(previous):
+                    return ImageTaskResult(
+                        False,
+                        error="上次 Codex 生图进程仍未确认结束，已停止自动恢复",
+                        detail={
+                            "stage": "resume",
+                            "outcome_unknown": True,
+                            "attempt_count": previous_number,
+                            "recovery_status": "interrupted_process_still_running",
+                            "codex_thread_id": str(previous.get("codex_thread_id") or ""),
+                            "candidate_diagnostics": previous.get("candidate_diagnostics") or [],
+                            "attempts": history,
+                        },
+                    )
                 source, diagnostics, reason = self._reconcile_attempt(previous, task_dir)
                 recovered_history = [
                     *history,
@@ -443,19 +611,6 @@ class CodexImageGenerator:
                 )
                 if recovered is not None:
                     return recovered
-                if not self._ensure_recorded_process_stopped(previous):
-                    return ImageTaskResult(
-                        False,
-                        error="上次 Codex 生图进程仍未确认结束，已停止自动重试",
-                        detail={
-                            "stage": "resume",
-                            "outcome_unknown": True,
-                            "attempt_count": previous_number,
-                            "recovery_status": "interrupted_process_still_running",
-                            "candidate_diagnostics": diagnostics,
-                            "attempts": history,
-                        },
-                    )
                 previous.update(
                     state="result_unknown",
                     finished_at=datetime_now_iso(),
@@ -513,14 +668,27 @@ class CodexImageGenerator:
                     on_start=lambda pid, record=attempt: self._record_attempt_pid(
                         manifest_path, record, pid
                     ),
+                    on_event=lambda event, record=attempt: self._record_codex_event(
+                        manifest_path, record, event
+                    ),
                 )
                 exit_code = int(proc.returncode)
+                self._record_process_diagnostics(
+                    manifest_path,
+                    attempt,
+                    stderr=proc.stderr or "",
+                )
                 if proc.returncode != 0:
                     outcome = "nonzero_exit"
             except FileNotFoundError:
                 outcome = "start_failed"
-            except subprocess.TimeoutExpired:
+            except subprocess.TimeoutExpired as exc:
                 outcome = "timeout"
+                self._record_process_diagnostics(
+                    manifest_path,
+                    attempt,
+                    stderr=str(exc.stderr or ""),
+                )
             except Exception:
                 logger.exception("调用 codex 异常")
                 outcome = "exec_error"
@@ -553,6 +721,36 @@ class CodexImageGenerator:
                 reason = "唯一候选未通过完整图片验证"
                 last_reason = reason
                 audit["recovery_reason"] = reason
+                if outcome != "start_failed":
+                    attempt.update(
+                        state="result_unknown",
+                        finished_at=datetime_now_iso(),
+                        outcome="invalid_output",
+                        exit_code=exit_code,
+                        recovery_reason=reason,
+                        attempt_history=history,
+                        candidate_diagnostics=diagnostics,
+                    )
+                    self._write_attempt_manifest(manifest_path, attempt)
+                    return ImageTaskResult(
+                        False,
+                        error="Codex 已产生候选但验证未通过，结果未知且禁止自动重试",
+                        detail={
+                            "stage": "verify",
+                            "outcome_unknown": True,
+                            "attempt_count": attempt_number,
+                            "recovery_status": "invalid_candidate_hold",
+                            "codex_thread_id": str(attempt.get("codex_thread_id") or ""),
+                            "codex_event_summary": list(
+                                attempt.get("codex_event_summary") or []
+                            ),
+                            "codex_stderr_tail": str(
+                                attempt.get("codex_stderr_tail") or ""
+                            ),
+                            "candidate_diagnostics": diagnostics,
+                            "attempts": history,
+                        },
+                    )
                 attempt.update(
                     state="retrying" if attempt_number < _MAX_ATTEMPTS else "exhausted",
                     finished_at=datetime_now_iso(),
@@ -586,6 +784,9 @@ class CodexImageGenerator:
                         "outcome_unknown": True,
                         "attempt_count": attempt_number,
                         "recovery_status": "timeout_process_still_running",
+                        "codex_thread_id": str(attempt.get("codex_thread_id") or ""),
+                        "codex_event_summary": list(attempt.get("codex_event_summary") or []),
+                        "codex_stderr_tail": str(attempt.get("codex_stderr_tail") or ""),
                         "candidate_diagnostics": diagnostics,
                         "attempts": history,
                     },
@@ -612,6 +813,9 @@ class CodexImageGenerator:
                         "outcome_unknown": True,
                         "attempt_count": attempt_number,
                         "recovery_status": "result_unknown_hold",
+                        "codex_thread_id": str(attempt.get("codex_thread_id") or ""),
+                        "codex_event_summary": list(attempt.get("codex_event_summary") or []),
+                        "codex_stderr_tail": str(attempt.get("codex_stderr_tail") or ""),
                         "candidate_diagnostics": diagnostics,
                         "attempts": history,
                     },
@@ -720,7 +924,7 @@ class CodexImageGenerator:
         job_dir = job_dir or (task_dir / _JOB_DIR / job_id)
         job_dir.mkdir(parents=True, exist_ok=True)
         return {
-            "version": 2,
+            "version": 3,
             "state": "running",
             "job_id": job_id,
             "revision": max(1, int(revision)),
@@ -729,6 +933,9 @@ class CodexImageGenerator:
             "attempt_number": attempt_number,
             "started_at": datetime_now_iso(),
             "pid": None,
+            "codex_thread_id": "",
+            "codex_event_summary": [],
+            "codex_stderr_tail": "",
             "staging_path": str(job_dir / f"candidate-{attempt_id}.png"),
             "result_path": str(job_dir / f"receipt-{attempt_id}.json"),
             "before": self._snapshot(task_dir),
@@ -756,8 +963,70 @@ class CodexImageGenerator:
         return None
 
     def _record_attempt_pid(self, manifest_path: Path, attempt: dict, pid: int) -> None:
-        attempt["pid"] = int(pid)
-        self._write_attempt_manifest(manifest_path, attempt)
+        with self._attempt_manifest_lock:
+            attempt["pid"] = int(pid)
+            self._write_attempt_manifest(manifest_path, attempt)
+
+    def _record_codex_event(
+        self,
+        manifest_path: Path,
+        attempt: dict,
+        event: dict,
+    ) -> None:
+        event_type = str(event.get("type") or "")
+        if event_type not in {"thread.started", "turn.completed", "turn.failed", "error"}:
+            return
+        summary: dict[str, str] = {
+            "type": event_type,
+            "observed_at": datetime_now_iso(),
+        }
+        if event_type == "thread.started":
+            thread_id = str(event.get("thread_id") or "").strip()
+            if not _THREAD_ID_RE.fullmatch(thread_id):
+                return
+            summary["thread_id"] = thread_id
+        elif event_type in {"turn.failed", "error"}:
+            raw_error = event.get("error")
+            if isinstance(raw_error, dict):
+                raw_error = raw_error.get("message")
+            summary["message"] = self._sanitize_diagnostic(str(raw_error or ""), 300)
+
+        with self._attempt_manifest_lock:
+            if event_type == "thread.started":
+                existing = str(attempt.get("codex_thread_id") or "")
+                thread_id = summary["thread_id"]
+                if existing and existing != thread_id:
+                    attempt["codex_thread_conflict"] = True
+                    return
+                attempt["codex_thread_id"] = thread_id
+            events = list(attempt.get("codex_event_summary") or [])
+            events.append(summary)
+            attempt["codex_event_summary"] = events[-20:]
+            self._write_attempt_manifest(manifest_path, attempt)
+
+    def _record_process_diagnostics(
+        self,
+        manifest_path: Path,
+        attempt: dict,
+        *,
+        stderr: str,
+    ) -> None:
+        with self._attempt_manifest_lock:
+            attempt["codex_stderr_tail"] = self._sanitize_diagnostic(
+                stderr,
+                _DIAGNOSTIC_TAIL_LIMIT,
+            )
+            self._write_attempt_manifest(manifest_path, attempt)
+
+    @staticmethod
+    def _sanitize_diagnostic(value: str, limit: int) -> str:
+        text = str(value or "")[-max(int(limit), 1) :]
+        text = re.sub(
+            r"(?i)(api[_ -]?key|authorization|bearer|token|password|cookie)(\s*[:=]\s*)\S+",
+            r"\1\2[REDACTED]",
+            text,
+        )
+        return text
 
     def _snapshot(self, task_dir: Path) -> dict[str, dict[str, int]]:
         result: dict[str, dict[str, int]] = {}
@@ -836,6 +1105,9 @@ class CodexImageGenerator:
 
     def _candidate_records(self, attempt: dict, task_dir: Path) -> list[tuple[Path, dict]]:
         before = attempt.get("before") if isinstance(attempt.get("before"), dict) else {}
+        codex_thread_id = str(attempt.get("codex_thread_id") or "").strip()
+        if not _THREAD_ID_RE.fullmatch(codex_thread_id):
+            codex_thread_id = ""
         staging_path = Path(str(attempt.get("staging_path") or ""))
         result_path = Path(str(attempt.get("result_path") or ""))
         paths: list[tuple[Path, str]] = []
@@ -853,10 +1125,20 @@ class CodexImageGenerator:
                 continue
             label, relative = key.split(":", 1)
             root = task_dir if label == "task" else self.generated_images_dir
-            paths.append((root / Path(relative), "scan"))
+            relative_parts = Path(relative).parts
+            source = (
+                "thread"
+                if label == "generated_images"
+                and old is None
+                and codex_thread_id
+                and relative_parts
+                and relative_parts[0] == codex_thread_id
+                else "scan"
+            )
+            paths.append((root / Path(relative), source))
 
-        by_hash: dict[tuple[int, str], tuple[Path, dict]] = {}
-        priority = {"staging": 0, "structured": 1, "scan": 2}
+        by_path: dict[Path, tuple[Path, dict]] = {}
+        priority = {"staging": 0, "structured": 1, "thread": 2, "scan": 3}
         for path, source in paths:
             label = self._path_label(path, task_dir)
             if label is None:
@@ -866,7 +1148,7 @@ class CodexImageGenerator:
                 digest = self._sha256(path)
             except OSError:
                 continue
-            key = (stat.st_size, digest)
+            resolved_path = path.resolve()
             record = {
                 "source": source,
                 "sources": [source],
@@ -876,9 +1158,9 @@ class CodexImageGenerator:
                 "size_bytes": int(stat.st_size),
                 "sha256": digest,
             }
-            existing = by_hash.get(key)
+            existing = by_path.get(resolved_path)
             if existing is None:
-                by_hash[key] = (path.resolve(), record)
+                by_path[resolved_path] = (resolved_path, record)
                 continue
             existing_path, existing_record = existing
             sources = set(existing_record.get("sources") or [])
@@ -886,10 +1168,13 @@ class CodexImageGenerator:
             existing_record["sources"] = sorted(sources, key=lambda item: priority[item])
             if priority[source] < priority[str(existing_record.get("source") or "scan")]:
                 record["sources"] = existing_record["sources"]
-                by_hash[key] = (path.resolve(), record)
+                by_path[resolved_path] = (resolved_path, record)
             else:
-                by_hash[key] = (existing_path, existing_record)
-        return sorted(by_hash.values(), key=lambda item: (priority[item[1]["source"]], item[1]["relative_path"]))
+                by_path[resolved_path] = (existing_path, existing_record)
+        return sorted(
+            by_path.values(),
+            key=lambda item: (priority[item[1]["source"]], item[1]["relative_path"]),
+        )
 
     @staticmethod
     def _select_candidate(records: list[tuple[Path, dict]]) -> tuple[Path | None, str]:
@@ -898,6 +1183,13 @@ class CodexImageGenerator:
         structured = [item for item in records if "structured" in item[1].get("sources", [])]
         if len(structured) == 1:
             return structured[0][0], "job_id 匹配的结构化最终路径唯一"
+        thread_attributed = [
+            item for item in records if "thread" in item[1].get("sources", [])
+        ]
+        if len(thread_attributed) == 1:
+            return thread_attributed[0][0], "Codex thread_id 目录内的新增图片唯一"
+        if len(thread_attributed) > 1:
+            return None, f"同一 Codex thread_id 下发现 {len(thread_attributed)} 个候选，禁止自动猜图"
         return None, f"发现 {len(records)} 个候选但缺少匹配 job_id 的可信回执，禁止自动猜图"
 
     def _reconcile_attempt(self, attempt: dict, task_dir: Path) -> tuple[Path | None, list[dict], str]:
@@ -928,9 +1220,29 @@ class CodexImageGenerator:
             "finished_at": datetime_now_iso(),
             "outcome": outcome,
             "exit_code": exit_code,
+            "codex_thread_id": str(attempt.get("codex_thread_id") or ""),
             "recovery_reason": reason,
             "candidate_count": len(diagnostics),
         }
+
+    def _receipt_source(
+        self,
+        source: Path,
+        diagnostics: list[dict],
+    ) -> str:
+        try:
+            digest = self._sha256(source)
+        except OSError:
+            return ""
+        for record in diagnostics:
+            if str(record.get("sha256") or "") != digest:
+                continue
+            sources = set(record.get("sources") or [])
+            if "structured" in sources:
+                return "structured_receipt"
+            if "thread" in sources:
+                return "codex_thread_scan"
+        return ""
 
     def _promote_recovered_candidate(
         self,
@@ -958,6 +1270,8 @@ class CodexImageGenerator:
             return None
         if self._is_project_output(output_path):
             self._save_last_smoke(source, output_path, image_detail)
+        receipt_source = self._receipt_source(source, diagnostics)
+        recovered_at = datetime_now_iso()
         self._cleanup_attempt_files(attempt)
         manifest_path.unlink(missing_ok=True)
         return ImageTaskResult(
@@ -969,6 +1283,11 @@ class CodexImageGenerator:
                 "prompt_sha256": str(attempt.get("prompt_sha256") or ""),
                 "attempt_count": attempt_number,
                 "recovery_status": recovery_status,
+                "recovered_at": recovered_at,
+                "receipt_source": receipt_source,
+                "codex_thread_id": str(attempt.get("codex_thread_id") or ""),
+                "codex_event_summary": list(attempt.get("codex_event_summary") or []),
+                "codex_stderr_tail": str(attempt.get("codex_stderr_tail") or ""),
                 "candidate_diagnostics": diagnostics,
                 "attempts": list(attempts),
                 **image_detail,

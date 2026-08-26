@@ -90,6 +90,12 @@ def scan_incomplete(
             item["error_type"] = "PROMPT_RESULT_UNKNOWN"
             incomplete.append(item)
             continue
+        if run.get("send_hold_reason") == "SEND_RESULT_UNKNOWN" or run.get("send_state") == "unknown":
+            item = dict(run)
+            item["recovery_type"] = "manual_review"
+            item["error_type"] = "SEND_RESULT_UNKNOWN"
+            incomplete.append(item)
+            continue
         if status in (SENT, FAILED):
             continue
         item = dict(run)
@@ -177,6 +183,8 @@ def recover_incomplete(
                     "detail": (
                         "AI 调用结果未知，需人工复核"
                         if error_type == "PROMPT_RESULT_UNKNOWN"
+                        else "微信发送结果未知，需人工核对后消歧"
+                        if error_type == "SEND_RESULT_UNKNOWN"
                         else "运行状态文件损坏，需人工复核"
                     ),
                 }

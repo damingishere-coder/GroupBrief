@@ -254,7 +254,14 @@ def test_native_result_preserves_submitted_but_unknown_state(tmp_path):
     class UnknownDriver(FakeNativeDriver):
         def paste_text(self, text: str):
             self.calls.append(("text", text))
-            return NativeActionResult(False, "UI 未确认", True, "unknown", True)
+            return NativeActionResult(
+                False,
+                "UI 未确认",
+                True,
+                "unknown",
+                True,
+                {"phase": "submit_unknown", "submit_attempts": 3},
+            )
 
     sender = WechatNativeSender(_settings(tmp_path), driver=UnknownDriver())
 
@@ -264,6 +271,69 @@ def test_native_result_preserves_submitted_but_unknown_state(tmp_path):
     assert result.submitted is True
     assert result.outcome_unknown is True
     assert result.verification_level == "unknown"
+    assert result.diagnostics["phase"] == "submit_unknown"
+
+
+def test_text_waits_for_staged_change_before_enter(tmp_path, monkeypatch):
+    driver = WindowsWechatDriver(_settings(tmp_path))
+    before = Image.new("RGB", (20, 20), "white")
+    staged = Image.new("RGB", (20, 20), "black")
+    pressed: list[str] = []
+    monkeypatch.setattr(driver, "_focus_composer", lambda: None)
+    monkeypatch.setattr(driver, "_composer_is_empty", lambda: (True, "empty"))
+    monkeypatch.setattr(driver, "_capture_stable_baseline", lambda: (True, before, before, 2))
+    monkeypatch.setattr(driver, "_set_clipboard_text", lambda _text: None)
+    monkeypatch.setattr(driver, "_hotkey", lambda *_args: None)
+    monkeypatch.setattr(driver, "_wait_for_staged_change", lambda _before: (staged, 0.1, 4))
+    monkeypatch.setattr(driver, "_key", lambda key, key_up=False: pressed.append(key) if not key_up else None)
+    monkeypatch.setattr(
+        driver,
+        "_wait_for_submission",
+        lambda *_args: (True, "ok", {"phase": "submit_verified", "submit_attempts": 3}),
+    )
+
+    result = driver.paste_text("文字")
+
+    assert result.success is True
+    assert pressed == ["enter"]
+    assert result.diagnostics["stage_attempts"] == 4
+    assert result.diagnostics["submit_attempts"] == 3
+
+
+def test_text_never_enters_when_staged_change_is_not_observed(tmp_path, monkeypatch):
+    driver = WindowsWechatDriver(_settings(tmp_path))
+    before = Image.new("RGB", (20, 20), "white")
+    pressed: list[str] = []
+    monkeypatch.setattr(driver, "_focus_composer", lambda: None)
+    monkeypatch.setattr(driver, "_composer_is_empty", lambda: (True, "empty"))
+    monkeypatch.setattr(driver, "_capture_stable_baseline", lambda: (True, before, before, 1))
+    monkeypatch.setattr(driver, "_set_clipboard_text", lambda _text: None)
+    monkeypatch.setattr(driver, "_hotkey", lambda *_args: None)
+    monkeypatch.setattr(driver, "_wait_for_staged_change", lambda _before: (None, 0.0, 25))
+    monkeypatch.setattr(driver, "_key", lambda key, key_up=False: pressed.append(key))
+
+    result = driver.paste_text("文字")
+
+    assert result.success is False
+    assert result.submitted is False
+    assert result.outcome_unknown is False
+    assert pressed == []
+    assert "未按 Enter" in result.detail
+
+
+def test_text_holds_without_touching_draft_when_composer_is_not_empty(tmp_path, monkeypatch):
+    driver = WindowsWechatDriver(_settings(tmp_path))
+    clipboard_writes: list[str] = []
+    monkeypatch.setattr(driver, "_focus_composer", lambda: None)
+    monkeypatch.setattr(driver, "_composer_is_empty", lambda: (False, "检测到草稿"))
+    monkeypatch.setattr(driver, "_set_clipboard_text", lambda text: clipboard_writes.append(text))
+
+    result = driver.paste_text("文字")
+
+    assert result.success is False
+    assert result.submitted is False
+    assert clipboard_writes == []
+    assert "草稿" in result.detail
 
 
 def test_health_report_rejects_missing_chinese_ocr(tmp_path, monkeypatch):

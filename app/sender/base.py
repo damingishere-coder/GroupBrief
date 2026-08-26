@@ -7,7 +7,7 @@ GroupBrief 业务层不直接依赖任何微信自动化项目内部实现。
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass
@@ -20,6 +20,7 @@ class SendResult:
     submitted: bool = False
     verification_level: str = ""
     outcome_unknown: bool = False
+    diagnostics: dict[str, object] = field(default_factory=dict)
 
 
 class WechatSender:

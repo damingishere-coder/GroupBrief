@@ -87,7 +87,7 @@ class ImageStages:
             **image_job,
             "status": "completed" if result["success"] else (
                 "result_unknown"
-                if generator_detail.get("outcome_unknown") and not candidates
+                if generator_detail.get("outcome_unknown")
                 else "ambiguous_result"
                 if generator_detail.get("stage") == "ambiguous" or candidates
                 else "failed"
@@ -99,8 +99,10 @@ class ImageStages:
                 "prompt_sha256": job.prompt_sha256,
                 "image_path": str(job.output_path.resolve()) if result["success"] else "",
                 "sha256": str(generator_detail.get("sha256") or ""),
+                "source": str(generator_detail.get("receipt_source") or ""),
             },
             "candidates": candidates,
+            "codex_thread_id": str(generator_detail.get("codex_thread_id") or ""),
         }
         self.store.update(
             job.group_name,
@@ -121,6 +123,14 @@ class ImageStages:
             image_size_bytes=image_size_bytes,
             image_attempt_count=int(generator_detail.get("attempt_count") or 0),
             image_recovery_status=str(generator_detail.get("recovery_status") or ""),
+            image_recovered_at=str(generator_detail.get("recovered_at") or ""),
+            image_receipt_source=str(generator_detail.get("receipt_source") or ""),
+            recovery_status=str(generator_detail.get("recovery_status") or ""),
+            recovered_at=str(generator_detail.get("recovered_at") or ""),
+            receipt_source=str(generator_detail.get("receipt_source") or ""),
+            codex_thread_id=str(generator_detail.get("codex_thread_id") or ""),
+            codex_event_summary=generator_detail.get("codex_event_summary") or [],
+            codex_stderr_tail=str(generator_detail.get("codex_stderr_tail") or ""),
             image_candidate_diagnostics=generator_detail.get("candidate_diagnostics") or [],
             image_attempts=generator_detail.get("attempts") or [],
             image_job=next_job,
@@ -154,6 +164,10 @@ class ImageStages:
                         "group_name": job.group_name,
                         "status": "ready_to_send",
                         "detail": "图片已准备，可以发送",
+                        "receipt_source": str(run.get("image_receipt_source") or ""),
+                        "recovery_status": str(run.get("image_recovery_status") or ""),
+                        "recovered_at": str(run.get("image_recovered_at") or ""),
+                        "codex_thread_id": str(run.get("codex_thread_id") or ""),
                     }
                 )
                 continue
@@ -173,6 +187,9 @@ class ImageStages:
                             or queue_result.get("detail")
                             or "生图失败"
                         ),
+                        "failed_stage": str(run.get("failed_stage") or "image"),
+                        "recovery_status": str(run.get("image_recovery_status") or ""),
+                        "codex_thread_id": str(run.get("codex_thread_id") or ""),
                     }
                 )
                 continue

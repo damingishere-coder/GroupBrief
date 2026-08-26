@@ -1008,6 +1008,60 @@ def test_submitted_but_unverified_text_is_held_without_retry(tmp_path):
     assert run["send_hold"] is True
 
 
+def test_manual_text_sent_resolution_continues_image_without_resending_text(tmp_path):
+    pipeline = _ready_to_send(tmp_path)
+    pipeline.sender = UnknownTextSender()
+    pipeline.send_due(now=datetime(2026, 8, 18, 8, 31, 0))
+    unknown = pipeline.store.load_run("测试群", "2026-08-18")
+    sender = FakeSender()
+    pipeline.sender = sender
+
+    resolved = pipeline.resolve_send_unknown(
+        1,
+        "2026-08-18",
+        resolution="text_sent",
+        expected_send_unknown_at=unknown["send_unknown_at"],
+    )
+
+    assert resolved["status"] == "resolved"
+    assert resolved["next_stage"] == "image"
+    assert sender.text_calls == []
+    assert sender.image_calls == []
+    sent = pipeline.force_send(1, "2026-08-18", confirm_late_send=True)
+    assert sent["status"] == "sent"
+    assert sender.text_calls == []
+    assert len(sender.image_calls) == 1
+
+
+def test_manual_not_sent_resolution_allows_one_fresh_full_send(tmp_path):
+    pipeline = _ready_to_send(tmp_path)
+    pipeline.sender = UnknownTextSender()
+    pipeline.send_due(now=datetime(2026, 8, 18, 8, 31, 0))
+    unknown = pipeline.store.load_run("测试群", "2026-08-18")
+    sender = FakeSender()
+    pipeline.sender = sender
+
+    resolved = pipeline.resolve_send_unknown(
+        1,
+        "2026-08-18",
+        resolution="not_sent",
+        expected_send_unknown_at=unknown["send_unknown_at"],
+    )
+    stale = pipeline.resolve_send_unknown(
+        1,
+        "2026-08-18",
+        resolution="not_sent",
+        expected_send_unknown_at=unknown["send_unknown_at"],
+    )
+
+    assert resolved["status"] == "resolved"
+    assert stale["status"] == "conflict"
+    sent = pipeline.force_send(1, "2026-08-18", confirm_late_send=True)
+    assert sent["status"] == "sent"
+    assert len(sender.text_calls) == 1
+    assert len(sender.image_calls) == 1
+
+
 def test_run_store_send_claim_prevents_duplicate_and_marks_expired_attempt_unknown(tmp_path):
     store = RunStore(tmp_path / "output")
     store.save_run("测试群", "2026-08-18", {"status": READY_TO_SEND})

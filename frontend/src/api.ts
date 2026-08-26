@@ -126,6 +126,13 @@ export interface DashboardCard {
   image_url: string;
   error: string;
   sent_at: string;
+  wechat_send_enabled: boolean;
+  send_hold: boolean;
+  send_state: string;
+  send_hold_reason: string;
+  send_error: string;
+  send_error_type: string;
+  send_unknown_at: string;
   updated_at: string;
 }
 
@@ -135,7 +142,7 @@ export interface Dashboard {
   period_start: string;
   period_end: string;
   enabled_groups: number;
-  counts: { pending: number; generated: number; sent: number; failed: number };
+  counts: { pending: number; generated: number; sent: number; failed: number; held: number };
   next_send: string;
   cards: DashboardCard[];
 }
@@ -385,6 +392,8 @@ export const pipelineGenerate = (body: { group_id?: number; run_date?: string; f
 export const pipelineSendDue = () => post<{ results: { status: string; group_name?: string }[] }>("/v2/pipeline/send-due");
 export const pipelineSend = (body: { group_id: number; run_date?: string; confirm_regenerated?: boolean; confirm_late_send?: boolean }) =>
   post<{ result: { status: string; group_name?: string; error_type?: string; error?: string; detail?: string } }>("/v2/pipeline/send", body);
+export const resolveSendUnknown = (body: { group_id: number; run_date: string; resolution: "text_sent" | "not_sent"; expected_send_unknown_at: string }) =>
+  post<{ result: { status: string; group_name: string; resolution: string; next_stage: string; detail: string } }>("/v2/pipeline/resolve-send-unknown", body);
 export const getV2File = (group: string, date: string, file: string) =>
   `/api/v2/files/${encodeURIComponent(group)}/${date}/${file}`;
 

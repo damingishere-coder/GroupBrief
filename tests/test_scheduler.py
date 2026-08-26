@@ -265,6 +265,114 @@ def test_partial_generation_stays_partial_even_when_email_succeeds(tmp_path, mon
     assert result["email_status"] == "sent"
 
 
+def test_completed_partial_run_reconciles_thread_image_and_emails_only_recovered_group(
+    tmp_path, monkeypatch
+):
+    from app.config.settings import Settings
+    from app.scheduler import daily_v2_job as daily
+    from app.v2.constants import IMAGE_GENERATION_FAILED
+
+    settings = Settings(
+        _env_file=None,
+        email_enabled=True,
+        email_smtp_host="smtp.example.com",
+        email_recipient="to@example.com",
+        email_from="from@example.com",
+    )
+    real_state_class = daily.DailyScheduleState
+
+    class TempState(real_state_class):
+        def __init__(self, _output_root):
+            super().__init__(tmp_path)
+
+    run_date = "2026-08-25"
+    state = TempState(tmp_path)
+    state.update(
+        run_date,
+        generation_started_at="2026-08-25T00:15:00+08:00",
+        generation_completed_at="2026-08-25T00:20:00+08:00",
+        generation_status="partial",
+        generation_results=[
+            {"group_name": "群A", "status": "ready_to_send"},
+            {
+                "group_name": "群B",
+                "status": "failed",
+                "error_type": IMAGE_GENERATION_FAILED,
+                "detail": "原始失败必须保留",
+            },
+        ],
+        email_started_at="2026-08-25T00:21:00+08:00",
+        email_completed_at="2026-08-25T00:22:00+08:00",
+        email_status="sent",
+        email_detail="群A 已发送，群B 当时没有图片且不在发送集合",
+    )
+    prompt_path = tmp_path / "群B" / run_date / "image_prompt.txt"
+    prompt_path.parent.mkdir(parents=True)
+    prompt_path.write_text("test prompt", encoding="utf-8")
+    generation_calls = []
+    commands = []
+
+    class FakeGenerator:
+        def can_reconcile_without_generation(self, candidate_prompt, job_id):
+            assert candidate_prompt == prompt_path
+            assert job_id == "recovery_job_123"
+            return True
+
+    class FakeStore:
+        def load_run(self, group_name, candidate_date):
+            assert (group_name, candidate_date) == ("群B", run_date)
+            return {"image_job": {"job_id": "recovery_job_123"}}
+
+        def prompt_path(self, group_name, candidate_date):
+            assert (group_name, candidate_date) == ("群B", run_date)
+            return prompt_path
+
+    class RecoveryPipeline:
+        def __init__(self, settings):
+            self.image_generator = FakeGenerator()
+            self.store = FakeStore()
+
+        def _load_groups(self):
+            return [SimpleNamespace(id=2, display_name="群B", wechat_group_name="")]
+
+        def generate_all(self, run_date, group_ids=None, force=False, acquire_lock=True):
+            generation_calls.append((run_date, group_ids, force, acquire_lock))
+            return [
+                {
+                    "group_name": "群B",
+                    "status": "ready_to_send",
+                    "receipt_source": "codex_thread_scan",
+                    "recovery_status": "recovered_from_result_unknown",
+                    "codex_thread_id": "thread-12345678",
+                }
+            ]
+
+    def fake_subprocess_run(command, **_kwargs):
+        commands.append(command)
+        return SimpleNamespace(returncode=0, stdout="sent", stderr="")
+
+    monkeypatch.setattr(daily, "DailyScheduleState", TempState)
+    monkeypatch.setattr(daily, "DailyPipeline", RecoveryPipeline)
+    monkeypatch.setattr(daily.repo, "init_db", lambda settings: None)
+    monkeypatch.setattr(daily.repo, "apply_db_settings", lambda settings: [])
+    monkeypatch.setattr(daily.subprocess, "run", fake_subprocess_run)
+
+    result = daily.run_daily_v2_job(run_date, settings=settings)
+    saved = state.load(run_date)
+
+    assert result["status"] == "success"
+    assert result["email_status"] == "sent"
+    assert generation_calls == [(run_date, [2], False, False)]
+    assert commands and commands[0][-2:] == ["--group", "群B"]
+    assert commands[0].count("--group") == 1
+    assert saved["generation_original_status"] == "partial"
+    assert saved["generation_history"][-1]["results"][1]["detail"] == "原始失败必须保留"
+    assert saved["generation_results"][1]["receipt_source"] == "codex_thread_scan"
+    assert saved["email_history"][-1]["status"] == "sent"
+    assert saved["email_recovery_required"] is False
+    assert saved["email_recovered_at"]
+
+
 def test_invalid_email_config_fails_before_subprocess(tmp_path, monkeypatch):
     from app.config.settings import Settings
     from app.scheduler import daily_v2_job as daily

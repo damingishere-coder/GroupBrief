@@ -16,8 +16,9 @@ import re
 import threading
 import time
 import unicodedata
+import uuid
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Iterator, Protocol
@@ -57,6 +58,7 @@ class NativeActionResult:
     submitted: bool = False
     verification_level: str = ""
     outcome_unknown: bool = False
+    diagnostics: dict[str, object] = field(default_factory=dict)
 
 
 def _now() -> str:
@@ -281,6 +283,18 @@ class WindowsWechatDriver:
     def __init__(self, settings: Settings | None = None):
         self.settings = settings or get_settings()
         self.delay = max(float(self.settings.wechat_native_action_delay_seconds), 0.2)
+        self.stage_timeout = max(
+            float(self.settings.wechat_native_stage_timeout_seconds),
+            self.delay,
+        )
+        self.submit_timeout = max(
+            float(self.settings.wechat_native_submit_timeout_seconds),
+            self.delay,
+        )
+        self.poll_interval = min(
+            max(float(self.settings.wechat_native_poll_interval_seconds), 0.05),
+            1.0,
+        )
         self._window: int | None = None
         self._enable_dpi_awareness()
 
@@ -418,22 +432,69 @@ class WindowsWechatDriver:
             return NativeActionResult(False, "发送文字为空")
         submitted = False
         try:
-            before_composer, before_chat = self._capture_send_regions()
             self._focus_composer()
+            composer_empty, empty_detail = self._composer_is_empty()
+            if not composer_empty:
+                return NativeActionResult(
+                    False,
+                    empty_detail,
+                    diagnostics={"phase": "composer_preflight", "composer_empty": False},
+                )
+            self._focus_composer()
+            stable, before_composer, before_chat, baseline_attempts = self._capture_stable_baseline()
+            if not stable:
+                return NativeActionResult(
+                    False,
+                    "文字发送前输入区无法达到稳定状态，已停止且未修改可能存在的草稿",
+                    diagnostics={
+                        "phase": "composer_preflight",
+                        "baseline_stable": False,
+                        "baseline_attempts": baseline_attempts,
+                    },
+                )
             self._set_clipboard_text(text)
             self._hotkey("ctrl", "v")
-            time.sleep(self.delay)
-            staged_composer, _ = self._capture_send_regions()
+            staged_composer, staged_change, stage_attempts = self._wait_for_staged_change(
+                before_composer
+            )
+            diagnostics = {
+                "phase": "composer_staged",
+                "baseline_stable": True,
+                "baseline_attempts": baseline_attempts,
+                "stage_attempts": stage_attempts,
+                "staged_change": round(staged_change, 6),
+            }
+            if staged_composer is None:
+                return NativeActionResult(
+                    False,
+                    "文字粘贴后未观察到输入区暂存，已停止且未按 Enter",
+                    diagnostics=diagnostics,
+                )
             self._key("enter")
             submitted = True
-            time.sleep(self.delay * 1.5)
-            after_composer, after_chat = self._capture_send_regions()
-            ok, detail = self._verify_submission(
-                before_composer, staged_composer, after_composer, before_chat, after_chat
+            ok, detail, submit_diagnostics = self._wait_for_submission(
+                before_composer,
+                staged_composer,
+                before_chat,
             )
+            diagnostics.update(submit_diagnostics)
             if not ok:
-                return NativeActionResult(False, f"文字已按 Enter，但 {detail}", True, "unknown", True)
-            return NativeActionResult(True, "文字已提交，且输入区清空和聊天区域变化已由 UI 观察", True, "ui_observed")
+                return NativeActionResult(
+                    False,
+                    f"文字已按 Enter，但 {detail}",
+                    True,
+                    "unknown",
+                    True,
+                    diagnostics,
+                )
+            return NativeActionResult(
+                True,
+                "文字已提交，且输入区清空和聊天区域变化已由 UI 观察",
+                True,
+                "ui_observed",
+                False,
+                diagnostics,
+            )
         except Exception as exc:
             return NativeActionResult(
                 False,
@@ -441,31 +502,77 @@ class WindowsWechatDriver:
                 submitted,
                 "unknown" if submitted else "",
                 submitted,
+                {"phase": "exception_after_submit" if submitted else "exception_before_submit"},
             )
 
     def paste_image(self, image_path: Path) -> NativeActionResult:
         submitted = False
         try:
-            before_composer, before_chat = self._capture_send_regions()
             self._focus_composer()
+            composer_empty, empty_detail = self._composer_is_empty()
+            if not composer_empty:
+                return NativeActionResult(
+                    False,
+                    empty_detail,
+                    diagnostics={"phase": "composer_preflight", "composer_empty": False},
+                )
+            self._focus_composer()
+            stable, before_composer, before_chat, baseline_attempts = self._capture_stable_baseline()
+            if not stable:
+                return NativeActionResult(
+                    False,
+                    "图片发送前输入区无法达到稳定状态，已停止且未修改可能存在的草稿",
+                    diagnostics={
+                        "phase": "composer_preflight",
+                        "baseline_stable": False,
+                        "baseline_attempts": baseline_attempts,
+                    },
+                )
             self._set_clipboard_image(image_path)
             self._hotkey("ctrl", "v")
-            time.sleep(self.delay * 1.5)
-            staged_composer, _ = self._capture_send_regions()
-            if self._difference_ratio(before_composer, staged_composer) < 0.0005:
-                return NativeActionResult(False, "图片粘贴后未观察到预览，已停止发送")
+            staged_composer, staged_change, stage_attempts = self._wait_for_staged_change(
+                before_composer
+            )
+            diagnostics = {
+                "phase": "composer_staged",
+                "baseline_stable": True,
+                "baseline_attempts": baseline_attempts,
+                "stage_attempts": stage_attempts,
+                "staged_change": round(staged_change, 6),
+            }
+            if staged_composer is None:
+                return NativeActionResult(
+                    False,
+                    "图片粘贴后未观察到预览，已停止且未按 Enter",
+                    diagnostics=diagnostics,
+                )
             if not self._window:
                 return NativeActionResult(False, "微信窗口尚未验证")
             self._key("enter")
             submitted = True
-            time.sleep(self.delay * 2.5)
-            after_composer, after_chat = self._capture_send_regions()
-            ok, detail = self._verify_submission(
-                before_composer, staged_composer, after_composer, before_chat, after_chat
+            ok, detail, submit_diagnostics = self._wait_for_submission(
+                before_composer,
+                staged_composer,
+                before_chat,
             )
+            diagnostics.update(submit_diagnostics)
             if not ok:
-                return NativeActionResult(False, f"图片已按 Enter，但 {detail}", True, "unknown", True)
-            return NativeActionResult(True, "图片已提交，且预览清空和聊天区域变化已由 UI 观察", True, "ui_observed")
+                return NativeActionResult(
+                    False,
+                    f"图片已按 Enter，但 {detail}",
+                    True,
+                    "unknown",
+                    True,
+                    diagnostics,
+                )
+            return NativeActionResult(
+                True,
+                "图片已提交，且预览清空和聊天区域变化已由 UI 观察",
+                True,
+                "ui_observed",
+                False,
+                diagnostics,
+            )
         except Exception as exc:
             return NativeActionResult(
                 False,
@@ -473,6 +580,7 @@ class WindowsWechatDriver:
                 submitted,
                 "unknown" if submitted else "",
                 submitted,
+                {"phase": "exception_after_submit" if submitted else "exception_before_submit"},
             )
 
     @staticmethod
@@ -634,13 +742,109 @@ class WindowsWechatDriver:
         means = ImageStat.Stat(difference).mean
         return sum(means) / (255.0 * max(len(means), 1))
 
+    def _poll_rounds(self, timeout_seconds: float) -> int:
+        return max(1, int(timeout_seconds / self.poll_interval) + 1)
+
+    def _capture_stable_baseline(self):
+        previous_composer, previous_chat = self._capture_send_regions()
+        attempts = self._poll_rounds(self.stage_timeout)
+        for attempt in range(1, attempts + 1):
+            time.sleep(self.poll_interval)
+            composer, chat = self._capture_send_regions()
+            if self._difference_ratio(previous_composer, composer) <= 0.0003:
+                return True, composer, chat, attempt
+            previous_composer, previous_chat = composer, chat
+        return False, previous_composer, previous_chat, attempts
+
+    def _wait_for_staged_change(self, before_composer):
+        attempts = self._poll_rounds(self.stage_timeout)
+        max_change = 0.0
+        for attempt in range(1, attempts + 1):
+            composer, _ = self._capture_send_regions()
+            change = self._difference_ratio(before_composer, composer)
+            max_change = max(max_change, change)
+            if change >= 0.0005:
+                return composer, change, attempt
+            if attempt < attempts:
+                time.sleep(self.poll_interval)
+        return None, max_change, attempts
+
+    def _wait_for_submission(
+        self,
+        before_composer,
+        staged_composer,
+        before_chat,
+    ) -> tuple[bool, str, dict[str, object]]:
+        attempts = self._poll_rounds(self.submit_timeout)
+        last_detail = "尚未观察到提交变化"
+        last_metrics: dict[str, float] = {}
+        for attempt in range(1, attempts + 1):
+            after_composer, after_chat = self._capture_send_regions()
+            ok, detail = self._verify_submission(
+                before_composer,
+                staged_composer,
+                after_composer,
+                before_chat,
+                after_chat,
+            )
+            last_detail = detail
+            last_metrics = self._submission_metrics(
+                before_composer,
+                staged_composer,
+                after_composer,
+                before_chat,
+                after_chat,
+            )
+            if ok:
+                return True, detail, {
+                    "phase": "submit_verified",
+                    "submit_attempts": attempt,
+                    **{key: round(value, 6) for key, value in last_metrics.items()},
+                }
+            if attempt < attempts:
+                time.sleep(self.poll_interval)
+        return False, last_detail, {
+            "phase": "submit_unknown",
+            "submit_attempts": attempts,
+            **{key: round(value, 6) for key, value in last_metrics.items()},
+        }
+
     @classmethod
-    def _verify_submission(cls, before_composer, staged_composer, after_composer, before_chat, after_chat) -> tuple[bool, str]:
+    def _submission_metrics(
+        cls,
+        before_composer,
+        staged_composer,
+        after_composer,
+        before_chat,
+        after_chat,
+    ) -> dict[str, float]:
         staged_change = cls._difference_ratio(before_composer, staged_composer)
         cleared_change = cls._difference_ratio(staged_composer, after_composer)
         returned_toward_empty = cls._difference_ratio(before_composer, after_composer)
         chat_change = cls._difference_ratio(before_chat, after_chat)
         empty_delta_limit = min(max(staged_change * 0.25, 0.0003), 0.0015)
+        return {
+            "staged_change": staged_change,
+            "cleared_change": cleared_change,
+            "returned_toward_empty": returned_toward_empty,
+            "empty_delta_limit": empty_delta_limit,
+            "chat_change": chat_change,
+        }
+
+    @classmethod
+    def _verify_submission(cls, before_composer, staged_composer, after_composer, before_chat, after_chat) -> tuple[bool, str]:
+        metrics = cls._submission_metrics(
+            before_composer,
+            staged_composer,
+            after_composer,
+            before_chat,
+            after_chat,
+        )
+        staged_change = metrics["staged_change"]
+        cleared_change = metrics["cleared_change"]
+        returned_toward_empty = metrics["returned_toward_empty"]
+        chat_change = metrics["chat_change"]
+        empty_delta_limit = metrics["empty_delta_limit"]
         composer_ok = (
             staged_change >= 0.0005
             and cleared_change >= 0.0005
@@ -663,6 +867,7 @@ class WindowsWechatDriver:
         codes = {
             "ctrl": win32con.VK_CONTROL,
             "a": ord("A"),
+            "c": ord("C"),
             "f": ord("F"),
             "v": ord("V"),
             "enter": win32con.VK_RETURN,
@@ -674,6 +879,46 @@ class WindowsWechatDriver:
         self._key(key)
         self._key(key, key_up=True)
         self._key(modifier, key_up=True)
+
+    def _composer_is_empty(self) -> tuple[bool, str]:
+        """通过无破坏复制探测输入区；无法证明为空时保守停止。"""
+        import win32clipboard
+        import win32con
+
+        sentinel = f"GroupBrief-empty-check-{uuid.uuid4().hex}"
+        self._set_clipboard_text(sentinel)
+        self._hotkey("ctrl", "a")
+        self._hotkey("ctrl", "c")
+        time.sleep(self.poll_interval)
+        try:
+            win32clipboard.OpenClipboard()
+            formats: list[int] = []
+            value = ""
+            try:
+                current = 0
+                while True:
+                    current = win32clipboard.EnumClipboardFormats(current)
+                    if current == 0:
+                        break
+                    formats.append(int(current))
+                if win32clipboard.IsClipboardFormatAvailable(win32con.CF_UNICODETEXT):
+                    value = str(win32clipboard.GetClipboardData(win32con.CF_UNICODETEXT) or "")
+            finally:
+                win32clipboard.CloseClipboard()
+        except Exception as exc:
+            return False, f"无法确认微信输入区为空，已停止发送：{str(exc)[:120]}"
+        finally:
+            # 重新点击输入区只取消选择，不删除或覆盖任何草稿。
+            self._focus_composer()
+        draft_media_formats = {
+            win32con.CF_BITMAP,
+            win32con.CF_DIB,
+            getattr(win32con, "CF_DIBV5", 17),
+            win32con.CF_HDROP,
+        }
+        if value == sentinel and not (set(formats) & draft_media_formats):
+            return True, "输入区为空"
+        return False, "微信输入区可能存在文字或图片草稿，已停止且未清除草稿"
 
     @staticmethod
     def _set_clipboard_text(text: str) -> None:
@@ -822,6 +1067,7 @@ class WechatNativeSender(WechatSender):
                     action.submitted,
                     action.verification_level,
                     action.outcome_unknown,
+                    action.diagnostics,
                 )
         except Exception as exc:
             image_result = SendResult(False, str(exc), _now())
@@ -850,6 +1096,7 @@ class WechatNativeSender(WechatSender):
                     text_action.submitted,
                     text_action.verification_level,
                     text_action.outcome_unknown,
+                    text_action.diagnostics,
                 )
                 if not text_action.success or path is None:
                     return text_result, None
@@ -861,6 +1108,7 @@ class WechatNativeSender(WechatSender):
                     image_action.submitted,
                     image_action.verification_level,
                     image_action.outcome_unknown,
+                    image_action.diagnostics,
                 )
         except Exception as exc:
             return SendResult(False, str(exc), _now()), None

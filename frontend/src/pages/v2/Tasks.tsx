@@ -11,6 +11,7 @@ import {
   getRecoveryInfo,
   getRuns,
   getSystemReadiness,
+  resolveSendUnknown,
   retryFailed,
   RecoveryInfo,
   V2Run,
@@ -42,6 +43,20 @@ interface TaskEntry {
   files: string[];
   detailError?: string;
   integrity?: RecoveryInfo["integrity"][number];
+}
+
+type SendResolution = "text_sent" | "not_sent";
+
+export function sendResolutionDialogCopy(resolution: SendResolution | undefined) {
+  return resolution === "text_sent"
+    ? {
+        title: "确认文字已经发送？",
+        description: "系统将记录文字阶段已完成，解除未知锁；不会立即发送，之后只允许继续图片阶段。",
+      }
+    : {
+        title: "确认文字没有发送？",
+        description: "系统将重置文字阶段并解除未知锁；不会立即发送，之后可重新执行完整发送。",
+      };
 }
 
 function runKey(run: V2Run): string {
@@ -92,6 +107,9 @@ export default function Tasks() {
   const [loadError, setLoadError] = useState("");
   const [retryTarget, setRetryTarget] = useState<TaskEntry | null>(null);
   const [retrying, setRetrying] = useState(false);
+  const [resolutionTarget, setResolutionTarget] = useState<{ entry: TaskEntry; resolution: SendResolution } | null>(null);
+  const [resolving, setResolving] = useState(false);
+  const resolutionDialogCopy = sendResolutionDialogCopy(resolutionTarget?.resolution);
 
   const loadTasks = () => {
     setLoading(true);
@@ -180,6 +198,30 @@ export default function Tasks() {
       .finally(() => setRetrying(false));
   };
 
+  const confirmResolution = () => {
+    if (!resolutionTarget || resolving) return;
+    const groupId = runGroupId(resolutionTarget.entry.run);
+    const unknownAt = stringField(resolutionTarget.entry.run, "send_unknown_at");
+    if (!groupId || !unknownAt) {
+      toast("任务缺少群 ID 或未知状态时间戳，请刷新后重试");
+      return;
+    }
+    setResolving(true);
+    resolveSendUnknown({
+      group_id: groupId,
+      run_date: resolutionTarget.entry.run.run_date,
+      resolution: resolutionTarget.resolution,
+      expected_send_unknown_at: unknownAt,
+    })
+      .then((response) => {
+        toast(`${response.result.detail}；下一阶段：${response.result.next_stage}`);
+        setResolutionTarget(null);
+        loadTasks();
+      })
+      .catch((reason: unknown) => toast(`人工核对写入失败：${String(reason)}`))
+      .finally(() => setResolving(false));
+  };
+
   if (loading && entries.length === 0) return <LoadingState label="正在加载任务中心…" />;
   if (loadError && entries.length === 0) {
     return <EmptyState title="任务中心加载失败" description={loadError} action={<Button tone="secondary" onClick={loadTasks}>重新加载</Button>} />;
@@ -222,9 +264,10 @@ export default function Tasks() {
               <div className="tasks-summary-grid"><div><span>统计周期</span><strong>{selectedEntry.run.period_start || "—"} ~ {selectedEntry.run.period_end || "—"}</strong></div><div><span>消息数</span><strong>{typeof selectedEntry.run.message_count === "number" ? selectedEntry.run.message_count : "—"}</strong></div><div><span>发言人数</span><strong>{typeof selectedEntry.run.speaker_count === "number" ? selectedEntry.run.speaker_count : "—"}</strong></div></div>
               <div className="tasks-detail-note"><Clock size={18} aria-hidden="true" /><span>当前后端未记录阶段事件；页面不显示虚构进度、耗时或事件时间线。</span></div>
               {String(selectedEntry.run.status).toUpperCase() === "PENDING" && selectedEntry.files.length === 0 && !selectedEntry.run.started_at && !selectedEntry.run.finished_at && !selectedEntry.run.updated_at && <div className="tasks-warning"><WarningCircle size={18} aria-hidden="true" /><span>该记录仅有 PENDING 状态，未发现文件或时间证据，不能确认任务已真实创建。</span></div>}
-              {(stringField(selectedEntry.run, "error") || stringField(selectedEntry.run, "image_error") || stringField(selectedEntry.run, "error_type")) && <div className="tasks-error-box">错误：{stringField(selectedEntry.run, "error") || stringField(selectedEntry.run, "image_error") || stringField(selectedEntry.run, "error_type")}</div>}
+              {(stringField(selectedEntry.run, "error") || stringField(selectedEntry.run, "image_error") || stringField(selectedEntry.run, "send_error") || stringField(selectedEntry.run, "error_type")) && <div className="tasks-error-box">错误：{stringField(selectedEntry.run, "error") || stringField(selectedEntry.run, "image_error") || stringField(selectedEntry.run, "send_error") || stringField(selectedEntry.run, "error_type")}</div>}
               <div className="tasks-file-section"><div className="tasks-content-heading"><h3>输出文件</h3><span>来自运行详情与恢复完整性检查</span></div><div className="tasks-file-columns"><div><strong>已发现</strong>{selectedEntry.files.length ? <ul>{selectedEntry.files.map((file) => <li key={file}><CheckCircle size={15} aria-hidden="true" />{file}</li>)}</ul> : <p>运行详情没有文件记录。</p>}</div><div><strong>缺失</strong>{selectedEntry.integrity?.missing.length ? <ul className="tasks-missing-files">{selectedEntry.integrity.missing.map((file) => <li key={file}><WarningCircle size={15} aria-hidden="true" />{file}</li>)}</ul> : <p>{selectedEntry.integrity ? "完整性检查未发现缺失文件。" : "暂无恢复完整性数据。"}</p>}</div></div></div>
               {selectedEntry.detailError && <div className="tasks-warning"><WarningCircle size={18} aria-hidden="true" /><span>{selectedEntry.detailError}</span></div>}
+              {stringField(selectedEntry.run, "send_hold_reason") === "SEND_RESULT_UNKNOWN" && (stringField(selectedEntry.run, "send_unknown_stage") || (stringField(selectedEntry.run, "text_sent_at") ? "image" : "text")) === "text" && <div className="tasks-retry-area"><div><strong>文字发送结果待人工核对</strong><span>两种操作都只更新阶段检查点，不会立即发送微信；确认已发后后续发送只继续图片。</span></div><div className="tasks-resolution-actions"><Button tone="secondary" onClick={() => setResolutionTarget({ entry: selectedEntry, resolution: "text_sent" })}>确认文字已发</Button><Button tone="danger" onClick={() => setResolutionTarget({ entry: selectedEntry, resolution: "not_sent" })}>确认文字未发</Button></div></div>}
               {String(selectedEntry.run.status).toUpperCase() === "FAILED" && <div className="tasks-retry-area"><div><strong>失败任务</strong><span>仅调用后端 retryFailed，不提供取消或虚构重试进度。</span></div><Button tone="danger" onClick={() => setRetryTarget(selectedEntry)}><ArrowsClockwise size={16} aria-hidden="true" />重跑失败任务</Button></div>}
             </>
           )}
@@ -240,6 +283,15 @@ export default function Tasks() {
         busy={retrying}
         onConfirm={confirmRetry}
         onCancel={() => !retrying && setRetryTarget(null)}
+      />
+      <ConfirmDialog
+        open={Boolean(resolutionTarget)}
+        title={resolutionDialogCopy.title}
+        description={resolutionDialogCopy.description}
+        confirmLabel="写入核对结论"
+        busy={resolving}
+        onConfirm={confirmResolution}
+        onCancel={() => !resolving && setResolutionTarget(null)}
       />
       <Toast message={msg} />
     </div>

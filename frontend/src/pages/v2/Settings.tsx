@@ -27,7 +27,7 @@ type SettingsTab = "settings" | "health" | "startup" | "recovery";
 
 const SENSITIVE_KEYS = new Set(["ai_api_key", "email_smtp_password", "email_smtp_user", "email_from", "wechat_mcp_token"]);
 const BOOLEAN_KEYS = new Set(["email_enabled", "email_use_ssl", "email_send_partial_report"]);
-const NUMBER_KEYS = new Set(["wechat_mcp_timeout_seconds", "wechat_mcp_range_timeout_seconds", "codex_summary_timeout_seconds", "codex_summary_max_retries", "codex_summary_request_concurrency", "ai_timeout_seconds", "ai_max_retries", "max_context_chars", "generation_group_concurrency", "wechat_fetch_concurrency", "ai_request_concurrency", "email_smtp_port"]);
+const NUMBER_KEYS = new Set(["wechat_mcp_timeout_seconds", "wechat_mcp_range_timeout_seconds", "codex_summary_timeout_seconds", "codex_summary_max_retries", "codex_summary_request_concurrency", "ai_timeout_seconds", "ai_max_retries", "max_context_chars", "generation_group_concurrency", "wechat_fetch_concurrency", "ai_request_concurrency", "wechat_native_stage_timeout_seconds", "wechat_native_submit_timeout_seconds", "wechat_native_poll_interval_seconds", "email_smtp_port"]);
 
 const LABELS: Record<string, string> = {
   wechat_data_dir: "微信数据目录",
@@ -54,6 +54,9 @@ const LABELS: Record<string, string> = {
   generation_group_concurrency: "群任务并发数",
   wechat_fetch_concurrency: "微信取数并发数",
   ai_request_concurrency: "DeepSeek 备用请求并发数",
+  wechat_native_stage_timeout_seconds: "微信粘贴暂存等待（秒）",
+  wechat_native_submit_timeout_seconds: "微信提交验证等待（秒）",
+  wechat_native_poll_interval_seconds: "微信 UI 轮询间隔（秒）",
   email_enabled: "启用邮件（V1 兼容）",
   email_recipient: "邮件收件人（V1 兼容）",
   email_from: "发件地址（V1 兼容）",
@@ -97,7 +100,7 @@ const SETTING_GROUPS = [
     title: "高级并发设置",
     description: "控制群任务、微信取数、Codex 总结和 DeepSeek 备用请求的并发上限。",
     icon: GearSix,
-    keys: ["generation_group_concurrency", "wechat_fetch_concurrency", "codex_summary_request_concurrency", "ai_request_concurrency"],
+    keys: ["generation_group_concurrency", "wechat_fetch_concurrency", "codex_summary_request_concurrency", "ai_request_concurrency", "wechat_native_stage_timeout_seconds", "wechat_native_submit_timeout_seconds", "wechat_native_poll_interval_seconds"],
   },
   {
     id: "legacy",

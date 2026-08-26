@@ -116,7 +116,7 @@ function TaskActions({
   onSend,
 }: TaskActionsProps) {
   const canGenerate = card.status !== "SENT";
-  const canSend = ["IMAGE_READY", "READY_TO_SEND"].includes(card.status) && !card.sent_at;
+  const canSend = ["IMAGE_READY", "READY_TO_SEND"].includes(card.status) && !card.sent_at && !card.send_hold;
 
   return (
     <div className="dashboard-task-actions">
@@ -149,6 +149,12 @@ function TaskActions({
           title={senderDetail || "微信自动发送服务不可用"}
         >
           微信发送未启用
+        </Button>
+      )}
+      {card.send_hold && (
+        <Button tone="secondary" className="ui-button-compact" onClick={() => navigateToHash("/tasks")}>
+          <WarningCircle size={16} aria-hidden="true" />
+          需人工核对
         </Button>
       )}
     </div>
@@ -299,9 +305,9 @@ export default function Dashboard() {
         </div>
       </section>
 
-      <div className={`dashboard-failure-note ${counts.failed > 0 ? "has-failures" : ""}`}>
-        {counts.failed > 0 ? <WarningCircle size={20} aria-hidden="true" /> : <CheckCircle size={20} aria-hidden="true" />}
-        <span>{counts.failed > 0 ? `有 ${counts.failed} 个群任务失败，请查看下方状态与错误信息。` : "当前没有失败任务。"}</span>
+      <div className={`dashboard-failure-note ${counts.failed > 0 || counts.held > 0 ? "has-failures" : ""}`}>
+        {counts.failed > 0 || counts.held > 0 ? <WarningCircle size={20} aria-hidden="true" /> : <CheckCircle size={20} aria-hidden="true" />}
+        <span>{counts.failed > 0 || counts.held > 0 ? `失败 ${counts.failed} 个，暂停待核对 ${counts.held} 个；请查看下方状态与错误信息。` : "当前没有失败或暂停任务。"}</span>
       </div>
 
       <div className="dashboard-main-grid">

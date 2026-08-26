@@ -9,6 +9,7 @@ from app.api.v2_ui_common import (
     ImageThemeResolveBody,
     PipelineGenerateBody,
     PipelineSendBody,
+    ResolveSendUnknownBody,
     RetryBody,
     RunPromptUpdateBody,
     make_store as _store,
@@ -244,6 +245,8 @@ def retry_failed(
                     "detail": (
                         "AI 调用结果未知，需人工复核"
                         if error_type == "PROMPT_RESULT_UNKNOWN"
+                        else "微信发送结果未知，需人工核对后消歧"
+                        if error_type == "SEND_RESULT_UNKNOWN"
                         else "运行状态文件损坏，需人工复核"
                     ),
                 }
@@ -339,4 +342,22 @@ def pipeline_send(body: PipelineSendBody):
         confirm_regenerated=body.confirm_regenerated,
         confirm_late_send=body.confirm_late_send,
     )
+    return {"result": result}
+
+
+@router.post("/pipeline/resolve-send-unknown")
+def pipeline_resolve_send_unknown(body: ResolveSendUnknownBody):
+    from app.pipeline.daily_pipeline import DailyPipeline
+
+    _validate_run_date(body.run_date)
+    result = DailyPipeline(dry_run=False).resolve_send_unknown(
+        body.group_id,
+        body.run_date,
+        resolution=body.resolution,
+        expected_send_unknown_at=body.expected_send_unknown_at,
+    )
+    if result.get("status") == "conflict":
+        raise HTTPException(status_code=409, detail=result)
+    if result.get("status") == "failed":
+        raise HTTPException(status_code=400, detail=result)
     return {"result": result}

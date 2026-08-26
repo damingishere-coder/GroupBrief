@@ -263,6 +263,7 @@ class DeliveryStages:
                     "text",
                     result.detail,
                     submitted_at=finished_at if result.submitted else "",
+                    diagnostics=result.diagnostics,
                 )
             )
         if not result.success:
@@ -274,6 +275,7 @@ class DeliveryStages:
                 status=context.run.get("status", READY_TO_SEND),
                 text_attempt_finished_at=finished_at,
                 text_submitted_at=finished_at if result.submitted else "",
+                text_verification_diagnostics=result.diagnostics,
                 send_error=result.detail,
                 send_error_type="SEND_TEXT_FAILED",
             )
@@ -301,6 +303,7 @@ class DeliveryStages:
             text_verified_at=finished_at,
             text_sent_at=context.text_sent_at,
             text_verification_level=level,
+            text_verification_diagnostics=result.diagnostics,
             send_error="",
             send_error_type="",
         )
@@ -346,6 +349,7 @@ class DeliveryStages:
                     "image",
                     result.detail,
                     submitted_at=finished_at if result.submitted else "",
+                    diagnostics=result.diagnostics,
                 )
             )
         if not result.success:
@@ -358,6 +362,7 @@ class DeliveryStages:
                 text_sent_at=context.text_sent_at,
                 image_attempt_finished_at=finished_at,
                 image_submitted_at=finished_at if result.submitted else "",
+                image_verification_diagnostics=result.diagnostics,
                 send_error=result.detail,
                 send_error_type="SEND_IMAGE_FAILED",
             )
@@ -385,6 +390,7 @@ class DeliveryStages:
             image_verified_at=finished_at,
             image_sent_at=context.image_sent_at,
             image_verification_level=level,
+            image_verification_diagnostics=result.diagnostics,
             send_error="",
             send_error_type="",
         )
@@ -396,6 +402,8 @@ class DeliveryStages:
             verification_level = "ui_observed"
         elif levels and all(level == "dry_run" for level in levels):
             verification_level = "dry_run"
+        elif "manual_ui_observed" in levels:
+            verification_level = "manual_ui_observed"
         else:
             verification_level = "provider_reported"
         self.store.finish_send_claim(
@@ -442,6 +450,7 @@ class DeliveryStages:
         detail: str,
         *,
         submitted_at: str = "",
+        diagnostics: dict[str, object] | None = None,
     ) -> dict:
         finished_at = datetime.now(
             ZoneInfo(self.settings.app_timezone)
@@ -449,6 +458,7 @@ class DeliveryStages:
         fields = {
             f"{stage}_attempt_finished_at": "",
             f"{stage}_submitted_at": submitted_at,
+            f"{stage}_verification_diagnostics": diagnostics or {},
         }
         self.store.finish_send_claim(
             group_name,
@@ -462,6 +472,7 @@ class DeliveryStages:
             send_error_type="SEND_RESULT_UNKNOWN",
             verification_level="unknown",
             send_unknown_at=finished_at,
+            send_unknown_stage=stage,
             **fields,
         )
         return {

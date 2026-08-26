@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from contextlib import nullcontext
 import hashlib
+import io
 import json
 from pathlib import Path
 import subprocess
@@ -437,7 +438,7 @@ def test_codex_structured_path_selects_one_of_multiple_candidates(tmp_path, monk
     assert structured["relative_path"] == "execution-1/selected.png"
 
 
-def test_codex_deduplicates_staging_and_generated_copy_by_hash(tmp_path, monkeypatch):
+def test_codex_keeps_distinct_paths_even_when_candidate_hashes_match(tmp_path, monkeypatch):
     generator, prompt = _codex_test_generator(tmp_path, monkeypatch)
 
     def fake_run(command, **kwargs):
@@ -453,8 +454,11 @@ def test_codex_deduplicates_staging_and_generated_copy_by_hash(tmp_path, monkeyp
     result = generator.generate(prompt, prompt.parent / "daily_image.png")
 
     assert result.success is True
-    assert len(result.detail["candidate_diagnostics"]) == 1
-    assert result.detail["candidate_diagnostics"][0]["sources"] == ["staging", "structured", "scan"]
+    assert len(result.detail["candidate_diagnostics"]) == 2
+    assert sum(
+        "structured" in item["sources"]
+        for item in result.detail["candidate_diagnostics"]
+    ) == 1
 
 
 def test_codex_staged_image_without_matching_receipt_is_not_auto_claimed(tmp_path, monkeypatch):
@@ -476,6 +480,123 @@ def test_codex_staged_image_without_matching_receipt_is_not_auto_claimed(tmp_pat
     assert result.detail["attempt_count"] == 1
     assert result.detail["outcome_unknown"] is True
     assert len(result.detail["candidate_diagnostics"]) == 1
+
+
+def test_codex_timeout_recovers_unique_candidate_from_same_thread(tmp_path, monkeypatch):
+    generator, prompt = _codex_test_generator(tmp_path, monkeypatch)
+    thread_id = "01a03-safe-thread"
+    calls = 0
+
+    def fake_run(command, **kwargs):
+        nonlocal calls
+        calls += 1
+        kwargs["on_start"](12345)
+        kwargs["on_event"]({"type": "thread.started", "thread_id": thread_id})
+        generated = tmp_path / "generated_images" / thread_id / "only.png"
+        generated.parent.mkdir()
+        generated.write_bytes(_PNG_1PX)
+        raise subprocess.TimeoutExpired(command, generator.timeout, stderr="token=secret-value")
+
+    monkeypatch.setattr(codex_generator, "_run_codex_process", fake_run)
+    monkeypatch.setattr(generator, "_pid_is_running", lambda _pid: False)
+
+    result = generator.generate(
+        prompt,
+        prompt.parent / "daily_image.png",
+        job_id="job-thread-timeout-001",
+    )
+
+    assert result.success is True
+    assert calls == 1
+    assert result.detail["codex_thread_id"] == thread_id
+    assert result.detail["receipt_source"] == "codex_thread_scan"
+    assert result.detail["recovery_status"] == "recovered_after_timeout"
+    assert "secret-value" not in result.detail["codex_stderr_tail"]
+
+
+def test_codex_thread_candidate_outside_matching_directory_stays_unknown(tmp_path, monkeypatch):
+    generator, prompt = _codex_test_generator(tmp_path, monkeypatch)
+    calls = 0
+
+    def fake_run(command, **kwargs):
+        nonlocal calls
+        calls += 1
+        kwargs["on_event"]({"type": "thread.started", "thread_id": "thread-expected-001"})
+        generated = tmp_path / "generated_images" / "thread-other-001" / "only.png"
+        generated.parent.mkdir()
+        generated.write_bytes(_PNG_1PX)
+        return _Proc()
+
+    monkeypatch.setattr(codex_generator, "_run_codex_process", fake_run)
+
+    result = generator.generate(
+        prompt,
+        prompt.parent / "daily_image.png",
+        job_id="job-thread-mismatch-001",
+    )
+
+    assert result.success is False
+    assert calls == 1
+    assert result.detail["outcome_unknown"] is True
+
+
+def test_codex_multiple_candidates_in_same_thread_stay_unknown(tmp_path, monkeypatch):
+    generator, prompt = _codex_test_generator(tmp_path, monkeypatch)
+    thread_id = "thread-multiple-001"
+
+    def fake_run(command, **kwargs):
+        kwargs["on_event"]({"type": "thread.started", "thread_id": thread_id})
+        generated = tmp_path / "generated_images" / thread_id
+        generated.mkdir()
+        (generated / "first.png").write_bytes(_PNG_1PX)
+        (generated / "second.png").write_bytes(_PNG_1PX)
+        return _Proc()
+
+    monkeypatch.setattr(codex_generator, "_run_codex_process", fake_run)
+
+    result = generator.generate(
+        prompt,
+        prompt.parent / "daily_image.png",
+        job_id="job-thread-multiple-001",
+    )
+
+    assert result.success is False
+    assert result.detail["stage"] == "ambiguous"
+    assert result.detail["outcome_unknown"] is True
+
+
+def test_codex_modified_old_file_in_thread_directory_is_not_new_candidate(
+    tmp_path, monkeypatch
+):
+    generator, prompt = _codex_test_generator(tmp_path, monkeypatch)
+    thread_id = "thread-existing-001"
+    generated = tmp_path / "generated_images" / thread_id / "old.png"
+    generated.parent.mkdir()
+    generated.write_bytes(_PNG_1PX)
+    calls = 0
+
+    def fake_run(command, **kwargs):
+        nonlocal calls
+        calls += 1
+        kwargs["on_event"]({"type": "thread.started", "thread_id": thread_id})
+        generated.write_bytes(_PNG_1PX + b"modified")
+        return _Proc()
+
+    monkeypatch.setattr(codex_generator, "_run_codex_process", fake_run)
+
+    result = generator.generate(
+        prompt,
+        prompt.parent / "daily_image.png",
+        job_id="job-thread-existing-001",
+    )
+
+    assert result.success is False
+    assert calls == 1
+    assert result.detail["outcome_unknown"] is True
+    assert all(
+        "thread" not in item["sources"]
+        for item in result.detail["candidate_diagnostics"]
+    )
 
 
 def test_codex_unknown_result_survives_next_call_without_second_process(tmp_path, monkeypatch):
@@ -557,7 +678,7 @@ def test_codex_rejects_corrupt_image_without_overwriting_existing(tmp_path, monk
     assert output.read_bytes() == original
 
 
-def test_codex_retries_known_wrong_dimensions_but_never_crops(tmp_path, monkeypatch):
+def test_codex_holds_wrong_dimensions_without_second_generation(tmp_path, monkeypatch):
     generator, prompt = _codex_test_generator(tmp_path, monkeypatch)
     prompt.write_text("生成 1024×1536 固定群聊漫画", encoding="utf-8")
     calls = 0
@@ -577,10 +698,11 @@ def test_codex_retries_known_wrong_dimensions_but_never_crops(tmp_path, monkeypa
     result = generator.generate(prompt, output, job_id="job-wrong-size-001")
 
     assert result.success is False
-    assert calls == 2
+    assert calls == 1
     assert not output.exists()
-    assert result.detail["outcome_unknown"] is False
-    assert "完整图片验证" in result.error
+    assert result.detail["outcome_unknown"] is True
+    assert result.detail["recovery_status"] == "invalid_candidate_hold"
+    assert "禁止自动重试" in result.error
 
 
 def test_codex_timeout_terminates_process_tree(monkeypatch):
@@ -589,13 +711,16 @@ def test_codex_timeout_terminates_process_tree(monkeypatch):
         returncode = None
 
         def __init__(self):
-            self.communicate_calls = 0
+            self.wait_calls = 0
+            self.stdin = io.StringIO()
+            self.stdout = io.StringIO("")
+            self.stderr = io.StringIO("")
 
-        def communicate(self, **kwargs):
-            self.communicate_calls += 1
-            if self.communicate_calls == 1:
+        def wait(self, **kwargs):
+            self.wait_calls += 1
+            if self.wait_calls == 1:
                 raise subprocess.TimeoutExpired("codex", 1)
-            return ("", "")
+            return 1
 
         def poll(self):
             return None
@@ -618,7 +743,7 @@ def test_codex_timeout_terminates_process_tree(monkeypatch):
         )
 
     assert terminated == [process]
-    assert process.communicate_calls == 2
+    assert process.wait_calls == 2
 
 
 def test_codex_imagegen_mutex_serializes_concurrent_requests(monkeypatch):

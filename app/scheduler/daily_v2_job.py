@@ -22,7 +22,7 @@ from app.db import repository as repo
 from app.pipeline.daily_pipeline import DailyPipeline, parse_date
 from app.services.generation_runtime import GenerationBusyError, generation_mutex
 from app.services.email_service import email_delivery_config_error
-from app.v2.constants import SCHEDULER_STATE_CORRUPT
+from app.v2.constants import IMAGE_GENERATION_FAILED, SCHEDULER_STATE_CORRUPT
 from app.scheduler.outcome import ProcessExitCode, attach_outcome, summarize_results
 
 logger = get_logger("groupbrief.scheduler")
@@ -278,6 +278,19 @@ def _run_locked(settings: Settings, run_date: date, *, skip_email: bool) -> dict
         )
     else:
         state = state_store.load(run_date_text)
+        try:
+            state = _reconcile_completed_generation(
+                settings,
+                run_date_text,
+                state_store,
+                state,
+            )
+        except Exception:
+            logger.exception(
+                "已完成生成批次的可信图片对账失败，保留原终态：run_date=%s",
+                run_date_text,
+            )
+        generation_results = state.get("generation_results") or generation_results
 
     if skip_email:
         return {
@@ -314,6 +327,30 @@ def _run_locked(settings: Settings, run_date: date, *, skip_email: bool) -> dict
             "generation_status": "partial",
             "email_status": "skipped_partial_disabled",
         }
+
+    if (
+        state.get("email_recovery_required")
+        and state.get("email_completed_at")
+        and state.get("email_status") != "unknown"
+    ):
+        email_history = list(state.get("email_history") or [])
+        email_history.append(
+            {
+                "status": str(state.get("email_status") or ""),
+                "completed_at": str(state.get("email_completed_at") or ""),
+                "detail": str(state.get("email_detail") or "")[-800:],
+            }
+        )
+        state = state_store.update(
+            run_date_text,
+            email_history=email_history[-10:],
+            email_status="recovery_pending",
+            email_started_at=None,
+            email_completed_at=None,
+            email_hold=False,
+            email_error="",
+            email_detail="可信生图恢复完成；逐群邮件账本将只提交尚未确认发送的群",
+        )
 
     if state.get("email_completed_at"):
         if state.get("email_status") == "unknown":
@@ -394,6 +431,10 @@ def _run_locked(settings: Settings, run_date: date, *, skip_email: bool) -> dict
         "--run-date",
         run_date_text,
     ]
+    if state.get("email_recovery_required"):
+        for group_name in state.get("generation_recovery_groups") or []:
+            if isinstance(group_name, str) and group_name.strip():
+                command.extend(["--group", group_name.strip()])
     try:
         proc = subprocess.run(
             command,
@@ -454,6 +495,10 @@ def _run_locked(settings: Settings, run_date: date, *, skip_email: bool) -> dict
             if email_status == "unknown"
             else ""
         ),
+        email_recovery_required=False,
+        email_recovered_at=(
+            _now_iso() if state.get("email_recovery_required") else state.get("email_recovered_at")
+        ),
     )
     result = {
         "status": result_status,
@@ -473,13 +518,123 @@ def _generation_status(results: list[dict]) -> str:
     return str(summarize_results(results)["outcome_status"])
 
 
+def _reconcile_completed_generation(
+    settings: Settings,
+    run_date: str,
+    state_store: DailyScheduleState,
+    state: dict,
+) -> dict:
+    """只对带可信 Codex thread_id 候选的失败群做无新调用收口。"""
+    if state.get("generation_status") != "partial":
+        return state
+    original_results = state.get("generation_results")
+    if not isinstance(original_results, list):
+        return state
+
+    pipeline = DailyPipeline(settings=settings)
+    generator = pipeline.image_generator
+    can_reconcile = getattr(generator, "can_reconcile_without_generation", None)
+    if not callable(can_reconcile):
+        return state
+
+    groups = pipeline._load_groups()
+    groups_by_name = {
+        (group.display_name or group.wechat_group_name): group for group in groups
+    }
+    recovery_ids: list[int] = []
+    for result in original_results:
+        if not isinstance(result, dict):
+            continue
+        if result.get("error_type") != IMAGE_GENERATION_FAILED:
+            continue
+        group_name = str(result.get("group_name") or "")
+        group = groups_by_name.get(group_name)
+        if group is None or group.id is None:
+            continue
+        run = pipeline.store.load_run(group_name, run_date)
+        image_job = run.get("image_job") if isinstance(run.get("image_job"), dict) else {}
+        job_id = str(image_job.get("job_id") or "")
+        prompt_path = pipeline.store.prompt_path(group_name, run_date)
+        if prompt_path.is_file() and can_reconcile(
+            prompt_path,
+            job_id,
+        ):
+            recovery_ids.append(int(group.id))
+
+    if not recovery_ids:
+        return state
+
+    recovery_results = pipeline.generate_all(
+        run_date=run_date,
+        group_ids=recovery_ids,
+        force=False,
+        acquire_lock=False,
+    )
+    replacements = {
+        str(item.get("group_name") or ""): item
+        for item in recovery_results
+        if isinstance(item, dict) and item.get("group_name")
+    }
+    merged_results = [
+        replacements.get(str(item.get("group_name") or ""), item)
+        if isinstance(item, dict)
+        else item
+        for item in original_results
+    ]
+    recovered_groups = sorted(
+        name
+        for name, item in replacements.items()
+        if str(item.get("status") or "") in {"ready_to_send", "success", "skipped"}
+    )
+    history = list(state.get("generation_history") or [])
+    history.append(
+        {
+            "status": str(state.get("generation_status") or ""),
+            "completed_at": str(state.get("generation_completed_at") or ""),
+            "results": original_results,
+        }
+    )
+    next_status = _generation_status(merged_results)
+    logger.info(
+        "V2 已完成批次可信图片对账：run_date=%s groups=%s status=%s results=%s",
+        run_date,
+        recovered_groups,
+        next_status,
+        _compact_results(recovery_results),
+    )
+    return state_store.update(
+        run_date,
+        generation_original_status=(
+            state.get("generation_original_status") or state.get("generation_status")
+        ),
+        generation_history=history[-10:],
+        generation_status=next_status,
+        generation_results=_compact_results(merged_results),
+        generation_recovered_at=_now_iso() if recovered_groups else state.get("generation_recovered_at"),
+        generation_recovery_groups=recovered_groups,
+        generation_recovery_results=_compact_results(recovery_results),
+        email_recovery_required=bool(recovered_groups),
+    )
+
+
 def _compact_results(results: list[dict]) -> list[dict]:
     compact: list[dict] = []
     for item in results:
         compact.append(
             {
                 key: item.get(key)
-                for key in ("group_name", "status", "error_type", "detail", "reason")
+                for key in (
+                    "group_name",
+                    "status",
+                    "error_type",
+                    "detail",
+                    "reason",
+                    "failed_stage",
+                    "receipt_source",
+                    "recovery_status",
+                    "recovered_at",
+                    "codex_thread_id",
+                )
                 if item.get(key) not in (None, "")
             }
         )

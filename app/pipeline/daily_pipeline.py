@@ -508,6 +508,63 @@ class DailyPipeline:
 
     # ================= 手动操作 =================
 
+    def resolve_send_unknown(
+        self,
+        group_id: int,
+        run_date: str,
+        *,
+        resolution: str,
+        expected_send_unknown_at: str,
+    ) -> dict:
+        """人工消歧文字提交检查点；不会调用微信 Sender。"""
+        parsed_run_date = parse_date(run_date)
+        if parsed_run_date is None:
+            return {
+                "status": "failed",
+                "error_type": "INVALID_RUN_DATE",
+                "detail": "run_date 必须是有效的 YYYY-MM-DD 日期",
+            }
+        group = self._get_group(group_id)
+        if group is None:
+            return {
+                "status": "failed",
+                "error_type": "GROUP_NOT_FOUND",
+                "detail": f"群不存在 {group_id}",
+            }
+        run_date = parsed_run_date.isoformat()
+        group_name = self._group_name(group)
+        resolved, run, reason = self.store.resolve_text_send_unknown(
+            group_name,
+            run_date,
+            resolution=resolution,
+            expected_send_unknown_at=expected_send_unknown_at,
+            now=datetime.now(ZoneInfo(self.settings.app_timezone)),
+        )
+        if not resolved:
+            messages = {
+                "state_corrupt": "运行状态损坏，禁止人工覆盖",
+                "not_unknown": "当前任务已不是发送结果未知状态",
+                "stale": "发送未知状态已变化，请刷新后重新核对",
+                "unsupported_stage": "当前未知发生在图片阶段，此接口只处理文字提交",
+                "invalid_resolution": "人工核对结论无效",
+                "text_not_submitted": "没有文字提交动作记录，不能确认文字已发送",
+            }
+            return {
+                "group_name": group_name,
+                "status": "conflict",
+                "error_type": "SEND_RESOLUTION_CONFLICT",
+                "detail": messages.get(reason, "发送未知状态无法消歧"),
+                "reason": reason,
+            }
+        return {
+            "group_name": group_name,
+            "status": "resolved",
+            "resolution": resolution,
+            "next_stage": "image" if resolution == "text_sent" and bool(group.image_enabled) else "text" if resolution == "not_sent" else "complete",
+            "send_state": run.get("send_state"),
+            "detail": "已记录人工核对结论；本次操作没有发送任何微信内容",
+        }
+
     def force_generate(
         self,
         group_id: int,

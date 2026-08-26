@@ -19,11 +19,19 @@ def run_send_due_job() -> dict:
         raise
     outcome = summarize_results(results)
     logger.info(
-        "微信 send_due 终态：outcome=%s exit_code=%d result_count=%d source_statuses=%s",
+        "微信 send_due 终态：outcome=%s exit_code=%d result_count=%d source_statuses=%s groups=%s",
         outcome["outcome_status"],
         outcome["exit_code"],
         outcome["result_count"],
         outcome["source_statuses"],
+        [
+            {
+                key: item.get(key)
+                for key in ("group_name", "status", "error_type", "detail")
+                if item.get(key) not in (None, "")
+            }
+            for item in results
+        ],
     )
     require_scheduler_success(outcome, allow_not_run=True)
     return outcome

@@ -42,7 +42,7 @@ def dashboard(
     groups = repo.list_groups(session, only_enabled=True)
 
     cards: list[dict] = []
-    counts = {"pending": 0, "generated": 0, "sent": 0, "failed": 0}
+    counts = {"pending": 0, "generated": 0, "sent": 0, "failed": 0, "held": 0}
     for group in groups:
         name = group.display_name or group.wechat_group_name
         run = store.load_run(name, today)
@@ -74,16 +74,24 @@ def dashboard(
                 "error": (
                     run.get("error")
                     or run.get("image_error")
+                    or run.get("send_error")
                     or run.get("error_type")
                     or ""
                 ),
                 "sent_at": run.get("sent_at", ""),
                 "send_hold": bool(run.get("send_hold")),
+                "send_state": str(run.get("send_state") or ""),
+                "send_hold_reason": str(run.get("send_hold_reason") or ""),
+                "send_error": str(run.get("send_error") or ""),
+                "send_error_type": str(run.get("send_error_type") or ""),
+                "send_unknown_at": str(run.get("send_unknown_at") or ""),
                 "updated_at": run.get("updated_at", ""),
             }
         )
         if status == "SENT":
             counts["sent"] += 1
+        elif run.get("send_hold"):
+            counts["held"] += 1
         elif status in ("IMAGE_READY", "READY_TO_SEND"):
             counts["generated"] += 1
         elif status == "FAILED":
@@ -177,6 +185,18 @@ _ARCHIVE_RUN_FIELDS = (
     "error",
     "error_type",
     "image_error",
+    "send_state",
+    "send_hold",
+    "send_hold_reason",
+    "send_error",
+    "send_error_type",
+    "send_unknown_at",
+    "send_unknown_stage",
+    "text_sent_at",
+    "image_sent_at",
+    "text_submitted_at",
+    "image_submitted_at",
+    "verification_level",
     "updated_at",
 )
 

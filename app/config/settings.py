@@ -99,6 +99,9 @@ class Settings(BaseSettings):
     # legacy_cli 保留旧 wechat-automation-api 兼容入口。
     wechat_sender_mode: str = "native"
     wechat_native_action_delay_seconds: float = 0.6
+    wechat_native_stage_timeout_seconds: float = 5.0
+    wechat_native_submit_timeout_seconds: float = 8.0
+    wechat_native_poll_interval_seconds: float = 0.2
     wechat_native_mutex_timeout_seconds: float = 20.0
     wechat_send_claim_seconds: int = 180
     wechat_late_send_window_minutes: int = 30

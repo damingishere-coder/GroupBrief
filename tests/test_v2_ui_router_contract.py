@@ -1,6 +1,10 @@
+from pathlib import Path
+from types import SimpleNamespace
+
 from fastapi import FastAPI
 
-from app.api import v2_ui
+from app.api import v2_ui, v2_ui_read
+from app.config.settings import Settings
 
 
 EXPECTED_V2_UI_OPERATIONS = {
@@ -29,6 +33,7 @@ EXPECTED_V2_UI_OPERATIONS = {
     ("POST", "/api/v2/pipeline/generate", "pipeline_generate_api_v2_pipeline_generate_post"),
     ("POST", "/api/v2/pipeline/send-due", "pipeline_send_due_api_v2_pipeline_send_due_post"),
     ("POST", "/api/v2/pipeline/send", "pipeline_send_api_v2_pipeline_send_post"),
+    ("POST", "/api/v2/pipeline/resolve-send-unknown", "pipeline_resolve_send_unknown_api_v2_pipeline_resolve_send_unknown_post"),
 }
 
 
@@ -54,3 +59,56 @@ def test_v2_ui_compatibility_exports_remain_available() -> None:
     assert v2_ui.RetryBody is not None
     assert callable(v2_ui.retry_failed)
     assert callable(v2_ui._store)
+
+
+def test_dashboard_counts_send_unknown_as_held_and_surfaces_send_error(
+    tmp_path, monkeypatch
+) -> None:
+    group = SimpleNamespace(
+        id=7,
+        display_name="测试群",
+        wechat_group_name="测试群",
+        send_time="08:30",
+        schedule_rule="daily",
+        image_enabled=True,
+        wechat_send_enabled=True,
+        ranking_template="",
+        image_prompt_template="",
+    )
+
+    class FakeStore:
+        def load_run(self, _group_name, _run_date):
+            return {
+                "status": "READY_TO_SEND",
+                "send_state": "unknown",
+                "send_hold": True,
+                "send_hold_reason": "SEND_RESULT_UNKNOWN",
+                "send_error": "文字已提交但 UI 验证结果未知",
+                "send_error_type": "SEND_RESULT_UNKNOWN",
+                "send_unknown_at": "2026-08-26T08:30:59+08:00",
+            }
+
+        def image_path(self, _group_name, _run_date):
+            return Path(tmp_path) / "missing.png"
+
+    monkeypatch.setattr(v2_ui_read, "_store", lambda _settings: FakeStore())
+    monkeypatch.setattr(
+        v2_ui_read.repo,
+        "list_groups",
+        lambda _session, only_enabled=True: [group],
+    )
+
+    result = v2_ui_read.dashboard(
+        session=object(),
+        settings=Settings(_env_file=None, output_dir=tmp_path),
+    )
+
+    assert result["counts"] == {
+        "pending": 0,
+        "generated": 0,
+        "sent": 0,
+        "failed": 0,
+        "held": 1,
+    }
+    assert result["cards"][0]["error"] == "文字已提交但 UI 验证结果未知"
+    assert result["cards"][0]["send_error_type"] == "SEND_RESULT_UNKNOWN"

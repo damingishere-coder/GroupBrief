@@ -598,6 +598,84 @@ class RunStore:
         )
         return self.update_send_claim(group_name, run_date, claim_id, **fields)
 
+    def resolve_text_send_unknown(
+        self,
+        group_name: str,
+        run_date: str,
+        *,
+        resolution: str,
+        expected_send_unknown_at: str,
+        now: datetime,
+    ) -> tuple[bool, dict, str]:
+        """用时间戳 CAS 人工消歧文字提交；本方法本身不执行任何发送。"""
+        path = self.run_path(group_name, run_date)
+        with _run_mutex(path):
+            data = self.load_run(group_name, run_date)
+            if self._is_corrupt(data):
+                return False, data, "state_corrupt"
+            if data.get("send_state") != "unknown" or data.get("send_hold_reason") != "SEND_RESULT_UNKNOWN":
+                return False, data, "not_unknown"
+            if str(data.get("send_unknown_at") or "") != expected_send_unknown_at:
+                return False, data, "stale"
+            unknown_stage = str(data.get("send_unknown_stage") or "")
+            if not unknown_stage:
+                unknown_stage = "image" if data.get("image_submitted_at") or data.get("text_sent_at") else "text"
+            if unknown_stage != "text":
+                return False, data, "unsupported_stage"
+            if resolution not in {"text_sent", "not_sent"}:
+                return False, data, "invalid_resolution"
+
+            resolved_at = now.isoformat()
+            history = list(data.get("send_resolution_history") or [])
+            history.append(
+                {
+                    "stage": "text",
+                    "resolution": resolution,
+                    "unknown_at": expected_send_unknown_at,
+                    "resolved_at": resolved_at,
+                }
+            )
+            common = {
+                "send_state": "ready",
+                "send_hold": False,
+                "send_hold_reason": "",
+                "send_error": "",
+                "send_error_type": "",
+                "send_unknown_at": "",
+                "send_unknown_stage": "",
+                "send_claim_id": "",
+                "send_claimed_at": "",
+                "send_claim_expires_at": "",
+                "needs_manual_send": True,
+                "send_resolution_history": history[-20:],
+                "send_last_resolution": resolution,
+                "send_last_resolved_at": resolved_at,
+            }
+            if resolution == "text_sent":
+                submitted_at = str(data.get("text_submitted_at") or "")
+                if not submitted_at:
+                    return False, data, "text_not_submitted"
+                data.update(
+                    **common,
+                    text_attempt_finished_at=resolved_at,
+                    text_verified_at=resolved_at,
+                    text_sent_at=submitted_at,
+                    text_verification_level="manual_ui_observed",
+                    verification_level="manual_ui_observed",
+                )
+            else:
+                data.update(
+                    **common,
+                    text_attempt_started_at="",
+                    text_attempt_finished_at="",
+                    text_submitted_at="",
+                    text_verified_at="",
+                    text_sent_at="",
+                    text_verification_level="",
+                    verification_level="",
+                )
+            return True, self.save_run(group_name, run_date, data), "resolved"
+
     def list_runs(self, run_date: str | None = None) -> list[dict]:
         """列出全部已存在的 run（可按日期过滤）。
 

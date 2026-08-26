@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Literal
 from zoneinfo import ZoneInfo
 
 from fastapi import HTTPException
@@ -38,6 +39,13 @@ class PipelineSendBody(BaseModel):
     run_date: str | None = None
     confirm_regenerated: bool = False
     confirm_late_send: bool = False
+
+
+class ResolveSendUnknownBody(BaseModel):
+    group_id: int
+    run_date: str
+    resolution: Literal["text_sent", "not_sent"]
+    expected_send_unknown_at: str = Field(min_length=10, max_length=80)
 
 
 class ImageThemeResolveBody(BaseModel):
