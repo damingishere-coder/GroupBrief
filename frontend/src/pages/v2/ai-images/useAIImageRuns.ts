@@ -233,7 +233,7 @@ export function useAIImageRuns(groups: GroupV2[], toast: ToastFn) {
 
   const applyRunTheme = async (key: string, custom = runCustom) => {
     setRunTheme(key);
-    if (key !== "custom") setRunCustom("");
+    setRunCustom(key === "custom" ? custom : "");
     if (key === "custom" && !custom.trim()) return;
     try {
       const resolved = await resolveImageTheme({

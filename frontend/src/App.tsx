@@ -3,6 +3,7 @@ import { lazy, Suspense } from "react";
 import AppShell from "./components/layout/AppShell";
 import { LoadingState } from "./components/common";
 import { usePageNavigation } from "./navigation";
+import { m, MotionProvider, PageTransition } from "./components/motion";
 
 const Dashboard = lazy(() => import("./pages/v2/Dashboard"));
 const Groups = lazy(() => import("./pages/v2/Groups"));
@@ -34,6 +35,7 @@ function WorkspaceTabs({
           className={active === tab.key ? "is-active" : ""}
           onClick={() => onNavigate(tab.key)}
         >
+          {active === tab.key && <m.span className="workspace-tab-indicator" layoutId="workspace-tab-indicator" aria-hidden="true" />}
           {tab.label}
         </button>
       ))}
@@ -43,10 +45,13 @@ function WorkspaceTabs({
 
 export default function App() {
   const { page, route, navigate } = usePageNavigation();
+  const pageKey = `${page}:${route.groupMode || ""}:${route.groupId || route.invalidGroupId || ""}`;
 
   return (
-    <AppShell activePage={page} onNavigate={navigate}>
-      <Suspense fallback={<LoadingState label="正在加载页面…" />}>
+    <MotionProvider>
+      <AppShell activePage={page} onNavigate={navigate}>
+        <PageTransition pageKey={pageKey}>
+          <Suspense fallback={<LoadingState label="正在加载页面…" />}>
         {page === "dashboard" && <Dashboard />}
         {page === "groups" && route.groupMode === "list" && (
           <div className="combined-workspace">
@@ -78,7 +83,9 @@ export default function App() {
           </div>
         )}
         {page === "settings" && <Settings />}
-      </Suspense>
-    </AppShell>
+          </Suspense>
+        </PageTransition>
+      </AppShell>
+    </MotionProvider>
   );
 }

@@ -1062,6 +1062,93 @@ def test_manual_not_sent_resolution_allows_one_fresh_full_send(tmp_path):
     assert len(sender.image_calls) == 1
 
 
+def test_manual_all_sent_resolution_is_cas_protected_and_never_calls_sender(tmp_path):
+    pipeline = _ready_to_send(tmp_path)
+    unknown_sender = UnknownTextSender()
+    pipeline.sender = unknown_sender
+    pipeline.send_due(now=datetime(2026, 8, 18, 8, 31, 0))
+    held = pipeline.store.load_run("测试群", "2026-08-18")
+
+    resolved = pipeline.resolve_manual_send(
+        1,
+        "2026-08-18",
+        resolution="all_sent",
+        expected_updated_at=held["updated_at"],
+    )
+    stale = pipeline.resolve_manual_send(
+        1,
+        "2026-08-18",
+        resolution="all_sent",
+        expected_updated_at=held["updated_at"],
+    )
+    run = pipeline.store.load_run("测试群", "2026-08-18")
+
+    assert resolved["status"] == "resolved"
+    assert resolved["next_stage"] == "complete"
+    assert stale["status"] == "conflict"
+    assert run["status"] == SENT
+    assert run["send_state"] == "sent"
+    assert run["send_hold"] is False
+    assert run["verification_level"] == "manual_user_confirmed"
+    assert run["send_resolution_history"][-1]["resolution"] == "all_sent"
+    assert len(unknown_sender.text_calls) == 1
+    assert unknown_sender.image_calls == []
+
+
+def test_manual_resolution_rejects_missing_image_without_mutating_hold(tmp_path):
+    pipeline = _ready_to_send(tmp_path)
+    pipeline.sender = UnknownTextSender()
+    pipeline.send_due(now=datetime(2026, 8, 18, 8, 31, 0))
+    held = pipeline.store.load_run("测试群", "2026-08-18")
+    pipeline.store.image_path("测试群", "2026-08-18").unlink()
+
+    rejected = pipeline.resolve_manual_send(
+        1,
+        "2026-08-18",
+        resolution="all_sent",
+        expected_updated_at=held["updated_at"],
+    )
+    run = pipeline.store.load_run("测试群", "2026-08-18")
+
+    assert rejected["status"] == "conflict"
+    assert rejected["reason"] == "image_missing"
+    assert run["send_hold"] is True
+
+
+@pytest.mark.parametrize(
+    ("resolution", "expected_text_sent", "expected_next_stage"),
+    [
+        ("text_sent", True, "image"),
+        ("not_sent", False, "text"),
+    ],
+)
+def test_manual_partial_resolutions_update_only_run_state(
+    tmp_path, resolution, expected_text_sent, expected_next_stage
+):
+    pipeline = _ready_to_send(tmp_path)
+    sender = UnknownTextSender()
+    pipeline.sender = sender
+    pipeline.send_due(now=datetime(2026, 8, 18, 8, 31, 0))
+    held = pipeline.store.load_run("测试群", "2026-08-18")
+    calls_before = (len(sender.text_calls), len(sender.image_calls))
+
+    resolved = pipeline.resolve_manual_send(
+        1,
+        "2026-08-18",
+        resolution=resolution,
+        expected_updated_at=held["updated_at"],
+    )
+    run = pipeline.store.load_run("测试群", "2026-08-18")
+
+    assert resolved["status"] == "resolved"
+    assert resolved["next_stage"] == expected_next_stage
+    assert run["status"] == READY_TO_SEND
+    assert run["send_hold"] is False
+    assert bool(run.get("text_sent_at")) is expected_text_sent
+    assert run["send_resolution_history"][-1]["resolution"] == resolution
+    assert (len(sender.text_calls), len(sender.image_calls)) == calls_before
+
+
 def test_run_store_send_claim_prevents_duplicate_and_marks_expired_attempt_unknown(tmp_path):
     store = RunStore(tmp_path / "output")
     store.save_run("测试群", "2026-08-18", {"status": READY_TO_SEND})

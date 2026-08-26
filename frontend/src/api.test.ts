@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { get, getRuns, pipelineGenerate, pipelineSend, readV2JsonFile, resolveSendUnknown } from "./api";
+import { get, getDashboard, getRuns, pipelineGenerate, pipelineSend, readV2JsonFile, resolveManualSend, resolveSendUnknown } from "./api";
 
 function response(body: unknown, options: { ok?: boolean; status?: number; raw?: string } = {}): Response {
   return {
@@ -75,6 +75,43 @@ describe("frontend API contract", () => {
           run_date: "2026-08-26",
           resolution: "text_sent",
           expected_send_unknown_at: "2026-08-26T08:30:59+08:00",
+        }),
+      }),
+    );
+  });
+
+  it("requests the selected dashboard run date", async () => {
+    const fetchMock = vi.fn(async () => response({ cards: [] }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await getDashboard("2026-08-25");
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v2/dashboard?run_date=2026-08-25",
+      expect.any(Object),
+    );
+  });
+
+  it("records a whole manual send resolution with updated-at CAS", async () => {
+    const fetchMock = vi.fn(async () => response({ result: { status: "resolved" } }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await resolveManualSend({
+      group_id: 7,
+      run_date: "2026-08-26",
+      resolution: "all_sent",
+      expected_updated_at: "2026-08-26 08:31:00",
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v2/pipeline/resolve-manual-send",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          group_id: 7,
+          run_date: "2026-08-26",
+          resolution: "all_sent",
+          expected_updated_at: "2026-08-26 08:31:00",
         }),
       }),
     );

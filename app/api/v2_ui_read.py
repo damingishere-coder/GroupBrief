@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+import json
+from datetime import date, datetime
 from pathlib import Path
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
@@ -30,12 +32,16 @@ router = APIRouter()
 def dashboard(
     session: Session = Depends(repo.get_session),
     settings: Settings = Depends(get_settings),
+    run_date: str | None = None,
 ):
     tz = _tz(settings)
     now = datetime.now(tz)
-    today = now.date().isoformat()
+    selected_date = now.date()
+    if run_date is not None:
+        selected_date = date.fromisoformat(_validate_run_date(run_date))
+    selected_run_date = selected_date.isoformat()
     window = PeriodResolver().resolve(
-        run_date=now.date(),
+        run_date=selected_date,
         timezone=settings.app_timezone,
     )
     store = _store(settings)
@@ -45,14 +51,37 @@ def dashboard(
     counts = {"pending": 0, "generated": 0, "sent": 0, "failed": 0, "held": 0}
     for group in groups:
         name = group.display_name or group.wechat_group_name
-        run = store.load_run(name, today)
+        run = store.load_run(name, selected_run_date)
         status = run.get("status", "PENDING")
-        image_path = store.image_path(name, today)
+        image_path = store.image_path(name, selected_run_date)
         image_url = ""
         if image_path.exists() and Path(image_path).stat().st_size > 0:
-            from urllib.parse import quote
-
-            image_url = f"/api/v2/files/{quote(name)}/{today}/{FILE_IMAGE}"
+            image_url = f"/api/v2/files/{quote(name)}/{selected_run_date}/{FILE_IMAGE}"
+        ranking_preview: list[dict[str, object]] = []
+        ranking_error = ""
+        ranking_path = store.ranking_json_path(name, selected_run_date)
+        if ranking_path.exists() and ranking_path.stat().st_size > 0:
+            try:
+                ranking = json.loads(ranking_path.read_text(encoding="utf-8"))
+                speakers = ranking.get("top_speakers", []) if isinstance(ranking, dict) else []
+                if not isinstance(speakers, list):
+                    raise ValueError("top_speakers 不是数组")
+                for index, item in enumerate(speakers[:5], start=1):
+                    if not isinstance(item, dict):
+                        continue
+                    speaker_name = str(item.get("name") or "").strip()
+                    count = item.get("count")
+                    if not speaker_name or not isinstance(count, (int, float)):
+                        continue
+                    ranking_preview.append(
+                        {
+                            "rank": int(item.get("rank") or index),
+                            "name": speaker_name,
+                            "count": int(count),
+                        }
+                    )
+            except (OSError, UnicodeError, json.JSONDecodeError, ValueError, TypeError) as exc:
+                ranking_error = f"排行榜预览不可用：{exc}"
         cards.append(
             {
                 "group_id": group.id,
@@ -71,6 +100,8 @@ def dashboard(
                 "message_count": run.get("message_count", 0),
                 "speaker_count": run.get("speaker_count", 0),
                 "image_url": image_url,
+                "ranking_preview": ranking_preview,
+                "ranking_error": ranking_error,
                 "error": (
                     run.get("error")
                     or run.get("image_error")
@@ -101,7 +132,7 @@ def dashboard(
 
     upcoming = []
     for card in cards:
-        if card["status"] not in ("IMAGE_READY", "READY_TO_SEND"):
+        if selected_date != now.date() or card["status"] not in ("IMAGE_READY", "READY_TO_SEND"):
             continue
         if card["sent_at"]:
             continue
@@ -124,7 +155,8 @@ def dashboard(
         next_send = f"{earliest.strftime('%H:%M')}（{name}）"
 
     return {
-        "today": today,
+        "today": selected_run_date,
+        "run_date": selected_run_date,
         "should_run": window.should_run,
         "period_start": window.period_start_str(),
         "period_end": window.period_end_str(),

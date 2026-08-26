@@ -73,6 +73,11 @@ def test_public_catalog_has_three_modes_and_22_stable_presets():
     assert len(options) == 25
     assert options[0]["label"] == "AI 自由发挥"
     assert options[1]["variation_count"] == 352
+    assert all(not item["preview_url"] for item in options[:3])
+    assert all(
+        item["preview_url"] == f"/assets/image-theme-previews/{item['key']}.webp"
+        for item in options[3:]
+    )
 
 
 def test_every_family_has_16_variations_valid_swatches_and_safe_visual_language():

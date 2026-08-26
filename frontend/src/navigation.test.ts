@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 
-import { navigateToHash, routeFromLocation } from "./navigation";
+import { NAVIGATION, navigateToHash, routeFromLocation } from "./navigation";
 
 describe("hash navigation", () => {
   beforeEach(() => {
@@ -30,5 +30,15 @@ describe("hash navigation", () => {
 
     navigateToHash("/images");
     expect(window.location.hash).toBe("#/images");
+  });
+
+  it("keeps the product navigation in the requested order", () => {
+    expect(NAVIGATION.map((item) => item.label)).toEqual([
+      "总览",
+      "当日群报",
+      "群聊与任务",
+      "记录与归档",
+      "设置中心",
+    ]);
   });
 });

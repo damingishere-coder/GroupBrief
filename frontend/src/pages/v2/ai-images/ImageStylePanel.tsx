@@ -91,36 +91,6 @@ export function ImageStylePanel({
     };
   }, [defaultGroupId, defaultReloadVersion, toast]);
 
-  useEffect(() => {
-    if (defaultTheme !== "custom") return;
-    const custom = defaultCustom.trim();
-    if (!custom) {
-      setDefaultThemeText("");
-      setDefaultThemeError("");
-      return;
-    }
-    let cancelled = false;
-    const timer = window.setTimeout(() => {
-      resolveImageTheme({
-        image_theme: "custom",
-        image_theme_custom: custom,
-        group_id: defaultGroupId ?? undefined,
-      }).then((resolved) => {
-        if (cancelled) return;
-        setDefaultThemeText(resolved.theme_text);
-        setDefaultThemeError("");
-      }).catch((reason: unknown) => {
-        if (cancelled) return;
-        setDefaultThemeText("");
-        setDefaultThemeError(`指定风格预览失败：${String(reason)}`);
-      });
-    }, 250);
-    return () => {
-      cancelled = true;
-      window.clearTimeout(timer);
-    };
-  }, [defaultCustom, defaultGroupId, defaultTheme]);
-
   const selectedDefaultGroup = groups.find((group) => group.id === defaultGroupId);
   const savedDefaultTheme = defaultConfig?.image_theme || "ai_free";
   const savedDefaultCustom = defaultConfig?.image_theme === "custom"
@@ -137,19 +107,16 @@ export function ImageStylePanel({
     [defaultConfig?.content, defaultPreviewTheme, globalDefaultPrompt, selectedDefaultGroup],
   );
 
-  const applyDefaultTheme = async (key: string) => {
+  const applyDefaultTheme = async (key: string, custom = "") => {
     defaultStyleTouchedRef.current = true;
     setDefaultStyleTouched(true);
     setDefaultTheme(key);
+    setDefaultCustom(key === "custom" ? custom : "");
     setDefaultThemeError("");
-    if (key === "custom") {
-      setDefaultThemeText("");
-      return;
-    }
-    setDefaultCustom("");
     try {
       const resolved = await resolveImageTheme({
         image_theme: key,
+        image_theme_custom: key === "custom" ? custom : "",
         group_id: defaultGroupId ?? undefined,
       });
       setDefaultThemeText(resolved.theme_text);
@@ -195,21 +162,13 @@ export function ImageStylePanel({
           <ImageThemePicker
             themes={themes}
             value={defaultTheme}
-            onChange={(key) => { void applyDefaultTheme(key); }}
+            customValue={defaultCustom}
+            onConfirm={(key, custom) => applyDefaultTheme(key, custom)}
             label="风格模式"
             loading={catalogLoading}
             error={themesError}
             disabled={defaultSaving}
           />
-          {defaultTheme === "custom" && <label className="ai-images-theme-custom-field">
-            <span><b>指定风格描述</b><small>{defaultCustom.length} / 80</small></span>
-            <input maxLength={80} value={defaultCustom} placeholder="例如：低饱和黏土摄影、宋代工笔设色" onChange={(event) => {
-              defaultStyleTouchedRef.current = true;
-              setDefaultStyleTouched(true);
-              setDefaultThemeText("");
-              setDefaultCustom(event.target.value);
-            }} />
-          </label>}
           <div className="ai-images-prompt-preview ai-images-default-preview">
             <span>生成时使用的 Prompt 预览</span>
             <pre aria-live="polite">{defaultPreview || "Prompt 预览暂不可用"}</pre>

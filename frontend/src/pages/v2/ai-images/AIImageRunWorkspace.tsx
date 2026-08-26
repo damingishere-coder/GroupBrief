@@ -21,6 +21,7 @@ import {
 } from "../../../components/common";
 import { ImageThemePicker } from "../../../components/ImageThemePicker";
 import { copyText } from "../../../components/ui";
+import { ContentSwap } from "../../../components/motion";
 import { formatDateTime, REGEN_LABELS, runKey, STATUS_LABELS, StatusPill } from "./model";
 import type { ToastFn } from "./useAIImageCatalogs";
 import type { AIImageRunsModel } from "./useAIImageRuns";
@@ -56,7 +57,6 @@ export function AIImageRunWorkspace({
     setRunDraft,
     runTheme,
     runCustom,
-    setRunCustom,
     detailLoading,
     runSaving,
     rebuildingPrompt,
@@ -105,7 +105,8 @@ export function AIImageRunWorkspace({
         </section>
 
         <section className="ai-images-detail-panel">
-          {detailLoading ? <LoadingState label="正在读取真实 Prompt 与图片…" /> : detailError && !detail ? <EmptyState title="运行详情加载失败" description={detailError} action={<Button tone="secondary" onClick={() => setDetailReloadVersion((current) => current + 1)}>重试</Button>} /> : !detail ? <EmptyState title="请选择运行记录" description="从左侧选择一条记录。" /> : (
+          <ContentSwap swapKey={detailLoading ? "loading" : detail ? selectedKey : "empty"}>
+            {detailLoading ? <LoadingState label="正在读取真实 Prompt 与图片…" /> : detailError && !detail ? <EmptyState title="运行详情加载失败" description={detailError} action={<Button tone="secondary" onClick={() => setDetailReloadVersion((current) => current + 1)}>重试</Button>} /> : !detail ? <EmptyState title="请选择运行记录" description="从左侧选择一条记录。" /> : (
             <>
               <div className="ai-images-detail-head"><div><span className="ai-images-eyebrow">当天真实运行</span><h2>{detail.run.group_name} · {detail.run.run_date}</h2><p><StatusPill status={detail.run.status} /> · 更新 {formatDateTime(detail.run.updated_at)}</p></div></div>
               <div className={`ai-images-regen-state ${regenStatus}`}><strong>{REGEN_LABELS[regenStatus] || regenStatus}</strong><span>{String(detail.run.image_regen_error || detail.run.image_regen_detail || "messages.json 已按运行日期保存；重建 Prompt 和重新生图都不会再次读取微信，也不会自动发送。")}</span></div>
@@ -120,8 +121,7 @@ export function AIImageRunWorkspace({
                 </article>)}</div>
               </section>}
               {runPrompt && <div className="ai-images-run-theme-row">
-                <ImageThemePicker themes={themes} value={runTheme} onChange={(key) => { void applyRunTheme(key); }} label="替换当天大主题" loading={catalogLoading} error={themesError} disabled={runSaving} />
-                {runTheme === "custom" && <label><span>自定义主题</span><input maxLength={80} value={runCustom} onChange={(event) => { const value = event.target.value; setRunCustom(value); if (value.trim()) void applyRunTheme("custom", value); }} /></label>}
+                <ImageThemePicker themes={themes} value={runTheme} customValue={runCustom} onConfirm={(key, custom) => applyRunTheme(key, custom)} label="替换当天大主题" loading={catalogLoading} error={themesError} disabled={runSaving} />
               </div>}
               <div className="ai-images-asset-grid">
                 <div className="ai-images-preview-card"><div className="ai-images-content-heading"><h3>日报图片</h3><span>daily_image.png</span></div>{detail.files.includes("daily_image.png") && !imageLoadError ? <ImagePreviewTrigger src={currentImageSrc} alt="真实日报图片" imageClassName="ai-images-real-image" className="ai-images-real-image-trigger" onError={() => { setImageLoadError(true); setImageViewerOpen(false); }} onOpen={() => setImageViewerOpen(true)} /> : <EmptyState title="尚无可读图片" description="重新生图失败时会保留旧图；没有旧图时这里保持为空。" />}</div>
@@ -139,7 +139,8 @@ export function AIImageRunWorkspace({
               {regenStatus === "ready_for_review" && <div className="ai-images-review-actions"><WarningCircle size={18} /><span>请先检查新图。只有再次确认后才会发送文字和图片。</span><Button tone="primary" onClick={() => setSendConfirmOpen(true)}><PaperPlaneTilt size={17} />发送 / 重新发送</Button></div>}
               {detail.run.error && <div className="ai-images-run-error">主任务错误：{String(detail.run.error)}</div>}
             </>
-          )}
+            )}
+          </ContentSwap>
         </section>
       </div>
 

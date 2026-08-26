@@ -21,6 +21,8 @@ import {
 } from "../../components/common";
 import { useToast } from "../../components/ui";
 import { TemplateEditor } from "./Templates";
+import { shanghaiDateInputValue } from "../../date";
+import { ContentSwap } from "../../components/motion";
 
 const STATUS_LABELS: Record<string, string> = {
   PENDING: "待生成",
@@ -128,7 +130,7 @@ function formatDateTime(value: unknown): string {
 export default function Ranking() {
   const { msg, toast } = useToast();
   const [runs, setRuns] = useState<V2Run[]>([]);
-  const [dateFilter, setDateFilter] = useState("");
+  const [dateFilter, setDateFilter] = useState(shanghaiDateInputValue);
   const [groupFilter, setGroupFilter] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
   const [selectedKey, setSelectedKey] = useState("");
@@ -255,7 +257,8 @@ export default function Ranking() {
         </section>
 
         <section className="ranking-detail-panel" aria-label="排行榜运行详情">
-          {detailLoading ? <LoadingState label="正在读取排行榜产物…" /> : !detail ? <EmptyState title="请选择运行记录" description="从左侧选择一条运行记录，读取真实 ranking.json 与 ranking.txt。" /> : (
+          <ContentSwap swapKey={detailLoading ? "loading" : detail ? selectedKey : "empty"}>
+            {detailLoading ? <LoadingState label="正在读取排行榜产物…" /> : !detail ? <EmptyState title="请选择运行记录" description="从左侧选择一条运行记录，读取真实 ranking.json 与 ranking.txt。" /> : (
             <>
               <div className="ranking-detail-head">
                 <div><span className="ranking-eyebrow">真实运行产物</span><h2>{detail.run.group_name} · {detail.run.run_date}</h2><p>状态 <StatusPill status={detail.run.status} /> · 更新时间 {formatDateTime(detail.run.updated_at)}</p></div>
@@ -272,7 +275,8 @@ export default function Ranking() {
               </div>
               {detail.run.error && <div className="ranking-run-error">任务错误：{String(detail.run.error)}</div>}
             </>
-          )}
+            )}
+          </ContentSwap>
         </section>
       </div>
 

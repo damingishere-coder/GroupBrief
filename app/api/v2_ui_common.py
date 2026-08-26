@@ -48,6 +48,13 @@ class ResolveSendUnknownBody(BaseModel):
     expected_send_unknown_at: str = Field(min_length=10, max_length=80)
 
 
+class ResolveManualSendBody(BaseModel):
+    group_id: int
+    run_date: str
+    resolution: Literal["all_sent", "text_sent", "not_sent"]
+    expected_updated_at: str = Field(min_length=10, max_length=80)
+
+
 class ImageThemeResolveBody(BaseModel):
     image_theme: str
     image_theme_custom: str = ""

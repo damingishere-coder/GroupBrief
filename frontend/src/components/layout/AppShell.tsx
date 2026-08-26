@@ -8,6 +8,7 @@ import {
 } from "@phosphor-icons/react";
 import { useEffect, useState, type ReactNode } from "react";
 import { NAVIGATION, type PageKey } from "../../navigation";
+import { m } from "../motion";
 
 interface AppShellProps {
   activePage: PageKey;
@@ -63,6 +64,7 @@ export default function AppShell({ activePage, onNavigate, children }: AppShellP
                     aria-current={parentActive && !children ? "page" : undefined}
                     onClick={() => onNavigate(key)}
                   >
+                    {parentActive && <m.span className="app-nav-active-indicator" layoutId="app-nav-active-indicator" aria-hidden="true" />}
                     <NavIcon size={21} weight={parentActive ? "fill" : "regular"} />
                     <span>{label}</span>
                   </button>

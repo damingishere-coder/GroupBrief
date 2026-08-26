@@ -9,6 +9,7 @@ from app.api.v2_ui_common import (
     ImageThemeResolveBody,
     PipelineGenerateBody,
     PipelineSendBody,
+    ResolveManualSendBody,
     ResolveSendUnknownBody,
     RetryBody,
     RunPromptUpdateBody,
@@ -355,6 +356,25 @@ def pipeline_resolve_send_unknown(body: ResolveSendUnknownBody):
         body.run_date,
         resolution=body.resolution,
         expected_send_unknown_at=body.expected_send_unknown_at,
+    )
+    if result.get("status") == "conflict":
+        raise HTTPException(status_code=409, detail=result)
+    if result.get("status") == "failed":
+        raise HTTPException(status_code=400, detail=result)
+    return {"result": result}
+
+
+@router.post("/pipeline/resolve-manual-send")
+def pipeline_resolve_manual_send(body: ResolveManualSendBody):
+    """记录人工核对结论；该接口不会调用微信 Sender。"""
+    from app.pipeline.daily_pipeline import DailyPipeline
+
+    _validate_run_date(body.run_date)
+    result = DailyPipeline(dry_run=False).resolve_manual_send(
+        body.group_id,
+        body.run_date,
+        resolution=body.resolution,
+        expected_updated_at=body.expected_updated_at,
     )
     if result.get("status") == "conflict":
         raise HTTPException(status_code=409, detail=result)

@@ -22,6 +22,7 @@ import {
 } from "../../api";
 import { Button, EmptyState, LoadingState, PageHeader, StatusBadge, Toast } from "../../components/common";
 import { useToast } from "../../components/ui";
+import { ContentSwap, m } from "../../components/motion";
 
 type SettingsTab = "settings" | "health" | "startup" | "recovery";
 
@@ -311,13 +312,14 @@ export default function Settings() {
       <div className="settings-secret-banner" id="settings-secret-note"><Key size={19} /><span>API Key、Token、密码等敏感值只显示掩码；留空或保持 <code>******</code> 不会修改现有密钥。</span></div>
 
       <div className="settings-tabs" role="tablist" aria-label="设置中心区域">
-        <button type="button" role="tab" aria-selected={tab === "settings"} className={`settings-tab ${tab === "settings" ? "is-active" : ""}`} onClick={() => setTab("settings")}><GearSix size={17} />运行设置</button>
-        <button type="button" role="tab" aria-selected={tab === "health"} className={`settings-tab ${tab === "health" ? "is-active" : ""}`} onClick={() => setTab("health")}><Heartbeat size={17} />系统健康</button>
-        <button type="button" role="tab" aria-selected={tab === "startup"} className={`settings-tab ${tab === "startup" ? "is-active" : ""}`} onClick={() => setTab("startup")}><PlugsConnected size={17} />启动检查</button>
-        <button type="button" role="tab" aria-selected={tab === "recovery"} className={`settings-tab ${tab === "recovery" ? "is-active" : ""}`} onClick={() => setTab("recovery")}><WarningCircle size={17} />恢复信息</button>
+        <button type="button" role="tab" aria-selected={tab === "settings"} className={`settings-tab ${tab === "settings" ? "is-active" : ""}`} onClick={() => setTab("settings")}>{tab === "settings" && <m.span className="settings-tab-indicator" layoutId="settings-tab-indicator" />}<GearSix size={17} />运行设置</button>
+        <button type="button" role="tab" aria-selected={tab === "health"} className={`settings-tab ${tab === "health" ? "is-active" : ""}`} onClick={() => setTab("health")}>{tab === "health" && <m.span className="settings-tab-indicator" layoutId="settings-tab-indicator" />}<Heartbeat size={17} />系统健康</button>
+        <button type="button" role="tab" aria-selected={tab === "startup"} className={`settings-tab ${tab === "startup" ? "is-active" : ""}`} onClick={() => setTab("startup")}>{tab === "startup" && <m.span className="settings-tab-indicator" layoutId="settings-tab-indicator" />}<PlugsConnected size={17} />启动检查</button>
+        <button type="button" role="tab" aria-selected={tab === "recovery"} className={`settings-tab ${tab === "recovery" ? "is-active" : ""}`} onClick={() => setTab("recovery")}>{tab === "recovery" && <m.span className="settings-tab-indicator" layoutId="settings-tab-indicator" />}<WarningCircle size={17} />恢复信息</button>
       </div>
 
-      {tab === "settings" && (
+      <ContentSwap swapKey={tab}>
+        {tab === "settings" && (
         <section className="settings-form-area" aria-label="运行设置">
           {settingsError && <div className="settings-error" role="alert"><WarningCircle size={18} />{settingsError}</div>}
           {settingsLoading && <LoadingState label="正在读取真实设置…" />}
@@ -337,6 +339,7 @@ export default function Settings() {
       {tab === "health" && <section className="settings-diagnostic-panel card" aria-label="系统健康"><div className="settings-panel-head"><div><h2>系统健康</h2><p>状态来自本地 `/api/v2/system/health`，不可用依赖保持真实阻塞状态。</p></div><Button tone="secondary" onClick={() => void loadDiagnostics()} busy={diagnosticsLoading}>重新检测</Button></div><HealthPanel health={health} loading={diagnosticsLoading} error={healthError} /></section>}
       {tab === "startup" && <section className="settings-diagnostic-panel card" aria-label="启动检查"><div className="settings-panel-head"><div><h2>启动检查</h2><p>展示服务启动时的真实检查结果，不在浏览器端安装或修改自启动。</p></div><Button tone="secondary" onClick={() => void loadDiagnostics()} busy={diagnosticsLoading}>重新读取</Button></div><StartupPanel checks={startup} loading={diagnosticsLoading} error={startupError} /></section>}
       {tab === "recovery" && <section className="settings-diagnostic-panel card" aria-label="恢复信息"><div className="settings-panel-head"><div><h2>恢复信息</h2><p>只读展示后端扫描到的未完成任务与输出完整性。</p></div><Button tone="secondary" onClick={() => void loadDiagnostics()} busy={diagnosticsLoading}>重新读取</Button></div><RecoveryPanel recovery={recovery} loading={diagnosticsLoading} error={recoveryError} /></section>}
+      </ContentSwap>
 
       <Toast message={msg} />
     </div>

@@ -45,7 +45,16 @@ async function installFakeApi(page: Page) {
       }]);
     }
     if (path === "/api/v2/image-themes") {
-      return json(route, { themes: [{ key: "ai_free", label: "AI 自由发挥", description: "", kind: "mode", category: "mode", swatches: [], variation_count: 1 }] });
+      return json(route, { themes: [
+        { key: "ai_free", label: "AI 自由发挥", description: "不注入预设风格", kind: "mode", category: "模式", swatches: [], variation_count: 1, preview_url: "" },
+        { key: "random_preset", label: "每日随机", description: "每天稳定随机", kind: "mode", category: "模式", swatches: [], variation_count: 352, preview_url: "" },
+        { key: "custom", label: "指定风格", description: "自定义描述", kind: "mode", category: "模式", swatches: [], variation_count: 1, preview_url: "" },
+        { key: "paper_cut_layered", label: "分层纸艺插画", description: "纤维纸与柔和投影", kind: "preset", category: "立体与手作", swatches: ["#63B3ED", "#F6C453", "#E34D3B"], variation_count: 16, preview_url: "/assets/image-theme-previews/paper_cut_layered.webp" },
+      ] });
+    }
+    if (path === "/api/v2/image-themes/resolve") {
+      const body = request.postDataJSON() as { image_theme?: string; image_theme_custom?: string };
+      return json(route, { requested_key: body.image_theme, display_name: body.image_theme === "custom" ? body.image_theme_custom : "分层纸艺插画", theme_text: "测试风格约束", prompt: "测试 Prompt", style_signature: "test", style_seed: "test" });
     }
     if (path === "/api/v2/templates/image_prompt/default") {
       return json(route, { name: "default", content: "{{group_name}} {{image_theme}}" });
@@ -82,4 +91,44 @@ test("AI 图片工作台通过 Fake API 加载目录、运行与详情", async (
     "GET /api/v2/templates/image_prompt/default",
     "GET /api/v2/runs",
   ]));
+});
+
+test("风格中心保留草稿，取消不应用，确认后一次提交", async ({ page }) => {
+  const calls = await installFakeApi(page);
+  await page.goto("/#/images");
+
+  await page.getByRole("button", { name: /AI 自由发挥/ }).first().click();
+  const dialog = page.getByRole("dialog", { name: "风格中心" });
+  await expect(dialog.getByRole("tab")).toHaveCount(4);
+  await dialog.getByRole("tab", { name: "预设风格" }).click();
+  await dialog.getByRole("button", { name: /分层纸艺插画/ }).click();
+  await expect(dialog.getByRole("img", { name: /分层纸艺插画/ })).toBeVisible();
+  await dialog.getByRole("button", { name: "取消" }).click();
+  await expect(page.getByRole("button", { name: /AI 自由发挥/ }).first()).toBeVisible();
+
+  await page.getByRole("button", { name: /AI 自由发挥/ }).first().click();
+  await dialog.getByRole("tab", { name: "自定义描述" }).click();
+  await dialog.getByPlaceholder(/低饱和黏土摄影/).fill("低饱和黏土摄影");
+  await dialog.getByRole("button", { name: "使用这个风格" }).click();
+  await expect(page.getByRole("button", { name: /指定风格/ }).first()).toBeVisible();
+  expect(calls.filter((call) => call === "POST /api/v2/image-themes/resolve")).toHaveLength(1);
+});
+
+test("风格中心在窄屏保持可滚动且操作按钮可达", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await installFakeApi(page);
+  await page.goto("/#/images");
+
+  await page.getByRole("button", { name: /AI 自由发挥/ }).first().click();
+  const dialog = page.getByRole("dialog", { name: "风格中心" });
+  await dialog.getByRole("tab", { name: "预设风格" }).click();
+  await expect(dialog.getByRole("img", { name: /分层纸艺插画/ })).toBeVisible();
+  await expect(dialog.getByRole("button", { name: "取消" })).toBeVisible();
+  await expect(dialog.getByRole("button", { name: "使用这个风格" })).toBeVisible();
+
+  const box = await dialog.boundingBox();
+  expect(box).not.toBeNull();
+  expect(box!.x).toBeGreaterThanOrEqual(0);
+  expect(box!.width).toBeLessThanOrEqual(390);
+  expect(box!.height).toBeLessThanOrEqual(844);
 });

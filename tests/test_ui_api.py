@@ -77,7 +77,13 @@ def test_v2_image_theme_catalog_shape_and_order():
         assert sum(item["kind"] == "preset" for item in themes) == 22
         assert themes[3]["key"] == "silkscreen_editorial"
         assert themes[-1]["key"] == "mineral_pigment"
-        assert all(set(item) == {"key", "label", "description", "kind", "category", "swatches", "variation_count"} for item in themes)
+        assert all(
+            set(item)
+            == {"key", "label", "description", "kind", "category", "swatches", "variation_count", "preview_url"}
+            for item in themes
+        )
+        assert themes[0]["preview_url"] == ""
+        assert themes[3]["preview_url"] == "/assets/image-theme-previews/silkscreen_editorial.webp"
 
 
 @pytest.mark.parametrize("bad_date", ["2026-02-30", "2026-8-18", "not-a-date"])

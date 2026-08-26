@@ -33,9 +33,12 @@ from app.v2.constants import (
     FILE_RANKING_JSON,
     FILE_RANKING_TXT,
     FILE_RUN,
+    IMAGE_READY,
     PENDING,
     PROMPT_READY,
+    READY_TO_SEND,
     RUN_STATE_CORRUPT,
+    SENT,
     STATUS_FLOW,
 )
 
@@ -673,6 +676,134 @@ class RunStore:
                     text_sent_at="",
                     text_verification_level="",
                     verification_level="",
+                )
+            return True, self.save_run(group_name, run_date, data), "resolved"
+
+    def resolve_manual_send(
+        self,
+        group_name: str,
+        run_date: str,
+        *,
+        resolution: str,
+        expected_updated_at: str,
+        image_required: bool,
+        now: datetime,
+    ) -> tuple[bool, dict, str]:
+        """用 run.updated_at 做 CAS 写入人工发送结论；绝不执行外部发送。"""
+        path = self.run_path(group_name, run_date)
+        with _run_mutex(path):
+            data = self.load_run(group_name, run_date)
+            if self._is_corrupt(data):
+                return False, data, "state_corrupt"
+            if str(data.get("updated_at") or "") != expected_updated_at:
+                return False, data, "stale"
+            if data.get("status") not in {IMAGE_READY, READY_TO_SEND}:
+                return False, data, "not_resolvable"
+            if not data.get("send_hold"):
+                return False, data, "not_held"
+            if resolution not in {"all_sent", "text_sent", "not_sent"}:
+                return False, data, "invalid_resolution"
+
+            ranking_path = self.ranking_txt_path(group_name, run_date)
+            if resolution in {"all_sent", "text_sent"} and (
+                not ranking_path.exists() or ranking_path.stat().st_size <= 0
+            ):
+                return False, data, "ranking_missing"
+            image_path = self.image_path(group_name, run_date)
+            if resolution == "all_sent" and image_required and (
+                not image_path.exists() or image_path.stat().st_size <= 0
+            ):
+                return False, data, "image_missing"
+
+            resolved_at = now.isoformat()
+            history = list(data.get("send_resolution_history") or [])
+            history.append(
+                {
+                    "stage": "all" if resolution == "all_sent" else "text" if resolution == "text_sent" else "none",
+                    "resolution": resolution,
+                    "expected_updated_at": expected_updated_at,
+                    "resolved_at": resolved_at,
+                    "previous_send_state": str(data.get("send_state") or ""),
+                    "previous_send_hold_reason": str(data.get("send_hold_reason") or ""),
+                    "previous_send_error": str(data.get("send_error") or data.get("error") or ""),
+                }
+            )
+            common = {
+                "send_state": "sent" if resolution == "all_sent" else "ready",
+                "send_hold": False,
+                "send_hold_reason": "",
+                "send_error": "",
+                "send_error_type": "",
+                "send_unknown_at": "",
+                "send_unknown_stage": "",
+                "send_claim_id": "",
+                "send_claimed_at": "",
+                "send_claim_expires_at": "",
+                "send_resolution_history": history[-20:],
+                "send_last_resolution": resolution,
+                "send_last_resolved_at": resolved_at,
+                "manual_send_resolution": resolution,
+                "manual_send_resolved_at": resolved_at,
+            }
+            if str(data.get("error_type") or "") == "SEND_RESULT_UNKNOWN":
+                common.update(error="", error_type="", failed_stage="")
+
+            if resolution == "all_sent":
+                data.update(
+                    **common,
+                    status=SENT,
+                    sent_at=resolved_at,
+                    text_attempt_finished_at=resolved_at,
+                    text_submitted_at=str(data.get("text_submitted_at") or resolved_at),
+                    text_verified_at=resolved_at,
+                    text_sent_at=str(data.get("text_sent_at") or resolved_at),
+                    text_verification_level="manual_user_confirmed",
+                    image_attempt_finished_at=resolved_at if image_required else str(data.get("image_attempt_finished_at") or ""),
+                    image_submitted_at=str(data.get("image_submitted_at") or resolved_at) if image_required else "",
+                    image_verified_at=resolved_at if image_required else "",
+                    image_sent_at=str(data.get("image_sent_at") or resolved_at) if image_required else "",
+                    image_verification_level="manual_user_confirmed" if image_required else "",
+                    verification_level="manual_user_confirmed",
+                    needs_manual_send=False,
+                )
+            elif resolution == "text_sent":
+                data.update(
+                    **common,
+                    status=READY_TO_SEND,
+                    sent_at="",
+                    text_attempt_finished_at=resolved_at,
+                    text_submitted_at=str(data.get("text_submitted_at") or resolved_at),
+                    text_verified_at=resolved_at,
+                    text_sent_at=str(data.get("text_sent_at") or resolved_at),
+                    text_verification_level="manual_user_confirmed",
+                    image_attempt_started_at="",
+                    image_attempt_finished_at="",
+                    image_submitted_at="",
+                    image_verified_at="",
+                    image_sent_at="",
+                    image_verification_level="",
+                    verification_level="manual_user_confirmed",
+                    needs_manual_send=True,
+                )
+            else:
+                data.update(
+                    **common,
+                    status=READY_TO_SEND,
+                    sent_at="",
+                    text_attempt_started_at="",
+                    text_attempt_finished_at="",
+                    text_submitted_at="",
+                    text_verified_at="",
+                    text_sent_at="",
+                    text_verification_level="",
+                    image_attempt_started_at="",
+                    image_attempt_finished_at="",
+                    image_submitted_at="",
+                    image_verified_at="",
+                    image_sent_at="",
+                    image_verification_level="",
+                    verification_level="",
+                    needs_manual_send=True,
                 )
             return True, self.save_run(group_name, run_date, data), "resolved"
 

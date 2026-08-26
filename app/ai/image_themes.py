@@ -403,6 +403,11 @@ def _public_option(definition: ImageThemeDefinition) -> dict[str, object]:
         "category": definition.category,
         "swatches": list(definition.swatches),
         "variation_count": definition.variation_count,
+        "preview_url": (
+            f"/assets/image-theme-previews/{definition.key}.webp"
+            if definition.kind == "preset"
+            else ""
+        ),
     }
 
 

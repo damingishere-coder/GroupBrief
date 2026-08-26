@@ -565,6 +565,67 @@ class DailyPipeline:
             "detail": "已记录人工核对结论；本次操作没有发送任何微信内容",
         }
 
+    def resolve_manual_send(
+        self,
+        group_id: int,
+        run_date: str,
+        *,
+        resolution: str,
+        expected_updated_at: str,
+    ) -> dict:
+        """人工核对整单发送状态；只更新 run.json，不调用微信 Sender。"""
+        parsed_run_date = parse_date(run_date)
+        if parsed_run_date is None:
+            return {
+                "status": "failed",
+                "error_type": "INVALID_RUN_DATE",
+                "detail": "run_date 必须是有效的 YYYY-MM-DD 日期",
+            }
+        group = self._get_group(group_id)
+        if group is None:
+            return {
+                "status": "failed",
+                "error_type": "GROUP_NOT_FOUND",
+                "detail": f"群不存在 {group_id}",
+            }
+        run_date = parsed_run_date.isoformat()
+        group_name = self._group_name(group)
+        resolved, run, reason = self.store.resolve_manual_send(
+            group_name,
+            run_date,
+            resolution=resolution,
+            expected_updated_at=expected_updated_at,
+            image_required=bool(group.image_enabled),
+            now=datetime.now(ZoneInfo(self.settings.app_timezone)),
+        )
+        if not resolved:
+            messages = {
+                "state_corrupt": "运行状态损坏，禁止人工覆盖",
+                "stale": "任务状态已变化，请刷新后重新核对",
+                "not_resolvable": "当前任务状态不能进行人工发送核对",
+                "not_held": "当前任务并未暂停待核对，请刷新后确认",
+                "invalid_resolution": "人工核对结论无效",
+                "ranking_missing": "排行榜文案不存在或为空，不能确认已发送",
+                "image_missing": "日报图片不存在或为空，不能确认文字和图片均已发送",
+            }
+            return {
+                "group_name": group_name,
+                "status": "conflict",
+                "error_type": "MANUAL_SEND_RESOLUTION_CONFLICT",
+                "detail": messages.get(reason, "当前发送状态无法人工处理"),
+                "reason": reason,
+            }
+        return {
+            "group_name": group_name,
+            "status": "resolved",
+            "resolution": resolution,
+            "next_stage": "complete" if resolution == "all_sent" else "image" if resolution == "text_sent" and bool(group.image_enabled) else "text",
+            "send_state": run.get("send_state"),
+            "run_status": run.get("status"),
+            "updated_at": run.get("updated_at"),
+            "detail": "已写入人工核对结论；本次操作没有调用微信发送器",
+        }
+
     def force_generate(
         self,
         group_id: int,

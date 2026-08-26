@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 from types import SimpleNamespace
 
 from fastapi import FastAPI
@@ -34,6 +35,7 @@ EXPECTED_V2_UI_OPERATIONS = {
     ("POST", "/api/v2/pipeline/send-due", "pipeline_send_due_api_v2_pipeline_send_due_post"),
     ("POST", "/api/v2/pipeline/send", "pipeline_send_api_v2_pipeline_send_post"),
     ("POST", "/api/v2/pipeline/resolve-send-unknown", "pipeline_resolve_send_unknown_api_v2_pipeline_resolve_send_unknown_post"),
+    ("POST", "/api/v2/pipeline/resolve-manual-send", "pipeline_resolve_manual_send_api_v2_pipeline_resolve_manual_send_post"),
 }
 
 
@@ -91,6 +93,9 @@ def test_dashboard_counts_send_unknown_as_held_and_surfaces_send_error(
         def image_path(self, _group_name, _run_date):
             return Path(tmp_path) / "missing.png"
 
+        def ranking_json_path(self, _group_name, _run_date):
+            return Path(tmp_path) / "missing-ranking.json"
+
     monkeypatch.setattr(v2_ui_read, "_store", lambda _settings: FakeStore())
     monkeypatch.setattr(
         v2_ui_read.repo,
@@ -112,3 +117,66 @@ def test_dashboard_counts_send_unknown_as_held_and_surfaces_send_error(
     }
     assert result["cards"][0]["error"] == "文字已提交但 UI 验证结果未知"
     assert result["cards"][0]["send_error_type"] == "SEND_RESULT_UNKNOWN"
+
+
+def test_dashboard_accepts_run_date_and_returns_top_five_ranking_preview(
+    tmp_path, monkeypatch
+) -> None:
+    group = SimpleNamespace(
+        id=8,
+        display_name="排行测试群",
+        wechat_group_name="排行测试群",
+        send_time="08:30",
+        schedule_rule="daily",
+        image_enabled=False,
+        wechat_send_enabled=False,
+        ranking_template="",
+        image_prompt_template="",
+    )
+    ranking_path = Path(tmp_path) / "ranking.json"
+    ranking_path.write_text(
+        json.dumps(
+            {
+                "top_speakers": [
+                    {"rank": index, "name": f"成员{index}", "count": 20 - index}
+                    for index in range(1, 8)
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    class FakeStore:
+        def load_run(self, _group_name, run_date):
+            assert run_date == "2026-08-25"
+            return {
+                "status": "RANKING_READY",
+                "period_start": "2026-08-25 00:00:00",
+                "period_end": "2026-08-25 23:59:59",
+                "message_count": 99,
+                "speaker_count": 7,
+            }
+
+        def image_path(self, _group_name, _run_date):
+            return Path(tmp_path) / "missing.png"
+
+        def ranking_json_path(self, _group_name, _run_date):
+            return ranking_path
+
+    monkeypatch.setattr(v2_ui_read, "_store", lambda _settings: FakeStore())
+    monkeypatch.setattr(v2_ui_read.repo, "list_groups", lambda *_args, **_kwargs: [group])
+
+    result = v2_ui_read.dashboard(
+        session=object(),
+        settings=Settings(_env_file=None, output_dir=tmp_path),
+        run_date="2026-08-25",
+    )
+
+    assert result["today"] == result["run_date"] == "2026-08-25"
+    assert len(result["cards"][0]["ranking_preview"]) == 5
+    assert result["cards"][0]["ranking_preview"][0] == {
+        "rank": 1,
+        "name": "成员1",
+        "count": 19,
+    }

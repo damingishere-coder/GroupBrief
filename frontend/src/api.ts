@@ -124,6 +124,8 @@ export interface DashboardCard {
   message_count: number;
   speaker_count: number;
   image_url: string;
+  ranking_preview: { rank: number; name: string; count: number }[];
+  ranking_error: string;
   error: string;
   sent_at: string;
   wechat_send_enabled: boolean;
@@ -228,6 +230,7 @@ export interface ImageThemeOption {
   category: string;
   swatches: string[];
   variation_count: number;
+  preview_url: string;
 }
 
 export interface ResolvedImageTheme {
@@ -367,7 +370,8 @@ export const deleteGroup = (groupId: number) => del<{ ok: boolean; deleted_at: s
 export const restoreGroup = (groupId: number) =>
   post<{ ok: boolean; id: number; enabled: boolean; wechat_send_enabled: boolean }>(`/groups/${groupId}/restore`);
 
-export const getDashboard = () => get<Dashboard>("/v2/dashboard");
+export const getDashboard = (runDate?: string) =>
+  get<Dashboard>(`/v2/dashboard${runDate ? `?run_date=${encodeURIComponent(runDate)}` : ""}`);
 export const getArchiveGroups = () => get<ArchiveGroupsResponse>("/v2/archive/groups");
 export const getRuns = (runDate?: string, options?: { includeFiles?: boolean }) => {
   const params = new URLSearchParams();
@@ -394,6 +398,8 @@ export const pipelineSend = (body: { group_id: number; run_date?: string; confir
   post<{ result: { status: string; group_name?: string; error_type?: string; error?: string; detail?: string } }>("/v2/pipeline/send", body);
 export const resolveSendUnknown = (body: { group_id: number; run_date: string; resolution: "text_sent" | "not_sent"; expected_send_unknown_at: string }) =>
   post<{ result: { status: string; group_name: string; resolution: string; next_stage: string; detail: string } }>("/v2/pipeline/resolve-send-unknown", body);
+export const resolveManualSend = (body: { group_id: number; run_date: string; resolution: "all_sent" | "text_sent" | "not_sent"; expected_updated_at: string }) =>
+  post<{ result: { status: string; group_name: string; resolution: string; next_stage: string; detail: string; run_status: string; updated_at: string } }>("/v2/pipeline/resolve-manual-send", body);
 export const getV2File = (group: string, date: string, file: string) =>
   `/api/v2/files/${encodeURIComponent(group)}/${date}/${file}`;
 
