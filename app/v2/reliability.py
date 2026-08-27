@@ -225,11 +225,17 @@ def enrich_run_state(
             next_retry_at="",
         )
     elif failure_is_retryable(result) and attempts < budget:
+        previous_next_retry_at = str(previous.get("next_retry_at") or "")
+        next_retry_at = (
+            previous_next_retry_at
+            if fingerprint == previous_fingerprint and previous_next_retry_at
+            else (now + timedelta(seconds=retry_delay_seconds(attempts))).isoformat()
+        )
         result.update(
             execution_state=EXECUTION_WAIT_RETRY,
             retryable=True,
             manual_hold=False,
-            next_retry_at=(now + timedelta(seconds=retry_delay_seconds(attempts))).isoformat(),
+            next_retry_at=next_retry_at,
         )
     else:
         result.update(

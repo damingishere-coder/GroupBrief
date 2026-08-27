@@ -52,6 +52,8 @@ def test_same_failure_snapshot_does_not_consume_retry_budget_twice():
 
     assert second["retry_attempt_count"] == 1
     assert second["last_failure_at"] == first["last_failure_at"]
+    assert second["next_retry_at"] == first["next_retry_at"]
+    assert retry_is_due(second, now=now + timedelta(seconds=60)) is True
 
 
 def test_same_failure_after_a_real_retry_consumes_next_budget_slot():

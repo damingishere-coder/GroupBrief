@@ -154,11 +154,16 @@ class DailyPipeline:
                 "image_prompt_override", "send_target",
             }
             groups = [
-                group.model_copy(
-                    update={
-                        key: value
-                        for key, value in group_overrides.get(int(group.id or 0), {}).items()
-                        if key in allowed_override_fields
+                Group.model_validate(
+                    {
+                        **group.model_dump(),
+                        **{
+                            key: value
+                            for key, value in group_overrides.get(
+                                int(group.id or 0), {}
+                            ).items()
+                            if key in allowed_override_fields
+                        },
                     }
                 )
                 for group in groups

@@ -7,6 +7,7 @@ import time
 from datetime import datetime
 
 import pytest
+from sqlmodel import Session, SQLModel, create_engine
 
 from app.ai.concurrency import bounded_slot
 from app.ai.prompt_builder_types import PromptOutput
@@ -230,6 +231,61 @@ def test_prompt_ready_group_starts_image_before_other_prompts_finish(tmp_path, m
     assert generator.maximum == 2
     assert [item["group_name"] for item in results] == ["慢群", "快群"]
     assert all(item["status"] == "ready_to_send" for item in results)
+
+
+def test_group_overrides_rebuild_loaded_group_with_live_sqlalchemy_state(tmp_path, monkeypatch):
+    engine = create_engine(
+        f"sqlite:///{tmp_path / 'group-overrides.db'}",
+        connect_args={"check_same_thread": False},
+    )
+    SQLModel.metadata.create_all(engine)
+    monkeypatch.setattr(repo, "engine", engine)
+    with Session(engine) as session:
+        group = repo.save_group(
+            session,
+            Group(
+                display_name="覆盖配置群",
+                wechat_group_id="override-group",
+                image_enabled=False,
+                image_theme="random_preset",
+            ),
+        )
+        group_id = int(group.id)
+
+    settings = Settings(
+        _env_file=None,
+        generation_group_concurrency=1,
+        wechat_fetch_concurrency=1,
+        ai_request_concurrency=1,
+    )
+    pipeline = DailyPipeline(
+        settings=settings,
+        data_source=DelayedSource(),
+        prompt_builder=DelayedPrompt(settings),
+        store=RunStore(tmp_path / "output"),
+        dry_run=True,
+    )
+
+    results = pipeline.generate_all(
+        run_date="2026-08-21",
+        group_overrides={
+            group_id: {
+                "image_enabled": False,
+                "image_theme": "ai_free",
+            }
+        },
+    )
+
+    assert results == [
+        {
+            "group_name": "覆盖配置群",
+            "status": "ready_to_send",
+            "detail": "未启用生图",
+        }
+    ]
+    run = pipeline.store.load_run("覆盖配置群", "2026-08-21")
+    assert run["image_enabled"] is False
+    assert run["image_theme"] == "ai_free"
 
 
 def test_unexpected_worker_and_image_errors_are_isolated(tmp_path, monkeypatch):
