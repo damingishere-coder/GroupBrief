@@ -82,6 +82,8 @@ def _readiness_client(tmp_path):
     api = FastAPI()
     api.include_router(system.router)
     api.state.startup_check_error = ""
+    api.state.startup_checks = []
+    api.state.startup_checks_at = "2026-08-27T00:00:00+08:00"
     api.state.scheduler_owner = "windows"
     api.state.scheduler_active = False
     api.dependency_overrides[repo.get_session] = override_session
@@ -89,6 +91,9 @@ def _readiness_client(tmp_path):
         output_dir=output_dir,
         scheduler_owner="windows",
         app_timezone="Asia/Shanghai",
+        schedule_generate_time="23:59",
+        reliability_watchdog_interval_minutes=10,
+        scheduler_heartbeat_stale_seconds=300,
     )
     return TestClient(api), api
 
@@ -104,6 +109,11 @@ def test_readiness_is_local_read_only_and_exposes_startup_capture_error(tmp_path
             "output",
             "templates",
             "startup_capture",
+            "wechat_data",
+            "wechat_client",
+            "summary_provider",
+            "scheduler_heartbeat",
+            "daily_completion",
         }
 
         api.state.startup_check_error = "startup probe crashed"
@@ -141,7 +151,65 @@ def test_provider_health_retention_keeps_latest_one_hundred_per_provider():
 
 
 def test_liveness_remains_side_effect_free():
-    assert system.health() == {"status": "ok"}
+    payload = system.health()
+    assert payload["status"] == "ok"
+    assert payload["service"] == "groupbrief"
+    assert payload["timestamp"]
+
+
+def test_readiness_degrades_when_required_wechat_dependency_failed(tmp_path):
+    client, api = _readiness_client(tmp_path)
+    from app.db.models import Group
+
+    api.state.startup_checks = [
+        {"name": "WeChatDataAnalysis 数据源", "ok": False, "status": "UNAVAILABLE", "detail": "MCP offline"},
+        {"name": "Codex GPT 群聊总结", "ok": True, "status": "OK", "detail": "ok"},
+        {"name": "DeepSeek V4 Flash（备用）", "ok": False, "status": "UNAVAILABLE", "detail": "not configured"},
+    ]
+    override = api.dependency_overrides[repo.get_session]
+    session_iterator = override()
+    session = next(session_iterator)
+    try:
+        session.add(Group(display_name="群A", wechat_group_id="g1", enabled=True))
+        session.commit()
+    finally:
+        session_iterator.close()
+
+    with client:
+        response = client.get("/api/system/ready")
+
+    assert response.status_code == 503
+    assert response.json()["status"] == "degraded"
+    assert response.json()["checks"]["wechat_data"]["status"] == "UNAVAILABLE"
+
+
+def test_liveness_stays_ok_while_stale_scheduler_heartbeat_degrades_readiness(tmp_path):
+    from datetime import datetime, timedelta
+
+    from app.scheduler.heartbeat import record_scheduler_heartbeat
+
+    client, api = _readiness_client(tmp_path)
+    settings = api.dependency_overrides[get_settings]()
+    settings.scheduler_owner = "fastapi"
+    api.dependency_overrides[get_settings] = lambda: settings
+    api.state.scheduler_owner = "fastapi"
+    api.state.scheduler_active = True
+    record_scheduler_heartbeat(
+        settings,
+        job="send_due",
+        status="success",
+        now=datetime.now().astimezone() - timedelta(minutes=10),
+    )
+
+    with client:
+        live = client.get("/api/system/health")
+        ready = client.get("/api/system/ready")
+
+    assert live.status_code == 200
+    assert live.json()["status"] == "ok"
+    assert ready.status_code == 503
+    assert ready.json()["status"] == "degraded"
+    assert ready.json()["checks"]["scheduler_heartbeat"]["status"] == "STALE"
 
 
 def test_startup_check_exception_is_preserved_as_explicit_failure(caplog):

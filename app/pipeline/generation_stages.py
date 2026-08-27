@@ -12,6 +12,7 @@ from app.ai.concurrency import bounded_slot
 from app.ai.prompt_builder import GroupSummaryImagePromptBuilder
 from app.ai.prompt_builder_types import PromptInput
 from app.config.settings import Settings
+from app.core.observability import log_event
 from app.data_sources.base import V2Message, WeChatDataSource
 from app.db.models import Group
 from app.pipeline.stage_result import StageResult
@@ -36,8 +37,12 @@ from app.v2.constants import (
     RUN_STATE_CORRUPT,
     SENT,
     WECHAT_DATA_UNAVAILABLE,
+    EXECUTION_FAILED_FINAL,
+    EXECUTION_HOLD_MANUAL,
+    EXECUTION_WAIT_RETRY,
 )
 from app.v2.run_store import RunStore
+from app.v2.reliability import retry_is_due
 
 
 @dataclass
@@ -202,6 +207,43 @@ class GenerationStages:
                 }
             )
 
+        execution_state = str(run.get("execution_state") or "")
+        if run.get("status") == FAILED and execution_state == EXECUTION_HOLD_MANUAL:
+            return StageResult.stop(
+                {
+                    "group_name": context.group_name,
+                    "status": "held",
+                    "error_type": str(run.get("error_type") or "HOLD_MANUAL"),
+                    "detail": str(run.get("error") or "任务需人工核对")[:300],
+                }
+            )
+        if run.get("status") == FAILED and execution_state == EXECUTION_FAILED_FINAL:
+            return StageResult.stop(
+                {
+                    "group_name": context.group_name,
+                    "status": "failed_final",
+                    "error_type": str(run.get("error_type") or "FAILED_FINAL"),
+                    "detail": str(run.get("error") or "重试预算已耗尽")[:300],
+                }
+            )
+        if (
+            run.get("status") == FAILED
+            and execution_state == EXECUTION_WAIT_RETRY
+            and not retry_is_due(run)
+        ):
+            return StageResult.stop(
+                {
+                    "group_name": context.group_name,
+                    "status": "retry_scheduled",
+                    "error_type": str(run.get("error_type") or "RETRY_SCHEDULED"),
+                    "detail": f"等待自动重试：{run.get('next_retry_at') or '未指定时间'}",
+                }
+            )
+        retrying = bool(
+            run.get("status") == FAILED
+            and execution_state == EXECUTION_WAIT_RETRY
+            and retry_is_due(run)
+        )
         group = context.group
         base = {
             "group_id": str(group.id),
@@ -222,7 +264,16 @@ class GenerationStages:
             "provider": self.data_source.name,
             "failed_stage": None,
             "error": None,
+            "error_type": None,
         }
+        if retrying:
+            # 清除“上一轮失败快照”的去重指纹。这样同一错误在同一次落盘中
+            # 不会重复计数，但真正重新执行后再次失败会消耗下一次预算。
+            base.update(
+                failure_fingerprint="",
+                retry_started_at=datetime.now().astimezone().isoformat(),
+                retry_stage=str(run.get("failed_stage") or "unknown"),
+            )
         self.store.update(context.group_name, context.run_date, status=PENDING, **base)
         return StageResult.proceed(context)
 
@@ -586,6 +637,14 @@ class GenerationStages:
                 }
             )
         if claim_reason == "result_unknown":
+            self.store.update(
+                context.group_name,
+                context.run_date,
+                status=FAILED,
+                failed_stage="prompt",
+                error="上次 AI 调用结果未知，需人工核对后才能再次生成",
+                error_type="PROMPT_RESULT_UNKNOWN",
+            )
             return StageResult.stop(
                 {
                     "group_name": context.group_name,
@@ -623,6 +682,7 @@ class GenerationStages:
                 self.store.update(
                     context.group_name,
                     context.run_date,
+                    status=FAILED,
                     failed_stage="prompt",
                     error=str(exc)[:300],
                     error_type="PROMPT_RESULT_UNKNOWN",
@@ -643,6 +703,37 @@ class GenerationStages:
                     error=prompt_out.error,
                 )
                 self._record_prompt_timing(context, started_at)
+                if bool(context.group.image_enabled) and not context.reuse_persisted_topic_selection:
+                    fallback_prompt = (
+                        "【任务】\n"
+                        "外部内容整理失败，仅使用当天 ranking.json 生成本地简化信息图。\n"
+                        "【画布】\n1024×1536\n"
+                    )
+                    self.store.prompt_path(context.group_name, context.run_date).write_text(
+                        fallback_prompt,
+                        encoding="utf-8",
+                    )
+                    self.store.update(
+                        context.group_name,
+                        context.run_date,
+                        status=PROMPT_READY,
+                        failed_stage=None,
+                        error=None,
+                        error_type=None,
+                        prompt_fallback_level=3,
+                        image_force_local_fallback=True,
+                        prompt_fallback_reason=PROMPT_FAILED,
+                        prompt_original_error=str(prompt_out.error)[:300],
+                    )
+                    return StageResult.proceed(
+                        PromptStageOutput(
+                            prompt_meta={
+                                "mode": "local_infographic",
+                                "fallback_level": 3,
+                                "fallback_reason": PROMPT_FAILED,
+                            }
+                        )
+                    )
                 self.store.update(
                     context.group_name,
                     context.run_date,
@@ -753,5 +844,20 @@ class GenerationStages:
             timings["chunk_count"],
             timings["total_ms"],
             result.get("status", ""),
+        )
+        current = self.store.load_run(context.group_name, context.run_date)
+        log_event(
+            self.logger,
+            "GROUP_GENERATION_FINISHED",
+            group_task_id=current.get("group_task_id"),
+            group_name=context.group_name,
+            run_date=context.run_date,
+            stage=current.get("stage"),
+            status=result.get("status"),
+            duration_ms=timings["total_ms"],
+            attempt=current.get("retry_attempt_count", 0),
+            model=meta.get("api_model", ""),
+            error_type=result.get("error_type", ""),
+            error_summary=result.get("detail", ""),
         )
         return result

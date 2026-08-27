@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from io import BytesIO
 from types import SimpleNamespace
 from pathlib import Path
+
+from PIL import Image
 
 from app.v2.constants import FAILED, IMAGE_GENERATION_FAILED, PROMPT_READY, READY_TO_SEND
 from app.v2.run_store import RunStore
@@ -11,10 +14,9 @@ from scripts import codex_image_automation as automation
 from scripts.codex_image_automation import adopt_image, begin_task, collect_pending
 
 
-PNG_BYTES = bytes.fromhex(
-    "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489"
-    "0000000d4944415478da63f8cfc0f01f00050001fff83f240000000049454e44ae426082"
-)
+_png_buffer = BytesIO()
+Image.new("RGBA", (2, 2), (18, 52, 86, 255)).save(_png_buffer, format="PNG")
+PNG_BYTES = _png_buffer.getvalue()
 
 
 def _make_run(store: RunStore, group: str = "测试群", date: str = "2026-08-20", **fields) -> None:

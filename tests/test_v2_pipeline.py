@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -164,10 +165,9 @@ class FakeGenerator:
         if self.fail:
             return ImageTaskResult(False, error="生图失败")
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_bytes(
-            bytes.fromhex("89504e470d0a1a0a0000000d4948445200000001000000010806"
-                          "0000001f15c4890000000d4944415478da63f8cfc0f80100050001fff83f240000000049454e44ae426082")
-        )
+        from PIL import Image
+
+        Image.new("RGBA", (1, 1), (0, 0, 0, 0)).save(output_path, format="PNG")
         return ImageTaskResult(True, image_path=output_path)
 
 
@@ -206,6 +206,21 @@ class UnknownTextSender(FakeSender):
             submitted=True,
             verification_level="unknown",
             outcome_unknown=True,
+        )
+
+
+class SubmittedFailureTextSender(FakeSender):
+    def send_text(self, target: str, text: str):
+        from app.sender.base import SendResult
+
+        self.text_calls.append((target, text))
+        return SendResult(
+            False,
+            "提交后提供方返回失败",
+            datetime.now().isoformat(),
+            submitted=True,
+            verification_level="unknown",
+            outcome_unknown=False,
         )
 
 
@@ -281,6 +296,25 @@ def test_generate_skip_when_already_ready(tmp_path):
     pipeline2, _ = _make_pipeline(tmp_path, source=source)
     results = pipeline2.generate_all(run_date="2026-08-18")
     assert results[0]["status"] == "skipped"
+
+
+def test_historical_recovery_sends_clearly_unsubmitted_run_once(tmp_path):
+    pipeline, group = _make_pipeline(tmp_path, send_time="08:30")
+    pipeline.generate_all(run_date="2026-08-18")
+    sender = FakeSender()
+    pipeline.sender = sender
+    now = datetime(2026, 8, 19, 9, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+
+    first = pipeline.send_due_for_dates(["2026-08-18"], now=now, recovery=True)
+    second = pipeline.send_due_for_dates(["2026-08-18"], now=now, recovery=True)
+
+    assert first[0]["status"] == "sent"
+    assert second == []
+    assert len(sender.text_calls) == 1
+    assert len(sender.image_calls) == 1
+    run = pipeline.store.load_run("测试群", "2026-08-18")
+    assert run["status"] == SENT
+    assert run["send_recovery"] is True
 
 
 def test_generate_force_regenerates(tmp_path):
@@ -586,17 +620,15 @@ def test_force_generate_blocks_corrupt_state_before_name_sync(tmp_path, monkeypa
     assert run_path.read_bytes() == original
 
 
-def test_force_generate_image_failure_returns_failed_state(tmp_path):
+def test_force_generate_image_failure_uses_local_fallback(tmp_path):
     gen = FakeGenerator(fail=True)
     pipeline, group = _make_pipeline(tmp_path, gen=gen)
     result = pipeline.force_generate(group.id, "2026-08-18")
-    assert result["status"] == "failed"
-    assert result["error_type"] == IMAGE_GENERATION_FAILED
+    assert result["status"] == "ready_to_send"
     run = pipeline.store.load_run("测试群", "2026-08-18")
-    assert run["status"] == FAILED
-    assert run["failed_stage"] == "image"
-    assert run["error"] == "生图失败"
-    assert run["image_error"] == "生图失败"
+    assert run["status"] == READY_TO_SEND
+    assert run["image_fallback_level"] == 3
+    assert run["image_variant"] == "pillow"
 
 
 def test_image_success_clears_stale_failure_fields(tmp_path):
@@ -644,13 +676,16 @@ def test_generate_data_failure_marks_failed(tmp_path):
     assert run["failed_stage"] == "data"
 
 
-def test_generate_prompt_failure_marks_failed(tmp_path):
+def test_generate_prompt_failure_uses_local_infographic(tmp_path):
     pipeline, group = _make_pipeline(tmp_path, prompt=FakePrompt(fail=True))
     results = pipeline.generate_all(run_date="2026-08-18")
-    assert results[0]["status"] == "failed"
-    assert results[0]["error_type"] == "PROMPT_FAILED"
+    assert results[0]["status"] == "ready_to_send"
     run = pipeline.store.load_run("测试群", "2026-08-18")
-    assert run["status"] == FAILED
+    assert run["status"] == READY_TO_SEND
+    assert run["prompt_fallback_level"] == 3
+    assert run["image_fallback_level"] == 3
+    assert run["image_variant"] == "pillow"
+    assert pipeline.store.image_path("测试群", "2026-08-18").is_file()
 
 
 def test_image_disabled_goes_ready_to_send_without_image(tmp_path):
@@ -667,6 +702,54 @@ def test_image_serial_order(tmp_path):
     pipeline, group = _make_pipeline(tmp_path, gen=gen)
     pipeline.generate_all(run_date="2026-08-18")
     assert len(gen.calls) == 1
+
+
+def test_existing_valid_image_reconciles_failed_state_without_regeneration(tmp_path):
+    pipeline, group = _make_pipeline(tmp_path)
+    pipeline.generate_all(run_date="2026-08-18")
+    previous = pipeline.store.load_run("测试群", "2026-08-18")
+    pipeline.store.update(
+        "测试群",
+        "2026-08-18",
+        status=FAILED,
+        failed_stage="image",
+        error="模拟图片落盘后进程中断",
+        image_job=previous["image_job"],
+    )
+    generator = FakeGenerator()
+    pipeline.image_generator = generator
+
+    job = pipeline._make_image_job(group, "2026-08-18", force=False)
+    result = pipeline._run_image_jobs([job], "2026-08-18")
+
+    assert result[0]["status"] == "ready_to_send"
+    assert generator.calls == []
+    run = pipeline.store.load_run("测试群", "2026-08-18")
+    assert run["status"] == READY_TO_SEND
+    assert run["image_job"]["prompt_sha256"] == previous["image_job"]["prompt_sha256"]
+
+
+def test_identical_generation_failure_exhausts_budget_after_real_retries(tmp_path, monkeypatch):
+    source = FakeSource(fail=True)
+    pipeline, _ = _make_pipeline(tmp_path, source=source, image_enabled=False)
+    monkeypatch.setattr("app.pipeline.generation_stages.retry_is_due", lambda _run: True)
+
+    first = pipeline.generate_all(run_date="2026-08-18")
+    second = pipeline.generate_all(run_date="2026-08-18")
+    third = pipeline.generate_all(run_date="2026-08-18")
+    final = pipeline.generate_all(run_date="2026-08-18")
+
+    assert [first[0]["status"], second[0]["status"], third[0]["status"]] == [
+        "failed",
+        "failed",
+        "failed",
+    ]
+    assert final[0]["status"] == "failed_final"
+    assert source.fetch_calls == 3
+    run = pipeline.store.load_run("测试群", "2026-08-18")
+    assert run["retry_attempt_count"] == 3
+    assert run["execution_state"] == "FAILED_FINAL"
+    assert len(run["attempt_ledger"]) == 3
 
 
 def test_saturday_generates_previous_day(tmp_path):
@@ -704,6 +787,65 @@ def test_send_due_sends_text_then_image(tmp_path):
     sender = pipeline.sender
     assert len(sender.text_calls) == 1
     assert len(sender.image_calls) == 1
+
+
+def test_explicit_text_failures_use_backoff_and_stop_after_send_retry_budget(tmp_path):
+    sender = FakeSender(fail_text=True)
+    pipeline, _ = _make_pipeline(tmp_path, sender=sender, image_enabled=False)
+    pipeline.generate_all(run_date="2026-08-18")
+
+    first = pipeline.send_due(now=datetime(2026, 8, 18, 8, 31, 0))
+    assert first[0]["status"] == "retry_scheduled"
+    assert len(sender.text_calls) == 1
+    run = pipeline.store.load_run("测试群", "2026-08-18")
+    assert run["send_retry_attempt_count"] == 1
+    assert run["send_next_retry_at"] == "2026-08-18T08:32:00"
+
+    early = pipeline.send_due(now=datetime(2026, 8, 18, 8, 31, 30))
+    assert early[0]["status"] == "retry_scheduled"
+    assert len(sender.text_calls) == 1
+
+    second = pipeline.send_due(now=datetime(2026, 8, 18, 8, 32, 0))
+    assert second[0]["status"] == "retry_scheduled"
+    assert len(sender.text_calls) == 2
+    run = pipeline.store.load_run("测试群", "2026-08-18")
+    assert run["send_next_retry_at"] == "2026-08-18T08:37:00"
+
+    third = pipeline.send_due(now=datetime(2026, 8, 18, 8, 38, 0))
+    assert third[0]["status"] == "failed_final"
+    assert len(sender.text_calls) == 3
+    run = pipeline.store.load_run("测试群", "2026-08-18")
+    assert run["send_state"] == "failed_final"
+    assert run["send_hold"] is True
+    assert run["send_hold_reason"] == "SEND_RETRY_EXHAUSTED"
+    assert run["send_retry_attempt_count"] == 3
+    assert len(run["send_failure_ledger"]) == 3
+
+    assert pipeline.send_due(now=datetime(2026, 8, 18, 8, 39, 0)) == []
+    assert len(sender.text_calls) == 3
+
+
+def test_image_retry_preserves_confirmed_text_checkpoint(tmp_path):
+    sender = FakeSender(fail_image=True)
+    pipeline, _ = _make_pipeline(tmp_path, sender=sender, image_enabled=True)
+    pipeline.generate_all(run_date="2026-08-18")
+
+    first = pipeline.send_due(now=datetime(2026, 8, 18, 8, 31, 0))
+    assert first[0]["status"] == "retry_scheduled"
+    assert len(sender.text_calls) == 1
+    assert len(sender.image_calls) == 1
+    run = pipeline.store.load_run("测试群", "2026-08-18")
+    assert run["text_sent_at"]
+    assert not run.get("image_sent_at")
+
+    sender.fail_image = False
+    second = pipeline.send_due(now=datetime(2026, 8, 18, 8, 32, 0))
+    assert second[0]["status"] == "sent"
+    assert len(sender.text_calls) == 1
+    assert len(sender.image_calls) == 2
+    run = pipeline.store.load_run("测试群", "2026-08-18")
+    assert run["status"] == SENT
+    assert run["send_next_retry_at"] == ""
 
 
 def test_send_due_refreshes_renamed_group_by_stable_id_without_changing_archive_name(tmp_path):
@@ -802,6 +944,91 @@ def test_send_due_processes_same_time_groups_in_stable_order(tmp_path, monkeypat
     assert [target for target, _ in sender.text_calls] == ["目标一", "目标二"]
 
 
+def test_send_due_isolates_one_group_pre_submit_exception(tmp_path, monkeypatch):
+    sender = FakeSender()
+    pipeline, _ = _make_pipeline(tmp_path, sender=sender, image_enabled=False)
+    groups = [
+        Group(id=111, display_name="异常群", wechat_group_name="异常群", send_target="目标一", send_time="08:30", image_enabled=False, wechat_send_enabled=True),
+        Group(id=112, display_name="正常群", wechat_group_name="正常群", send_target="目标二", send_time="08:30", image_enabled=False, wechat_send_enabled=True),
+    ]
+    monkeypatch.setattr(pipeline, "_load_groups", lambda group_ids=None: groups)
+    for group in groups:
+        pipeline.store.save_run(group.display_name, "2026-08-18", {"status": READY_TO_SEND})
+        path = pipeline.store.ranking_txt_path(group.display_name, "2026-08-18")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("日报", encoding="utf-8")
+    original = pipeline._send_one
+
+    def isolated_send(group, *args, **kwargs):
+        if group.display_name == "异常群":
+            raise RuntimeError("pre-submit")
+        return original(group, *args, **kwargs)
+
+    monkeypatch.setattr(pipeline, "_send_one", isolated_send)
+    results = pipeline.send_due(now=datetime(2026, 8, 18, 8, 30, 0))
+
+    assert [item["status"] for item in results] == ["failed", "sent"]
+    assert [target for target, _ in sender.text_calls] == ["目标二"]
+
+
+def test_send_due_aborts_batch_when_desktop_submission_state_is_unknown(tmp_path, monkeypatch):
+    sender = FakeSender()
+    pipeline, _ = _make_pipeline(tmp_path, sender=sender, image_enabled=False)
+    groups = [
+        Group(id=121, display_name="未知群", wechat_group_name="未知群", send_target="目标一", send_time="08:30", image_enabled=False, wechat_send_enabled=True),
+        Group(id=122, display_name="不应继续群", wechat_group_name="不应继续群", send_target="目标二", send_time="08:30", image_enabled=False, wechat_send_enabled=True),
+    ]
+    monkeypatch.setattr(pipeline, "_load_groups", lambda group_ids=None: groups)
+    for group in groups:
+        pipeline.store.save_run(group.display_name, "2026-08-18", {"status": READY_TO_SEND})
+        path = pipeline.store.ranking_txt_path(group.display_name, "2026-08-18")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("日报", encoding="utf-8")
+
+    def unresolved_send(group, group_name, run, run_date, now, **kwargs):
+        if group.display_name != "未知群":
+            return pytest.fail("桌面发送状态未知后不得继续其他群")
+        claim_id, _, _ = pipeline.store.claim_send(
+            group_name,
+            run_date,
+            now=now,
+            lease_seconds=60,
+        )
+        pipeline.store.update_send_claim(
+            group_name,
+            run_date,
+            claim_id,
+            send_state="sending_text",
+            text_attempt_started_at=now.isoformat(),
+            text_attempt_finished_at="",
+        )
+        raise RuntimeError("desktop crashed after submit")
+
+    monkeypatch.setattr(pipeline, "_send_one", unresolved_send)
+    results = pipeline.send_due(now=datetime(2026, 8, 18, 8, 30, 0))
+
+    assert len(results) == 1
+    assert results[0]["status"] == "held"
+    assert results[0]["error_type"] == "SEND_RESULT_UNKNOWN"
+    assert pipeline.store.load_run("未知群", "2026-08-18")["send_state"] == "unknown"
+    assert pipeline.store.load_run("不应继续群", "2026-08-18")["status"] == READY_TO_SEND
+
+
+def test_send_due_uses_cached_groups_when_sync_itself_raises(tmp_path, monkeypatch):
+    pipeline = _ready_to_send(tmp_path, image_enabled=False)
+    monkeypatch.setattr(
+        pipeline,
+        "_sync_group_names",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("mcp unavailable")),
+    )
+
+    result = pipeline.send_due(now=datetime(2026, 8, 18, 8, 31, 0))
+
+    assert result[0]["status"] == "sent"
+    run = pipeline.store.load_run("测试群", "2026-08-18")
+    assert run["name_sync_status"] == "cached"
+
+
 def test_send_due_skips_group_when_wechat_send_is_not_enabled(tmp_path):
     pipeline = _ready_to_send(tmp_path)
     from sqlmodel import select
@@ -836,7 +1063,7 @@ def test_send_text_failure(tmp_path):
     pipeline.sender = FakeSender(fail_text=True)
     now = datetime(2026, 8, 18, 9, 0, 0)
     results = pipeline.send_due(now=now)
-    assert results[0]["status"] == "failed"
+    assert results[0]["status"] == "retry_scheduled"
     assert results[0]["error_type"] == "SEND_TEXT_FAILED"
     run = pipeline.store.load_run("测试群", "2026-08-18")
     assert run["status"] == READY_TO_SEND
@@ -896,7 +1123,7 @@ def test_send_image_failure(tmp_path):
     pipeline.sender = FakeSender(fail_image=True)
     now = datetime(2026, 8, 18, 9, 0, 0)
     results = pipeline.send_due(now=now)
-    assert results[0]["status"] == "failed"
+    assert results[0]["status"] == "retry_scheduled"
     assert results[0]["error_type"] == "SEND_IMAGE_FAILED"
     run = pipeline.store.load_run("测试群", "2026-08-18")
     assert run["status"] == READY_TO_SEND
@@ -912,7 +1139,11 @@ def test_send_image_retry_does_not_repeat_text(tmp_path):
 
     retry_sender = FakeSender()
     pipeline.sender = retry_sender
-    result = pipeline.send_due(now=datetime(2026, 8, 18, 9, 0, 0))
+    result = pipeline.send_due_for_dates(
+        ["2026-08-18"],
+        now=datetime(2026, 8, 18, 9, 1, 0),
+        recovery=True,
+    )
 
     assert result[0]["status"] == "sent"
     assert retry_sender.text_calls == []
@@ -1006,6 +1237,85 @@ def test_submitted_but_unverified_text_is_held_without_retry(tmp_path):
     run = pipeline.store.load_run("测试群", "2026-08-18")
     assert run["send_state"] == "unknown"
     assert run["send_hold"] is True
+
+
+def test_submitted_failure_is_still_held_as_unknown(tmp_path):
+    pipeline = _ready_to_send(tmp_path)
+    sender = SubmittedFailureTextSender()
+    pipeline.sender = sender
+
+    result = pipeline.send_due(now=datetime(2026, 8, 18, 8, 31, 0))
+
+    assert result[0]["status"] == "held"
+    assert result[0]["error_type"] == "SEND_RESULT_UNKNOWN"
+    assert len(sender.text_calls) == 1
+    assert sender.image_calls == []
+    run = pipeline.store.load_run("测试群", "2026-08-18")
+    assert run["send_state"] == "unknown"
+
+
+def test_text_success_persistence_failure_holds_before_image(tmp_path, monkeypatch):
+    pipeline = _ready_to_send(tmp_path)
+    original = pipeline.store.update_send_claim
+    calls = 0
+
+    def flaky_update(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            return False, pipeline.store.load_run("测试群", "2026-08-18")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(pipeline.store, "update_send_claim", flaky_update)
+    result = pipeline.send_due(now=datetime(2026, 8, 18, 8, 31, 0))
+
+    assert result[0]["status"] == "held"
+    assert result[0]["error_type"] == "SEND_RESULT_UNKNOWN"
+    assert len(pipeline.sender.text_calls) == 1
+    assert pipeline.sender.image_calls == []
+    assert pipeline.store.load_run("测试群", "2026-08-18")["send_state"] == "unknown"
+
+
+def test_image_claim_update_failure_stops_before_external_submit(tmp_path, monkeypatch):
+    pipeline = _ready_to_send(tmp_path)
+    original = pipeline.store.update_send_claim
+    calls = 0
+
+    def flaky_update(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 3:
+            return False, pipeline.store.load_run("测试群", "2026-08-18")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(pipeline.store, "update_send_claim", flaky_update)
+    result = pipeline.send_due(now=datetime(2026, 8, 18, 8, 31, 0))
+
+    assert result[0]["status"] == "skipped"
+    assert result[0]["error_type"] == "SEND_CLAIM_LOST"
+    assert len(pipeline.sender.text_calls) == 1
+    assert pipeline.sender.image_calls == []
+
+
+def test_sent_terminal_persistence_failure_becomes_unknown_hold(tmp_path, monkeypatch):
+    pipeline = _ready_to_send(tmp_path)
+    original = pipeline.store.finish_send_claim
+
+    def flaky_finish(*args, **kwargs):
+        if kwargs.get("send_state") == "sent":
+            return False, pipeline.store.load_run("测试群", "2026-08-18")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(pipeline.store, "finish_send_claim", flaky_finish)
+    result = pipeline.send_due(now=datetime(2026, 8, 18, 8, 31, 0))
+
+    assert result[0]["status"] == "held"
+    assert result[0]["error_type"] == "SEND_RESULT_UNKNOWN"
+    assert len(pipeline.sender.text_calls) == 1
+    assert len(pipeline.sender.image_calls) == 1
+    run = pipeline.store.load_run("测试群", "2026-08-18")
+    assert run["send_state"] == "unknown"
+    assert run["status"] == READY_TO_SEND
 
 
 def test_manual_text_sent_resolution_continues_image_without_resending_text(tmp_path):

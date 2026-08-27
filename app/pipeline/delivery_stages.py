@@ -7,6 +7,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from app.config.settings import Settings
+from app.core.observability import log_event
 from app.db.models import Group
 from app.image.image_task import verify_image
 from app.pipeline.stage_result import StageResult
@@ -121,6 +122,24 @@ class DeliveryStages:
                         "status": "held",
                         "error_type": "SEND_RESULT_UNKNOWN",
                         "detail": "上次发送结果未知，已暂停自动重试",
+                    }
+                )
+            if claim_reason == "failed_final":
+                return StageResult.stop(
+                    {
+                        "group_name": context.group_name,
+                        "status": "failed_final",
+                        "error_type": "SEND_RETRY_EXHAUSTED",
+                        "detail": "发送重试预算已耗尽，已暂停自动重试",
+                    }
+                )
+            if claim_reason == "retry_not_due":
+                return StageResult.stop(
+                    {
+                        "group_name": context.group_name,
+                        "status": "retry_scheduled",
+                        "detail": "发送重试尚未到期",
+                        "next_retry_at": run.get("send_next_retry_at"),
                     }
                 )
             return StageResult.stop(
@@ -267,31 +286,57 @@ class DeliveryStages:
                 )
             )
         if not result.success:
-            self.store.finish_send_claim(
+            if result.submitted:
+                return StageResult.stop(
+                    self.finish_unknown(
+                        context.group_name,
+                        context.run_date,
+                        context.claim_id,
+                        "text",
+                        result.detail or "文字已提交，但发送结果未确认",
+                        submitted_at=finished_at,
+                        diagnostics=result.diagnostics,
+                    )
+                )
+            persisted, failed_run, final = self.store.finish_send_failure(
                 context.group_name,
                 context.run_date,
                 context.claim_id,
-                send_state="ready",
+                stage="text",
+                error_type="SEND_TEXT_FAILED",
+                detail=result.detail,
+                now=context.now,
+                diagnostics=result.diagnostics,
                 status=context.run.get("status", READY_TO_SEND),
                 text_attempt_finished_at=finished_at,
-                text_submitted_at=finished_at if result.submitted else "",
+                text_submitted_at="",
                 text_verification_diagnostics=result.diagnostics,
-                send_error=result.detail,
-                send_error_type="SEND_TEXT_FAILED",
             )
+            if not persisted:
+                return StageResult.stop(
+                    self.finish_unknown(
+                        context.group_name,
+                        context.run_date,
+                        context.claim_id,
+                        "text",
+                        f"文字发送失败状态无法持久化：{result.detail}",
+                        diagnostics=result.diagnostics,
+                    )
+                )
             return StageResult.stop(
                 {
                     "group_name": context.group_name,
-                    "status": "failed",
+                    "status": "failed_final" if final else "retry_scheduled",
                     "error_type": "SEND_TEXT_FAILED",
                     "detail": result.detail,
+                    "next_retry_at": failed_run.get("send_next_retry_at"),
                 }
             )
 
         context.text_sent_at = result.sent_at or finished_at
         level = result.verification_level or "provider_reported"
         context.verification_levels.append(level)
-        self.store.update_send_claim(
+        persisted, _ = self.store.update_send_claim(
             context.group_name,
             context.run_date,
             context.claim_id,
@@ -307,6 +352,18 @@ class DeliveryStages:
             send_error="",
             send_error_type="",
         )
+        if not persisted:
+            return StageResult.stop(
+                self.finish_unknown(
+                    context.group_name,
+                    context.run_date,
+                    context.claim_id,
+                    "text",
+                    "文字发送已成功，但成功状态无法持久化",
+                    submitted_at=finished_at,
+                    diagnostics=result.diagnostics,
+                )
+            )
         return StageResult.proceed(context)
 
     def _send_image(
@@ -317,7 +374,7 @@ class DeliveryStages:
             return StageResult.proceed(context)
 
         started_at = datetime.now(context.now.tzinfo).isoformat()
-        self.store.update_send_claim(
+        updated, _ = self.store.update_send_claim(
             context.group_name,
             context.run_date,
             context.claim_id,
@@ -327,6 +384,15 @@ class DeliveryStages:
             image_submitted_at="",
             image_verified_at="",
         )
+        if not updated:
+            return StageResult.stop(
+                {
+                    "group_name": context.group_name,
+                    "status": "skipped",
+                    "error_type": "SEND_CLAIM_LOST",
+                    "detail": "图片提交前发送 claim 已失效，未调用发送器",
+                }
+            )
         try:
             result = self.sender.send_image(context.target, context.image_path)
         except Exception as exc:
@@ -353,32 +419,58 @@ class DeliveryStages:
                 )
             )
         if not result.success:
-            self.store.finish_send_claim(
+            if result.submitted:
+                return StageResult.stop(
+                    self.finish_unknown(
+                        context.group_name,
+                        context.run_date,
+                        context.claim_id,
+                        "image",
+                        result.detail or "图片已提交，但发送结果未确认",
+                        submitted_at=finished_at,
+                        diagnostics=result.diagnostics,
+                    )
+                )
+            persisted, failed_run, final = self.store.finish_send_failure(
                 context.group_name,
                 context.run_date,
                 context.claim_id,
-                send_state="ready",
+                stage="image",
+                error_type="SEND_IMAGE_FAILED",
+                detail=result.detail,
+                now=context.now,
+                diagnostics=result.diagnostics,
                 status=context.run.get("status", READY_TO_SEND),
                 text_sent_at=context.text_sent_at,
                 image_attempt_finished_at=finished_at,
-                image_submitted_at=finished_at if result.submitted else "",
+                image_submitted_at="",
                 image_verification_diagnostics=result.diagnostics,
-                send_error=result.detail,
-                send_error_type="SEND_IMAGE_FAILED",
             )
+            if not persisted:
+                return StageResult.stop(
+                    self.finish_unknown(
+                        context.group_name,
+                        context.run_date,
+                        context.claim_id,
+                        "image",
+                        f"图片发送失败状态无法持久化：{result.detail}",
+                        diagnostics=result.diagnostics,
+                    )
+                )
             return StageResult.stop(
                 {
                     "group_name": context.group_name,
-                    "status": "failed",
+                    "status": "failed_final" if final else "retry_scheduled",
                     "error_type": "SEND_IMAGE_FAILED",
                     "detail": result.detail,
+                    "next_retry_at": failed_run.get("send_next_retry_at"),
                 }
             )
 
         context.image_sent_at = result.sent_at or finished_at
         level = result.verification_level or "provider_reported"
         context.verification_levels.append(level)
-        self.store.update_send_claim(
+        persisted, _ = self.store.update_send_claim(
             context.group_name,
             context.run_date,
             context.claim_id,
@@ -393,7 +485,20 @@ class DeliveryStages:
             image_verification_diagnostics=result.diagnostics,
             send_error="",
             send_error_type="",
+            send_next_retry_at="",
         )
+        if not persisted:
+            return StageResult.stop(
+                self.finish_unknown(
+                    context.group_name,
+                    context.run_date,
+                    context.claim_id,
+                    "image",
+                    "图片发送已成功，但成功状态无法持久化",
+                    submitted_at=finished_at,
+                    diagnostics=result.diagnostics,
+                )
+            )
         return StageResult.proceed(context)
 
     def _complete(self, context: DeliveryContext) -> dict:
@@ -406,7 +511,7 @@ class DeliveryStages:
             verification_level = "manual_ui_observed"
         else:
             verification_level = "provider_reported"
-        self.store.finish_send_claim(
+        persisted, run = self.store.finish_send_claim(
             context.group_name,
             context.run_date,
             context.claim_id,
@@ -428,12 +533,34 @@ class DeliveryStages:
                 else context.run.get("image_regen_status")
             ),
         )
+        if not persisted:
+            if run.get("status") == SENT or run.get("sent_at"):
+                persisted = True
+            else:
+                return self.finish_unknown(
+                    context.group_name,
+                    context.run_date,
+                    context.claim_id,
+                    "finalize",
+                    "微信发送已完成，但 SENT 终态无法持久化",
+                )
         if context.image_enabled:
             self.logger.info("群 %s 已发送（文字+图片）→ SENT", context.group_name)
             detail = "文字和图片已发送"
         else:
             self.logger.info("群 %s 已发送（仅文字，未启用图片）→ SENT", context.group_name)
             detail = "文字已发送（未启用图片）"
+        latest = self.store.load_run(context.group_name, context.run_date)
+        log_event(
+            self.logger,
+            "WECHAT_SEND_FINISHED",
+            group_task_id=latest.get("group_task_id"),
+            group_name=context.group_name,
+            run_date=context.run_date,
+            stage="SEND",
+            status="sent",
+            attempt=latest.get("retry_attempt_count", 0),
+        )
         return {
             "group_name": context.group_name,
             "status": "sent",
@@ -460,7 +587,7 @@ class DeliveryStages:
             f"{stage}_submitted_at": submitted_at,
             f"{stage}_verification_diagnostics": diagnostics or {},
         }
-        self.store.finish_send_claim(
+        persisted, run = self.store.finish_send_claim(
             group_name,
             run_date,
             claim_id,
@@ -474,6 +601,36 @@ class DeliveryStages:
             send_unknown_at=finished_at,
             send_unknown_stage=stage,
             **fields,
+        )
+        if not persisted:
+            persisted, run, reason = self.store.mark_send_result_unknown(
+                group_name,
+                run_date,
+                claim_id,
+                stage=stage,
+                detail=detail,
+                submitted_at=submitted_at,
+                diagnostics=diagnostics,
+                now=datetime.now(ZoneInfo(self.settings.app_timezone)),
+            )
+            if not persisted:
+                self.logger.error(
+                    "发送结果未知且状态无法持久化 group=%s date=%s stage=%s reason=%s",
+                    group_name,
+                    run_date,
+                    stage,
+                    reason,
+                )
+                detail = f"{detail}；且 unknown 状态持久化失败（{reason}）"
+        log_event(
+            self.logger,
+            "WECHAT_SEND_UNKNOWN",
+            group_name=group_name,
+            run_date=run_date,
+            stage=stage,
+            status="held",
+            error_type="SEND_RESULT_UNKNOWN",
+            error_summary=detail,
         )
         return {
             "group_name": group_name,

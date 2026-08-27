@@ -16,6 +16,7 @@ import threading
 import time
 
 import pytest
+from PIL import Image
 
 from app.image import codex_generator
 from app.image.codex_generator import CodexImageGenerator
@@ -27,11 +28,10 @@ from app.image.image_task import (
     verify_image,
 )
 
-# 1x1 透明 PNG
-_PNG_1PX = bytes.fromhex(
-    "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489"
-    "0000000d4944415478da63f8cfc0f01f00050001fff83f240000000049454e44ae426082"
-)
+# 1x1 透明且可被 Pillow 完整解码的 PNG。
+_png_buffer = io.BytesIO()
+Image.new("RGBA", (1, 1), (0, 0, 0, 0)).save(_png_buffer, format="PNG")
+_PNG_1PX = _png_buffer.getvalue()
 
 
 def test_detect_png(tmp_path):
@@ -79,7 +79,17 @@ def test_verify_image_not_image(tmp_path):
     p.write_bytes(b"\x00" * 10)
     ok, detail = verify_image(p)
     assert ok is False
-    assert "不是可识别的图片格式" in detail
+    assert "无法完整解码" in detail
+
+
+def test_verify_image_rejects_truncated_png_with_valid_signature(tmp_path):
+    p = tmp_path / "truncated.png"
+    p.write_bytes(b"\x89PNG\r\n\x1a\n" + b"broken")
+
+    ok, detail = verify_image(p)
+
+    assert ok is False
+    assert "无法完整解码" in detail
 
 
 class FakeGenerator:
@@ -128,6 +138,20 @@ def test_serial_queue_sequential(tmp_path):
         assert ok is True
 
 
+def test_queue_surfaces_result_persistence_hook_failure(tmp_path):
+    def broken_hook(_job, _result):
+        raise OSError("disk unavailable")
+
+    job = _job(tmp_path, "状态落盘失败群", FakeGenerator())
+    result = SerialImageQueue(run_hook=broken_hook).run_all([job])[0]
+
+    assert result["status"] == "failed"
+    assert result["success"] is False
+    assert result["error_type"] == "IMAGE_STATE_PERSIST_FAILED"
+    assert result["hook_error"] is True
+    assert "OSError" in result["detail"]
+
+
 def test_single_failure_does_not_block_others(tmp_path):
     queue = SerialImageQueue()
     jobs = [
@@ -136,11 +160,81 @@ def test_single_failure_does_not_block_others(tmp_path):
         _job(tmp_path, "群3", FakeGenerator(fail=True)),
     ]
     results = queue.run_all(jobs)
-    assert [r["status"] for r in results] == ["failed", "success", "failed"]
-    assert results[0]["error_type"] == "IMAGE_GENERATION_FAILED"
-    # 失败的群不产出图片，其他群不受影响
-    ok2, _ = verify_image(jobs[1].output_path)
-    assert ok2 is True
+    assert [r["status"] for r in results] == ["success", "success", "success"]
+    assert results[0]["generator_detail"]["fallback_level"] == 3
+    # 外部失败的群得到本地信息图，其他群也不受影响。
+    for job in jobs:
+        ok, _ = verify_image(job.output_path)
+        assert ok is True
+
+
+def test_policy_rejection_uses_safe_prompt_once(tmp_path):
+    from app.image.image_task import ImageTaskResult
+
+    class PolicyThenSuccess:
+        def __init__(self):
+            self.prompts = []
+
+        def generate(self, prompt_file, output_path):
+            self.prompts.append(prompt_file.read_text(encoding="utf-8"))
+            if len(self.prompts) == 1:
+                return ImageTaskResult(
+                    False,
+                    error="blocked",
+                    detail={"error_code": "CONTENT_FILTER"},
+                )
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_bytes(_PNG_1PX)
+            return ImageTaskResult(True, image_path=output_path)
+
+    generator = PolicyThenSuccess()
+    prompt = tmp_path / "image_prompt.txt"
+    prompt.write_text("测试群 张三 讨论当天票房 500 万", encoding="utf-8")
+    ranking = tmp_path / "ranking.json"
+    ranking.write_text(
+        json.dumps({"top_speakers": [{"name": "张三", "count": 3}]}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    job = ImageJob(
+        group_name="测试群",
+        prompt_file=prompt,
+        output_path=tmp_path / "daily_image.png",
+        generator=generator,
+    )
+
+    result = job.run()
+
+    assert result["status"] == "success"
+    assert result["generator_detail"]["fallback_level"] == 2
+    assert len(generator.prompts) == 2
+    assert "测试群" not in generator.prompts[1]
+    assert "张三" not in generator.prompts[1]
+    assert "500" in generator.prompts[1]
+
+
+def test_unknown_image_result_never_calls_safe_or_local_fallback(tmp_path):
+    from app.image.image_task import ImageTaskResult
+
+    class UnknownGenerator:
+        def __init__(self):
+            self.calls = 0
+
+        def generate(self, prompt_file, output_path):
+            self.calls += 1
+            return ImageTaskResult(
+                False,
+                error="receipt missing",
+                detail={"outcome_unknown": True, "recovery_status": "result_unknown"},
+            )
+
+    generator = UnknownGenerator()
+    job = _job(tmp_path, "群1", generator)
+
+    result = job.run()
+
+    assert result["status"] == "failed"
+    assert generator.calls == 1
+    assert not job.output_path.exists()
 
 
 def test_skip_when_image_exists(tmp_path):
@@ -296,6 +390,33 @@ def test_codex_prompt_uses_stdin_and_explicit_output_contract(tmp_path, monkeypa
     assert "绝对路径" in captured["input"]
     assert result.detail["attempt_count"] == 1
     assert result.detail["recovery_status"] == "completed"
+
+
+def test_codex_keeps_success_after_post_promote_smoke_write_failure(tmp_path, monkeypatch):
+    generator, prompt = _codex_test_generator(tmp_path, monkeypatch)
+
+    def fake_run(command, **kwargs):
+        _, result_path = _attempt_paths(command)
+        generated = tmp_path / "generated_images" / "post-promote" / "final.png"
+        generated.parent.mkdir()
+        generated.write_bytes(_PNG_1PX)
+        _write_receipt(result_path, generated.resolve())
+        return _Proc()
+
+    monkeypatch.setattr(codex_generator, "_run_codex_process", fake_run)
+    monkeypatch.setattr(generator, "_is_project_output", lambda _path: True)
+    monkeypatch.setattr(
+        generator,
+        "_save_last_smoke",
+        lambda *_args: (_ for _ in ()).throw(OSError("disk busy")),
+    )
+    output = prompt.parent / "daily_image.png"
+
+    result = generator.generate(prompt, output)
+
+    assert result.success is True
+    assert output.is_file()
+    assert result.detail["post_promote_warnings"] == ["smoke_state:OSError"]
 
 
 def test_codex_stdout_old_paths_are_not_candidates_and_hold_unknown(tmp_path, monkeypatch):

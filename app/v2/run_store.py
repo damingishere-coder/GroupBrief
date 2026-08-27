@@ -41,6 +41,7 @@ from app.v2.constants import (
     SENT,
     STATUS_FLOW,
 )
+from app.v2.reliability import enrich_run_state, retry_delay_seconds
 
 
 _RUN_WRITE_LOCK = threading.RLock()
@@ -223,8 +224,9 @@ class RunStore:
         return {"group_name": group_name, "run_date": run_date, "status": PENDING}
 
     def save_run(self, group_name: str, run_date: str, data: dict) -> dict:
-        with _RUN_WRITE_LOCK:
-            path = self.run_path(group_name, run_date)
+        path = self.run_path(group_name, run_date)
+        with _run_mutex(path):
+            existing: dict = {}
             if path.exists():
                 existing = self._read_run_file(path, group_name, run_date)
                 if self._is_corrupt(existing):
@@ -234,6 +236,14 @@ class RunStore:
             data.setdefault("group_name", group_name)
             data.setdefault("status", PENDING)
             data["run_date"] = run_date
+            task_identity = str(data.get("group_id") or "").strip()
+            if task_identity:
+                data["group_task_id"] = f"groupbrief:{run_date}:group-{task_identity}"
+            else:
+                name_digest = hashlib.sha256(group_name.encode("utf-8")).hexdigest()[:12]
+                data.setdefault("group_task_id", f"groupbrief:{run_date}:name-{name_digest}")
+            data["state_version"] = int(existing.get("state_version") or 0) + 1
+            data = enrich_run_state(data, existing)
             schema_error = self._run_schema_error(data, run_date)
             if schema_error:
                 raise ValueError(f"run.json 写入数据不符合 Schema：{schema_error}")
@@ -245,7 +255,8 @@ class RunStore:
 
     def update(self, group_name: str, run_date: str, **fields) -> dict:
         """加载 → 合并字段 → 保存，返回最新 run。"""
-        with _RUN_WRITE_LOCK:
+        path = self.run_path(group_name, run_date)
+        with _run_mutex(path):
             data = self.load_run(group_name, run_date)
             if self._is_corrupt(data):
                 raise RunStateCorruptionError("运行状态文件损坏，禁止自动覆盖")
@@ -582,8 +593,13 @@ class RunStore:
                 return None, data, "already_sent"
             if data.get("send_state") == "unknown":
                 return None, data, "result_unknown"
+            if data.get("send_state") == "failed_final":
+                return None, data, "failed_final"
             if data.get("send_hold") and not allow_hold:
                 return None, data, "send_hold"
+            retry_at = _parse_timestamp(data.get("send_next_retry_at"), now)
+            if retry_at and retry_at > now:
+                return None, data, "retry_not_due"
 
             existing_claim = str(data.get("send_claim_id") or "")
             expires_at = _parse_timestamp(data.get("send_claim_expires_at"), now)
@@ -652,6 +668,128 @@ class RunStore:
             send_claim_expires_at="",
         )
         return self.update_send_claim(group_name, run_date, claim_id, **fields)
+
+    def finish_send_failure(
+        self,
+        group_name: str,
+        run_date: str,
+        claim_id: str,
+        *,
+        stage: str,
+        error_type: str,
+        detail: str,
+        now: datetime,
+        diagnostics: dict | None = None,
+        **fields,
+    ) -> tuple[bool, dict, bool]:
+        """记录一次明确未提交的发送失败，并执行独立的有限重试预算。
+
+        只有 Provider 明确返回 ``submitted=False`` 时才允许进入这里。达到预算
+        后进入 ``failed_final`` 人工暂停；未知提交结果仍走 SEND_RESULT_UNKNOWN。
+        """
+        path = self.run_path(group_name, run_date)
+        with _run_mutex(path):
+            data = self.load_run(group_name, run_date)
+            if self._is_corrupt(data) or data.get("send_claim_id") != claim_id:
+                return False, data, False
+
+            try:
+                attempts = max(int(data.get("send_retry_attempt_count") or 0), 0) + 1
+            except (TypeError, ValueError):
+                attempts = 1
+            try:
+                budget = max(int(data.get("send_retry_budget") or 3), 1)
+            except (TypeError, ValueError):
+                budget = 3
+            final = attempts >= budget
+            failed_at = now.isoformat()
+            ledger = list(data.get("send_failure_ledger") or [])
+            ledger.append(
+                {
+                    "attempt": attempts,
+                    "stage": stage,
+                    "error_type": error_type,
+                    "error_summary": str(detail)[:300],
+                    "failed_at": failed_at,
+                }
+            )
+            fields.setdefault(f"{stage}_verification_diagnostics", diagnostics or {})
+            fields.update(
+                send_state="failed_final" if final else "ready",
+                send_claim_id="",
+                send_claimed_at="",
+                send_claim_expires_at="",
+                send_retry_attempt_count=attempts,
+                send_retry_budget=budget,
+                send_failure_ledger=ledger[-20:],
+                send_last_failure_at=failed_at,
+                send_next_retry_at=(
+                    ""
+                    if final
+                    else (now + timedelta(seconds=retry_delay_seconds(attempts))).isoformat()
+                ),
+                send_hold=final,
+                send_hold_reason="SEND_RETRY_EXHAUSTED" if final else "",
+                needs_manual_send=final,
+                send_error=str(detail)[:500],
+                send_error_type=error_type,
+            )
+            data.update(fields)
+            return True, self.save_run(group_name, run_date, data), final
+
+    def mark_send_result_unknown(
+        self,
+        group_name: str,
+        run_date: str,
+        claim_id: str,
+        *,
+        stage: str,
+        detail: str,
+        submitted_at: str = "",
+        diagnostics: dict | None = None,
+        now: datetime,
+    ) -> tuple[bool, dict, str]:
+        """在常规 claim CAS 失败后，把已经触发的外部发送 fail-closed。
+
+        只有当前 claim、磁盘上仍有未决发送尝试，或最终 SENT 提交失败时才
+        允许进入 unknown。若另一个写入者已经可靠地提交 SENT，则保留 SENT。
+        """
+        path = self.run_path(group_name, run_date)
+        with _run_mutex(path):
+            data = self.load_run(group_name, run_date)
+            if self._is_corrupt(data):
+                return False, data, "state_corrupt"
+            if data.get("status") == SENT or data.get("sent_at"):
+                return True, data, "already_sent"
+            if data.get("send_state") == "unknown":
+                return True, data, "already_unknown"
+
+            owns_claim = data.get("send_claim_id") == claim_id
+            unresolved = _has_unresolved_send_attempt(data)
+            if not owns_claim and not unresolved and stage != "finalize":
+                return False, data, "claim_lost"
+
+            finished_at = now.isoformat()
+            fields = {
+                "send_state": "unknown",
+                "send_hold": True,
+                "send_hold_reason": "SEND_RESULT_UNKNOWN",
+                "needs_manual_send": True,
+                "send_error": str(detail)[:500],
+                "send_error_type": "SEND_RESULT_UNKNOWN",
+                "verification_level": "unknown",
+                "send_unknown_at": finished_at,
+                "send_unknown_stage": stage,
+                "send_claim_id": "",
+                "send_claimed_at": "",
+                "send_claim_expires_at": "",
+                f"{stage}_submitted_at": submitted_at,
+                f"{stage}_verification_diagnostics": diagnostics or {},
+            }
+            if stage in {"text", "image"}:
+                fields[f"{stage}_attempt_finished_at"] = ""
+            data.update(fields)
+            return True, self.save_run(group_name, run_date, data), "marked_unknown"
 
     def resolve_text_send_unknown(
         self,

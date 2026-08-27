@@ -16,6 +16,7 @@ from typing import Any
 
 from app.ai.concurrency import bounded_slot, normalized_limit
 from app.config.settings import Settings
+from app.core.logging import get_logger
 from app.image.codex_generator import CodexImageGenerator
 from app.image.image_task import ImageTaskResult, verify_image_contract
 from app.v2.constants import READY_TO_SEND, SENT
@@ -24,6 +25,7 @@ from app.v2.run_store import RunStore
 _EXECUTOR = ThreadPoolExecutor(max_workers=6, thread_name_prefix="groupbrief-image-regen")
 _ACTIVE_LOCK = threading.Lock()
 _ACTIVE: set[str] = set()
+logger = get_logger("groupbrief.image.regeneration")
 
 
 def _job_key(group_name: str, run_date: str) -> str:
@@ -389,7 +391,12 @@ def _run_regeneration(
                 error=str(exc)[:500],
             )
         except Exception:
-            pass
+            logger.exception(
+                "重生图失败状态无法写入 job ledger：group=%s date=%s job=%s",
+                group_name,
+                run_date,
+                job_id,
+            )
         store.update(
             group_name,
             run_date,
@@ -404,7 +411,7 @@ def _run_regeneration(
             if temp_path.exists():
                 temp_path.unlink()
         except OSError:
-            pass
+            logger.warning("重生图临时文件清理失败：%s", temp_path, exc_info=True)
         with _ACTIVE_LOCK:
             _ACTIVE.discard(key)
 

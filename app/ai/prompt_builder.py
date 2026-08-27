@@ -35,6 +35,7 @@ from app.ai.poster_copy import (
     render_poster_prompt,
 )
 from app.ai.prompt_builder_types import PromptInput, PromptOutput
+from app.ai.prompt_safety import enforce_prompt_budget, sanitize_prompt_text
 from app.ai.image_themes import ImageThemeError, resolve_image_theme
 from app.ai.layouts import (
     IMAGE_LAYOUT_DEFINITIONS,
@@ -195,7 +196,10 @@ class DeepSeekImagePromptBuilder:
                 raise ValueError("report_date 必须来自统计周期并使用 YYYY-MM-DD")
             theme_text = theme.visible_text
             explicit_theme_text = theme_text if theme.has_explicit_style else ""
-            visible_group_name = (data.visible_group_name or data.group_name).strip()
+            visible_group_name, _ = sanitize_prompt_text(
+                data.visible_group_name or data.group_name,
+                allow_newlines=False,
+            )
             if not visible_group_name:
                 raise ValueError("群聊显示名不能为空")
             period_line = f"{data.period_start} ~ {data.period_end}"
@@ -393,7 +397,13 @@ class DeepSeekImagePromptBuilder:
             meta["summary_ms"] = summary_ms
             # 保留旧字段一版，避免历史运行分析与外部读取立即失效。
             meta["deepseek_ms"] = summary_ms
-            return PromptOutput(success=True, prompt=text.strip(), model=api_model, meta=meta)
+            text, prompt_budget_meta = enforce_prompt_budget(
+                text,
+                max_chars=self.settings.image_prompt_max_chars,
+                max_bytes=self.settings.image_prompt_max_bytes,
+            )
+            meta.update(prompt_budget_meta)
+            return PromptOutput(success=True, prompt=text, model=api_model, meta=meta)
         except (ImagePromptTemplateError, ImageThemeError, LayoutPlanError, ValueError) as e:
             logger.warning("Prompt 模板错误：%s", e)
             return PromptOutput(success=False, error=str(e)[:300], model=api_model)
@@ -413,11 +423,16 @@ class DeepSeekImagePromptBuilder:
             or getattr(message, "content_hash", "")
             or f"v2-{index}"
         )
+        safe_sender, _ = sanitize_prompt_text(
+            message.sender_name or "(未知)",
+            allow_newlines=False,
+        )
+        safe_text, _ = sanitize_prompt_text(_to_ai_text(message))
         return PromptMessage(
             message_id=str(message_id),
             timestamp=timestamp,
-            sender_name=message.sender_name or "(未知)",
-            text=_to_ai_text(message).strip(),
+            sender_name=safe_sender or "(未知)",
+            text=safe_text,
             sender_id=str(getattr(message, "sender_id", "") or ""),
         )
 

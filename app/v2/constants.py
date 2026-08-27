@@ -33,6 +33,25 @@ STATUS_FLOW = (
 # 已发送状态不可再发送
 TERMINAL_STATUSES = frozenset({SENT, FAILED, CORRUPT})
 
+# ---------- 正交执行状态（不替换上面的阶段状态） ----------
+EXECUTION_ACTIVE = "ACTIVE"
+EXECUTION_WAIT_RETRY = "WAIT_RETRY"
+EXECUTION_HOLD_MANUAL = "HOLD_MANUAL"
+EXECUTION_COMPLETE = "COMPLETE"
+EXECUTION_FAILED_FINAL = "FAILED_FINAL"
+
+EXECUTION_STATES = frozenset(
+    {
+        EXECUTION_ACTIVE,
+        EXECUTION_WAIT_RETRY,
+        EXECUTION_HOLD_MANUAL,
+        EXECUTION_COMPLETE,
+        EXECUTION_FAILED_FINAL,
+    }
+)
+
+DEFAULT_RETRY_BUDGET = 3
+
 
 # ---------- V2 错误类型 ----------
 WECHAT_DATA_UNAVAILABLE = "WECHAT_DATA_UNAVAILABLE"
@@ -56,6 +75,7 @@ FILE_RANKING_JSON = "ranking.json"
 FILE_RANKING_TXT = "ranking.txt"
 FILE_PROMPT = "image_prompt.txt"
 FILE_PROMPT_ORIGINAL = "image_prompt.original.txt"
+FILE_PROMPT_SAFE = "image_prompt.safe.txt"
 FILE_IMAGE = "daily_image.png"
 FILE_IMAGE_PREVIOUS = "daily_image.previous.png"
 FILE_IMAGE_REGENERATING = "daily_image.regenerating.png"

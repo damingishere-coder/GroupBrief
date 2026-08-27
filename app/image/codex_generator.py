@@ -83,17 +83,17 @@ def _terminate_process_tree(process: subprocess.Popen) -> None:
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
         except (OSError, subprocess.SubprocessError):
-            pass
+            logger.warning("Windows Codex 进程树终止失败", exc_info=True)
     else:
         try:
             os.killpg(process.pid, signal.SIGKILL)
         except OSError:
-            pass
+            logger.warning("Codex 进程组终止失败", exc_info=True)
     if process.poll() is None:
         try:
             process.kill()
         except OSError:
-            pass
+            logger.warning("Codex 子进程强制终止失败", exc_info=True)
 
 
 def _run_codex_process(
@@ -130,7 +130,7 @@ def _run_codex_process(
             try:
                 process.communicate(timeout=5)
             except (subprocess.TimeoutExpired, OSError):
-                pass
+                logger.warning("on_start 失败后的 Codex 管道回收未完成", exc_info=True)
             raise
 
     stdout_tail = _TextTail()
@@ -154,12 +154,12 @@ def _run_codex_process(
                     except Exception:
                         logger.warning("Codex JSONL 事件记录失败，继续等待进程", exc_info=True)
         except (OSError, ValueError):
-            pass
+            logger.warning("Codex 输出管道读取异常", exc_info=True)
         finally:
             try:
                 stream.close()
             except (OSError, ValueError):
-                pass
+                logger.debug("Codex 输出管道关闭异常", exc_info=True)
 
     readers = [
         threading.Thread(
@@ -186,12 +186,12 @@ def _run_codex_process(
                 process.stdin.write(input)
                 process.stdin.flush()
             except (BrokenPipeError, OSError):
-                pass
+                logger.warning("Codex stdin 写入失败", exc_info=True)
             finally:
                 try:
                     process.stdin.close()
                 except (OSError, ValueError):
-                    pass
+                    logger.debug("Codex stdin 关闭异常", exc_info=True)
         process.wait(timeout=timeout)
     except subprocess.TimeoutExpired as exc:
         _terminate_process_tree(process)
@@ -201,7 +201,7 @@ def _run_codex_process(
             try:
                 process.kill()
             except OSError:
-                pass
+                logger.warning("Codex 超时后的强制终止失败", exc_info=True)
         for reader in readers:
             reader.join(timeout=5)
         raise subprocess.TimeoutExpired(
@@ -1268,12 +1268,27 @@ class CodexImageGenerator:
         except Exception:
             logger.warning("候选图片验证失败，将按有限重试策略继续", exc_info=True)
             return None
+        post_promote_warnings: list[str] = []
         if self._is_project_output(output_path):
-            self._save_last_smoke(source, output_path, image_detail)
+            try:
+                self._save_last_smoke(source, output_path, image_detail)
+            except Exception as exc:
+                post_promote_warnings.append(f"smoke_state:{type(exc).__name__}")
+                logger.warning(
+                    "正式图片已原子落盘，但健康快照写入失败；保留图片成功结果",
+                    exc_info=True,
+                )
         receipt_source = self._receipt_source(source, diagnostics)
         recovered_at = datetime_now_iso()
         self._cleanup_attempt_files(attempt)
-        manifest_path.unlink(missing_ok=True)
+        try:
+            manifest_path.unlink(missing_ok=True)
+        except OSError as exc:
+            post_promote_warnings.append(f"manifest_cleanup:{type(exc).__name__}")
+            logger.warning(
+                "正式图片已原子落盘，但尝试清单清理失败；保留图片成功结果",
+                exc_info=True,
+            )
         return ImageTaskResult(
             True,
             image_path=output_path,
@@ -1290,6 +1305,7 @@ class CodexImageGenerator:
                 "codex_stderr_tail": str(attempt.get("codex_stderr_tail") or ""),
                 "candidate_diagnostics": diagnostics,
                 "attempts": list(attempts),
+                "post_promote_warnings": post_promote_warnings,
                 **image_detail,
             },
         )
@@ -1302,7 +1318,7 @@ class CodexImageGenerator:
                 try:
                     Path(raw).unlink(missing_ok=True)
                 except OSError:
-                    pass
+                    logger.warning("Codex 尝试临时文件清理失败：%s", raw, exc_info=True)
 
     @staticmethod
     def _pid_is_running(pid: int) -> bool:
@@ -1354,7 +1370,7 @@ class CodexImageGenerator:
             try:
                 os.killpg(pid, signal.SIGKILL)
             except OSError:
-                pass
+                logger.warning("记录中的 Codex 进程组终止失败：pid=%s", pid, exc_info=True)
         for _ in range(10):
             if not self._pid_is_running(pid):
                 return True
@@ -1436,7 +1452,7 @@ class CodexImageGenerator:
             if isinstance(parsed, dict):
                 return {"ok": True, **parsed}
         except (OSError, json.JSONDecodeError):
-            pass
+            logger.debug("Codex 生图健康快照不可读", exc_info=True)
         return {"ok": False, "status": "NOT_RUN", "detail": "尚未完成真实图片生成"}
 
     def _save_last_smoke(self, source: Path, output_path: Path, detail: dict) -> None:

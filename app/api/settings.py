@@ -56,6 +56,7 @@ EDITABLE_KEYS = {
     "codex_timeout_seconds",
     "codex_generated_images_dir",
     "image_generation_concurrency",
+    "image_fallback_font_path",
     "wechat_sender_mode",
     "wechat_native_action_delay_seconds",
     "wechat_native_stage_timeout_seconds",

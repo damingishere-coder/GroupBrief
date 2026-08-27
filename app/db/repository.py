@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -28,11 +29,17 @@ class DatabaseSchemaError(RuntimeError):
     """正式数据库尚未迁移或关系 Schema 与当前代码不一致。"""
 
 
-def _enable_sqlite_foreign_keys(dbapi_connection, _connection_record) -> None:
-    """SQLite 默认按连接关闭外键；每个运行时连接都必须显式开启。"""
+def _enable_sqlite_connection_pragmas(
+    dbapi_connection,
+    _connection_record,
+    *,
+    busy_timeout_ms: int = 15_000,
+) -> None:
+    """每个 SQLite 连接启用外键，并给短暂锁竞争留出有限等待。"""
     cursor = dbapi_connection.cursor()
     try:
         cursor.execute("PRAGMA foreign_keys = ON")
+        cursor.execute(f"PRAGMA busy_timeout = {max(int(busy_timeout_ms), 1000)}")
     finally:
         cursor.close()
 
@@ -343,9 +350,26 @@ def init_db(settings: Settings) -> Any:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     engine = create_engine(
         f"sqlite:///{db_path}",
-        connect_args={"check_same_thread": False},
+        connect_args={
+            "check_same_thread": False,
+            "timeout": max(int(settings.sqlite_busy_timeout_seconds), 1),
+        },
     )
-    event.listen(engine, "connect", _enable_sqlite_foreign_keys)
+    busy_timeout_ms = max(int(settings.sqlite_busy_timeout_seconds), 1) * 1000
+    event.listen(
+        engine,
+        "connect",
+        partial(
+            _enable_sqlite_connection_pragmas,
+            busy_timeout_ms=busy_timeout_ms,
+        ),
+    )
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            f"PRAGMA busy_timeout = {busy_timeout_ms}"
+        )
+        connection.exec_driver_sql("PRAGMA journal_mode = WAL")
+        connection.exec_driver_sql("PRAGMA synchronous = NORMAL")
     SQLModel.metadata.create_all(engine)
     _ensure_relationship_schema_current()
     _migrate_group_v2_columns()
@@ -386,6 +410,7 @@ def _seed_defaults(settings: Settings) -> None:
         "codex_timeout_seconds": str(settings.codex_timeout_seconds),
         "codex_generated_images_dir": settings.codex_generated_images_dir,
         "image_generation_concurrency": str(settings.image_generation_concurrency),
+        "image_fallback_font_path": settings.image_fallback_font_path,
         "wechat_sender_mode": settings.wechat_sender_mode,
         "wechat_native_action_delay_seconds": str(settings.wechat_native_action_delay_seconds),
         "wechat_native_stage_timeout_seconds": str(settings.wechat_native_stage_timeout_seconds),

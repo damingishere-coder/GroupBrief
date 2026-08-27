@@ -5,6 +5,7 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 import logging
 import os
+from datetime import datetime
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -66,6 +67,7 @@ async def lifespan(app: FastAPI):
     app.state.startup_checks, app.state.startup_check_error = (
         _capture_startup_checks(settings)
     )
+    app.state.startup_checks_at = datetime.now().astimezone().isoformat()
     from app.image.regeneration import recover_pending_regenerations
 
     recovered_image_jobs = recover_pending_regenerations(settings)

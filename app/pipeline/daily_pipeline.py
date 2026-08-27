@@ -31,8 +31,10 @@ from app.config.settings import Settings, get_settings
 from app.core.logging import get_logger
 from app.data_sources.base import V2Message, WeChatDataSource
 from app.data_sources.wechat_data_analysis import WeChatDataAnalysisSource
+from app.data_sources.resilient import ResilientWeChatDataSource
 from app.db import repository as repo
 from app.db.models import Group
+from app.db.resilience import run_with_sqlite_retry
 from app.image.codex_generator import CodexImageGenerator
 from app.image.image_task import ImageJob
 from app.pipeline.delivery_stages import DeliveryStages
@@ -41,6 +43,7 @@ from app.pipeline.image_stages import ImageStages
 from app.ranking.engine import RankingEngine
 from app.ranking.renderer import RankingRenderer
 from app.scheduler.period import PeriodResolver
+from app.scheduler.runtime_status import write_daily_status
 from app.sender.base import WechatSender
 from app.sender.wechat_native import create_wechat_sender
 from app.services.generation_runtime import generation_mutex
@@ -78,7 +81,10 @@ class DailyPipeline:
         dry_run: bool = False,
     ):
         self.settings = settings or get_settings()
-        self.data_source = data_source or WeChatDataAnalysisSource(self.settings)
+        self.data_source = data_source or ResilientWeChatDataSource(
+            WeChatDataAnalysisSource(self.settings),
+            self.settings,
+        )
         self.period_resolver = PeriodResolver()
         self.ranking_engine = ranking_engine or RankingEngine()
         self.renderer = renderer or RankingRenderer()
@@ -118,7 +124,7 @@ class DailyPipeline:
             }]
         window = self.period_resolver.resolve(run_date=requested_date, timezone=self.settings.app_timezone)
         run_date_str = window.run_date.isoformat()
-        self._last_name_sync_report = self._sync_group_names(group_ids)
+        self._last_name_sync_report = self._sync_group_names_safe(group_ids)
         groups = self._load_groups(group_ids)
         if not groups:
             return [{"status": "no_groups", "reason": "无启用群"}]
@@ -326,6 +332,7 @@ class DailyPipeline:
                 status=FAILED,
                 failed_stage="unexpected",
                 error=str(exc)[:300],
+                error_type="UNEXPECTED_GENERATION_ERROR",
             )
             return {
                 "group_name": group_name,
@@ -403,54 +410,183 @@ class DailyPipeline:
 
     def send_due(self, now: datetime | None = None) -> list[dict]:
         now = now or datetime.now(ZoneInfo(self.settings.app_timezone))
-        run_date = now.date().isoformat()
+        return self.send_due_for_dates([now.date().isoformat()], now=now, recovery=False)
+
+    def send_due_for_dates(
+        self,
+        run_dates: list[str],
+        *,
+        now: datetime | None = None,
+        recovery: bool = False,
+    ) -> list[dict]:
+        """扫描指定日报日期。
+
+        默认 ``send_due`` 仍只处理当天。Watchdog 才能传入历史日期；历史任务
+        仍必须通过现有 claim、未知结果锁、目标预检和图片预检。
+        """
+        now = now or datetime.now(ZoneInfo(self.settings.app_timezone))
+        normalized_dates = sorted({validate_run_date(value) for value in run_dates})
         results: list[dict] = []
         groups = self._load_groups()
-        due_group_ids = self._due_sync_group_ids(groups, run_date, now)
-        if due_group_ids:
-            self._last_name_sync_report = self._sync_group_names(due_group_ids)
-            groups = self._load_groups()
-        for group in groups:
-            if not bool(getattr(group, "wechat_send_enabled", False)):
-                continue
-            group_name = group.display_name or group.wechat_group_name
-            run = self.store.load_run(group_name, run_date)
-            status = run.get("status")
-            if status not in (IMAGE_READY, READY_TO_SEND):
-                continue
-            if run.get("sent_at"):
-                continue  # 已发送，绝不重复
-            if run.get("send_hold"):
-                continue  # 手工 Prompt/重生图必须先审核
-            send_time = parse_send_time(group.send_time or run.get("send_time", "08:30"))
-            if now.time() < send_time:
-                continue  # 未到发送时间
-            due_at = datetime.combine(now.date(), send_time, tzinfo=now.tzinfo)
-            late_window = timedelta(minutes=max(int(self.settings.wechat_late_send_window_minutes), 0))
-            if now > due_at + late_window:
-                self.store.update(
-                    group_name,
+        due_group_ids: list[int] = []
+        for run_date in normalized_dates:
+            due_group_ids.extend(
+                self._due_sync_group_ids(
+                    groups,
                     run_date,
-                    send_state="held",
-                    send_hold=True,
-                    send_hold_reason="MISSED_SEND_WINDOW",
-                    needs_manual_send=True,
-                    send_error="已超过到点后 30 分钟自动补发窗口，需人工确认",
-                    send_error_type="MISSED_SEND_WINDOW",
-                    missed_send_window_at=now.isoformat(),
+                    now,
+                    recovery=recovery,
                 )
-                results.append(
-                    {
-                        "group_name": group_name,
-                        "status": "held",
-                        "error_type": "MISSED_SEND_WINDOW",
-                        "detail": "已超过自动补发窗口，需人工确认",
-                    }
+            )
+        due_group_ids = sorted(set(due_group_ids))
+        if due_group_ids:
+            self._last_name_sync_report = self._sync_group_names_safe(due_group_ids)
+            groups = self._load_groups()
+        for run_date in normalized_dates:
+            report_date = date.fromisoformat(run_date)
+            for group in groups:
+                if not bool(getattr(group, "wechat_send_enabled", False)):
+                    continue
+                group_name = group.display_name or group.wechat_group_name
+                run = self.store.load_run(group_name, run_date)
+                status = run.get("status")
+                if status not in (IMAGE_READY, READY_TO_SEND):
+                    continue
+                if run.get("sent_at"):
+                    continue  # 已发送，绝不重复
+                if run.get("send_hold"):
+                    continue  # unknown / 手工审核必须保持 fail-closed
+                send_time = parse_send_time(group.send_time or run.get("send_time", "08:30"))
+                due_at = datetime.combine(report_date, send_time, tzinfo=now.tzinfo)
+                if now < due_at:
+                    continue
+                late_window = timedelta(
+                    minutes=max(int(self.settings.wechat_late_send_window_minutes), 0)
                 )
-                continue
-            result = self._send_one(group, group_name, run, run_date, now)
-            results.append(result)
+                if not recovery and now > due_at + late_window:
+                    self.store.update(
+                        group_name,
+                        run_date,
+                        send_state="held",
+                        send_hold=True,
+                        send_hold_reason="MISSED_SEND_WINDOW",
+                        needs_manual_send=True,
+                        send_error="已超过到点后 30 分钟自动补发窗口，需人工确认",
+                        send_error_type="MISSED_SEND_WINDOW",
+                        missed_send_window_at=now.isoformat(),
+                    )
+                    results.append(
+                        {
+                            "group_name": group_name,
+                            "status": "held",
+                            "error_type": "MISSED_SEND_WINDOW",
+                            "detail": "已超过自动补发窗口，需人工确认",
+                        }
+                    )
+                    continue
+                if recovery:
+                    self.store.update(
+                        group_name,
+                        run_date,
+                        send_recovery=True,
+                        send_recovery_checked_at=now.isoformat(),
+                    )
+                    run = self.store.load_run(group_name, run_date)
+                try:
+                    result = self._send_one(group, group_name, run, run_date, now)
+                except Exception as exc:
+                    logger.exception(
+                        "群 %s 发送异常，检查是否已进入外部提交窗口",
+                        group_name,
+                    )
+                    result, abort_batch = self._handle_send_exception(
+                        group_name,
+                        run_date,
+                        now,
+                        exc,
+                    )
+                    results.append(result)
+                    if abort_batch:
+                        logger.error(
+                            "微信桌面状态可能未知，停止本批次后续群发送 date=%s",
+                            run_date,
+                        )
+                        self._write_runtime_status_safe(normalized_dates)
+                        return results
+                    continue
+                results.append(result)
+        self._write_runtime_status_safe(normalized_dates)
         return results
+
+    def _write_runtime_status_safe(self, run_dates: list[str]) -> None:
+        for run_date in run_dates:
+            try:
+                write_daily_status(self.store, run_date)
+            except Exception:
+                logger.exception("每日运行报告写入失败：run_date=%s", run_date)
+
+    def _handle_send_exception(
+        self,
+        group_name: str,
+        run_date: str,
+        now: datetime,
+        exc: Exception,
+    ) -> tuple[dict, bool]:
+        """隔离明确的提交前异常；未决外部提交则锁单并中止本批次。"""
+        detail = f"发送阶段异常：{type(exc).__name__}: {str(exc)[:220]}"
+        try:
+            run = self.store.load_run(group_name, run_date)
+        except Exception as state_exc:
+            return (
+                {
+                    "group_name": group_name,
+                    "status": "held",
+                    "error_type": "SEND_STATE_UNREADABLE",
+                    "detail": f"{detail}；且无法读取发送状态：{type(state_exc).__name__}",
+                },
+                True,
+            )
+
+        unresolved_stage = ""
+        for stage in ("image", "text"):
+            if (
+                run.get(f"{stage}_attempt_started_at")
+                and not run.get(f"{stage}_attempt_finished_at")
+                and not (run.get(f"{stage}_verified_at") or run.get(f"{stage}_sent_at"))
+            ):
+                unresolved_stage = stage
+                break
+        if not unresolved_stage:
+            return (
+                {
+                    "group_name": group_name,
+                    "status": "failed",
+                    "error_type": "SEND_PRE_SUBMIT_FAILED",
+                    "detail": detail,
+                },
+                False,
+            )
+
+        claim_id = str(run.get("send_claim_id") or "")
+        marked, _, reason = self.store.mark_send_result_unknown(
+            group_name,
+            run_date,
+            claim_id,
+            stage=unresolved_stage,
+            detail=detail,
+            now=now,
+        )
+        if not marked:
+            detail = f"{detail}；unknown 状态持久化失败（{reason}）"
+        return (
+            {
+                "group_name": group_name,
+                "status": "held",
+                "error_type": "SEND_RESULT_UNKNOWN",
+                "detail": detail,
+            },
+            True,
+        )
 
     def _send_one(
         self,
@@ -718,7 +854,7 @@ class DailyPipeline:
                 "error_type": RUN_STATE_CORRUPT,
                 "detail": "运行状态文件损坏，需人工复核",
             }
-        self._last_name_sync_report = self._sync_group_names([group_id])
+        self._last_name_sync_report = self._sync_group_names_safe([group_id])
         group = self._get_group(group_id)
         if not group:
             return {"status": "failed", "error": f"群不存在 {group_id}"}
@@ -958,7 +1094,7 @@ class DailyPipeline:
                     "error": "run_date 必须是有效的 YYYY-MM-DD 日期",
                 }
             run_date = parsed_run_date.isoformat()
-        self._last_name_sync_report = self._sync_group_names([group_id])
+        self._last_name_sync_report = self._sync_group_names_safe([group_id])
         group = self._get_group(group_id)
         if not group:
             return {"status": "failed", "error": f"群不存在 {group_id}"}
@@ -1024,8 +1160,14 @@ class DailyPipeline:
     def _sync_group_names(self, group_ids: list[int] | None = None) -> GroupNameSyncReport:
         from sqlmodel import Session
 
-        with Session(repo.engine) as session:
-            report = GroupNameSyncService(self.data_source).sync(session, group_ids=group_ids)
+        def operation() -> GroupNameSyncReport:
+            with Session(repo.engine) as session:
+                return GroupNameSyncService(self.data_source).sync(session, group_ids=group_ids)
+
+        report = run_with_sqlite_retry(
+            operation,
+            max_attempts=self.settings.sqlite_retry_max_attempts,
+        )
         logger.info(
             "流水线群名同步：status=%s checked=%d updated=%d skipped=%d",
             report.status,
@@ -1034,6 +1176,22 @@ class DailyPipeline:
             len(report.skipped),
         )
         return report
+
+    def _sync_group_names_safe(
+        self,
+        group_ids: list[int] | None = None,
+    ) -> GroupNameSyncReport:
+        """实时群名同步失败时保留缓存名称，不让全批生成/发送消失。"""
+        try:
+            return self._sync_group_names(group_ids)
+        except Exception as exc:
+            logger.exception("流水线群名同步异常，降级使用数据库缓存名称")
+            return GroupNameSyncReport(
+                status="unavailable",
+                source=str(getattr(self.data_source, "name", "unknown") or "unknown"),
+                checked=len(group_ids or []),
+                detail=f"群名同步异常：{type(exc).__name__}",
+            )
 
     def _name_sync_audit(self, group: Group) -> dict:
         mode = send_target_mode(group)
@@ -1054,6 +1212,8 @@ class DailyPipeline:
         groups: list[Group],
         run_date: str,
         now: datetime,
+        *,
+        recovery: bool = False,
     ) -> list[int]:
         late_window = timedelta(minutes=max(int(self.settings.wechat_late_send_window_minutes), 0))
         group_ids: list[int] = []
@@ -1067,16 +1227,22 @@ class DailyPipeline:
             if run.get("sent_at") or run.get("send_hold"):
                 continue
             send_time = parse_send_time(group.send_time or run.get("send_time", "08:30"))
-            due_at = datetime.combine(now.date(), send_time, tzinfo=now.tzinfo)
-            if due_at <= now <= due_at + late_window:
+            due_at = datetime.combine(date.fromisoformat(run_date), send_time, tzinfo=now.tzinfo)
+            if due_at <= now and (recovery or now <= due_at + late_window):
                 group_ids.append(int(group.id))
         return group_ids
 
     def _load_groups(self, group_ids: list[int] | None = None) -> list[Group]:
         from sqlmodel import Session
 
-        with Session(repo.engine) as session:
-            groups = repo.list_groups(session, only_enabled=True)
+        def operation() -> list[Group]:
+            with Session(repo.engine) as session:
+                return repo.list_groups(session, only_enabled=True)
+
+        groups = run_with_sqlite_retry(
+            operation,
+            max_attempts=self.settings.sqlite_retry_max_attempts,
+        )
         if group_ids:
             groups = [g for g in groups if g.id in group_ids]
         return groups
@@ -1084,8 +1250,14 @@ class DailyPipeline:
     def _get_group(self, group_id: int) -> Group | None:
         from sqlmodel import Session
 
-        with Session(repo.engine) as session:
-            return repo.get_active_group(session, group_id)
+        def operation() -> Group | None:
+            with Session(repo.engine) as session:
+                return repo.get_active_group(session, group_id)
+
+        return run_with_sqlite_retry(
+            operation,
+            max_attempts=self.settings.sqlite_retry_max_attempts,
+        )
 
     def _save_json(self, path: Path, data) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)

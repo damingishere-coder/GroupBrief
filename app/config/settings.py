@@ -10,7 +10,24 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _ENVIRONMENT_ONLY_FIELDS = frozenset(
-    {"allow_test_providers", "legacy_v1_write_mode", "scheduler_owner"}
+    {
+        "allow_test_providers",
+        "legacy_v1_write_mode",
+        "scheduler_owner",
+        "reliability_watchdog_enabled",
+        "reliability_lookback_days",
+        "reliability_watchdog_interval_minutes",
+        "wechat_fetch_max_attempts",
+        "wechat_fetch_retry_backoff_seconds",
+        "wechat_fetch_circuit_failure_threshold",
+        "wechat_fetch_circuit_cooldown_seconds",
+        "wechat_runtime_export_fallback_enabled",
+        "image_prompt_max_chars",
+        "image_prompt_max_bytes",
+        "sqlite_busy_timeout_seconds",
+        "sqlite_retry_max_attempts",
+        "scheduler_heartbeat_stale_seconds",
+    }
 )
 
 
@@ -33,6 +50,8 @@ class Settings(BaseSettings):
 
     # 数据库
     database_url: str = "sqlite:///data/groupbrief.db"
+    sqlite_busy_timeout_seconds: int = 15
+    sqlite_retry_max_attempts: int = 3
 
     # V1 兼容历史读取；正式 V2 使用下方 WeChatDataAnalysis MCP/导出配置。
     history_provider_primary: str = "wechat_data_analysis"
@@ -52,6 +71,12 @@ class Settings(BaseSettings):
     # 单页范围读取允许更长超时；整组读取总时限独立控制，兼容旧分页路径。
     wechat_mcp_range_timeout_seconds: int = 60
     wechat_fetch_total_timeout_seconds: int = 600
+    wechat_fetch_max_attempts: int = 3
+    wechat_fetch_retry_backoff_seconds: float = 1.0
+    wechat_fetch_circuit_failure_threshold: int = 3
+    wechat_fetch_circuit_cooldown_seconds: int = 300
+    # 仅当 MCP 明确读取失败且完整 JSON 导出能独立返回同一时间窗时切换；不拼接两源。
+    wechat_runtime_export_fallback_enabled: bool = True
     # 额外允许的 MCP 主机（逗号分隔，仅 Docker 容器访问宿主机场景使用，
     # 如 host.docker.internal）。默认空：仍只允许本机回环地址。
     wechat_mcp_allowed_hosts: str = ""
@@ -96,6 +121,11 @@ class Settings(BaseSettings):
     codex_generated_images_dir: str = ""  # 留空时默认 ~/.codex/generated_images
     # Codex/ImageGen 任务在可靠结构化回执下允许受控并发；默认两路。
     image_generation_concurrency: int = 2
+    # 本地 Level 3 信息图字体；留空时按 Windows 常见中文字体顺序探测。
+    image_fallback_font_path: str = ""
+    # 最终 image_prompt.txt 的硬边界；仅部署环境可调，避免运行时误设为无限。
+    image_prompt_max_chars: int = 24000
+    image_prompt_max_bytes: int = 65536
 
     # 微信发送（V2）。默认适配微信 4.1.x 的 Windows 键盘/剪贴板/OCR 驱动；
     # legacy_cli 保留旧 wechat-automation-api 兼容入口。
@@ -133,6 +163,12 @@ class Settings(BaseSettings):
     schedule_generate_time: str = "00:15"
     schedule_email_time: str = "after_generate"
     schedule_startup_catchup_enabled: bool = True
+    # 无人值守恢复：定期扫描最近 N 天，按旧到新补生成和明确未提交的发送。
+    # 仅通过环境/部署配置修改，避免运行时改值却没有重建 APScheduler job。
+    reliability_watchdog_enabled: bool = True
+    reliability_lookback_days: int = 30
+    reliability_watchdog_interval_minutes: int = 10
+    scheduler_heartbeat_stale_seconds: int = 300
 
     # 路径
     @property

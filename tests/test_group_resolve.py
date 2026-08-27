@@ -7,7 +7,7 @@ from datetime import datetime
 import pytest
 from fastapi import FastAPI
 from sqlmodel import SQLModel, Session, create_engine, select
-from starlette.testclient import TestClient
+from fastapi.testclient import TestClient
 
 from app.api import groups as groups_api
 from app.data_sources.base import DataSourceHealth, DataSourceStatus, ResolvedGroup

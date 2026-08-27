@@ -1,9 +1,18 @@
 """V2 逐群邮件测试：所有 SMTP 均使用内存 fake，不触发真实网络。"""
 
 import json
+from io import BytesIO
 from types import SimpleNamespace
 
+from PIL import Image
+
 from scripts import send_daily_email as mail_script
+
+
+def _png_bytes() -> bytes:
+    buffer = BytesIO()
+    Image.new("RGBA", (2, 2), (20, 40, 60, 255)).save(buffer, format="PNG")
+    return buffer.getvalue()
 
 
 def _settings(output_dir, *, enabled=True):
@@ -67,7 +76,7 @@ def test_collect_group_inputs_skips_empty_and_invalid_image(tmp_path):
 
 def test_build_message_uses_raw_ranking_and_one_image_attachment(tmp_path):
     run_date = "2026-08-21"
-    image = b"\x89PNG\r\n\x1a\nminimal-png"
+    image = _png_bytes()
     group_dir = _write_group(
         tmp_path,
         "示例群 A",
@@ -97,7 +106,7 @@ def test_build_message_uses_raw_ranking_and_one_image_attachment(tmp_path):
 
 def test_collect_group_inputs_prefers_current_image_setting_over_stale_run_snapshot(tmp_path):
     run_date = "2026-08-21"
-    image = b"\x89PNG\r\n\x1a\nminimal-png"
+    image = _png_bytes()
     _write_group(
         tmp_path,
         "后来开启图片的群",

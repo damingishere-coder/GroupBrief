@@ -11,22 +11,23 @@ import json
 import os
 import subprocess
 import sys
-import threading
-from datetime import date, datetime
+import uuid
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from app.config.settings import PROJECT_ROOT, Settings, get_settings
 from app.core.logging import get_logger
+from app.core.observability import log_event
 from app.db import repository as repo
 from app.pipeline.daily_pipeline import DailyPipeline, parse_date
 from app.services.generation_runtime import GenerationBusyError, generation_mutex
 from app.services.email_service import email_delivery_config_error
 from app.v2.constants import IMAGE_GENERATION_FAILED, SCHEDULER_STATE_CORRUPT
+from app.v2.run_store import _run_mutex
 from app.scheduler.outcome import ProcessExitCode, attach_outcome, summarize_results
 
 logger = get_logger("groupbrief.scheduler")
-_STATE_LOCK = threading.RLock()
 # 兼容旧测试/调用名，底层已改为 V1/V2 共用锁。
 _daily_mutex = generation_mutex
 
@@ -81,12 +82,15 @@ class DailyScheduleState:
         timestamp_fields = (
             "generation_started_at",
             "generation_completed_at",
+            "generation_invocation_completed_at",
             "generation_resumed_at",
             "generation_recovered_at",
             "email_started_at",
             "email_completed_at",
             "last_invocation_completed_at",
             "updated_at",
+            "owner_busy_at",
+            "next_retry_at",
         )
         for field in timestamp_fields:
             value = data.get(field)
@@ -135,20 +139,23 @@ class DailyScheduleState:
                 "generation_completed_at",
                 "email_started_at",
                 "email_completed_at",
+                "owner_busy_at",
             )
         ):
             return "lifecycle_marker_missing"
         return None
 
     def update(self, run_date: str, **fields) -> dict:
-        with _STATE_LOCK:
+        path = self.path(run_date)
+        with _run_mutex(path):
             data = self.load(run_date)
             if data.get("state_status") == "corrupt":
                 raise ScheduleStateCorruptionError("调度状态文件损坏，禁止自动覆盖")
             data.update(fields)
             data["run_date"] = run_date
+            data.setdefault("run_id", f"groupbrief:{run_date}:{uuid.uuid4().hex[:12]}")
+            data["state_version"] = int(data.get("state_version") or 0) + 1
             data["updated_at"] = _now_iso()
-            path = self.path(run_date)
             path.parent.mkdir(parents=True, exist_ok=True)
             temp = path.with_suffix(".json.tmp")
             temp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -176,7 +183,12 @@ def run_daily_v2_job(
             result = _run_locked(settings, parsed_date, skip_email=skip_email)
     except GenerationBusyError as exc:
         logger.info("V2 每日任务未领取：%s", exc)
-        result = {"status": "already_running", "detail": str(exc)}
+        result = {
+            "status": "already_running",
+            "error_type": "GENERATION_OWNER_BUSY",
+            "retryable": True,
+            "detail": str(exc),
+        }
     except Exception as exc:
         logger.exception("V2 每日任务异常")
         result = {"status": "failed", "detail": str(exc)[:300]}
@@ -192,23 +204,40 @@ def _finalize_invocation(settings: Settings, run_date: str, result: dict) -> dic
         finalized["outcome_status"],
         finalized["exit_code"],
     )
-    if finalized["outcome_status"] == "already_running":
-        return finalized
-
+    state_snapshot = DailyScheduleState(settings.output_dir).load(run_date)
+    log_event(
+        logger,
+        "DAILY_INVOCATION_FINISHED",
+        run_id=state_snapshot.get("run_id"),
+        run_date=run_date,
+        stage="DAILY",
+        status=finalized.get("outcome_status"),
+        response_code=finalized.get("exit_code"),
+        error_type=finalized.get("error_type", ""),
+        error_summary=finalized.get("detail", ""),
+    )
     state_store = DailyScheduleState(settings.output_dir)
     path = state_store.path(run_date)
-    if not path.is_file():
+    if not path.is_file() and finalized["outcome_status"] != "already_running":
         return finalized
     state = state_store.load(run_date)
     if state.get("state_status") == "corrupt":
         return finalized
-    state_store.update(
-        run_date,
-        last_invocation_source_status=str(finalized.get("status") or ""),
-        last_invocation_status=finalized["outcome_status"],
-        last_invocation_exit_code=finalized["exit_code"],
-        last_invocation_completed_at=_now_iso(),
-    )
+    fields = {
+        "last_invocation_source_status": str(finalized.get("status") or ""),
+        "last_invocation_status": finalized["outcome_status"],
+        "last_invocation_exit_code": finalized["exit_code"],
+        "last_invocation_completed_at": _now_iso(),
+    }
+    if finalized["outcome_status"] == "already_running":
+        busy_count = int(state.get("owner_busy_count") or 0) + 1
+        now = datetime.now().astimezone()
+        fields.update(
+            owner_busy_at=now.isoformat(),
+            owner_busy_count=busy_count,
+            next_retry_at=(now.replace(microsecond=0) + timedelta(minutes=5)).isoformat(),
+        )
+    state_store.update(run_date, **fields)
     return finalized
 
 
@@ -255,8 +284,9 @@ def _run_locked(settings: Settings, run_date: date, *, skip_email: bool) -> dict
                 generation_hold=False,
                 generation_error="",
             )
+        pipeline = DailyPipeline(settings=settings)
         try:
-            generation_results = DailyPipeline(settings=settings).generate_all(
+            generation_results = pipeline.generate_all(
                 run_date=run_date_text, acquire_lock=False
             )
         except Exception as exc:
@@ -266,16 +296,24 @@ def _run_locked(settings: Settings, run_date: date, *, skip_email: bool) -> dict
                 generation_hold=True,
                 generation_error=str(exc)[:300],
             )
+            writer = getattr(pipeline, "_write_runtime_status_safe", None)
+            if callable(writer):
+                writer([run_date_text])
             raise
         generation_status = _generation_status(generation_results)
-        state = state_store.update(
-            run_date_text,
-            generation_completed_at=_now_iso(),
-            generation_status=generation_status,
-            generation_results=_compact_results(generation_results),
-            generation_hold=False,
-            generation_error="",
-        )
+        completion_fields = {
+            "generation_invocation_completed_at": _now_iso(),
+            "generation_status": generation_status,
+            "generation_results": _compact_results(generation_results),
+            "generation_hold": generation_status in {"blocked", "failed", "partial"},
+            "generation_error": "",
+        }
+        if _generation_results_terminal(generation_results):
+            completion_fields["generation_completed_at"] = _now_iso()
+        state = state_store.update(run_date_text, **completion_fields)
+        writer = getattr(pipeline, "_write_runtime_status_safe", None)
+        if callable(writer):
+            writer([run_date_text])
     else:
         state = state_store.load(run_date_text)
         try:
@@ -516,6 +554,23 @@ def _run_locked(settings: Settings, run_date: date, *, skip_email: bool) -> dict
 
 def _generation_status(results: list[dict]) -> str:
     return str(summarize_results(results)["outcome_status"])
+
+
+def _generation_results_terminal(results: list[dict]) -> bool:
+    """批次内所有群都已成功或进入明确人工/最终终态时才封存批次。"""
+    if not results:
+        return False
+    terminal_statuses = {
+        "success",
+        "ready_to_send",
+        "already_completed",
+        "skipped",
+        "no_groups",
+        "held",
+        "blocked",
+        "failed_final",
+    }
+    return all(str(item.get("status") or "").lower() in terminal_statuses for item in results)
 
 
 def _reconcile_completed_generation(

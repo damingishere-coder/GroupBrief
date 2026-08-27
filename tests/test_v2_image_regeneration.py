@@ -3,17 +3,26 @@ from __future__ import annotations
 import threading
 import time
 import hashlib
+from io import BytesIO
 from types import SimpleNamespace
 
 import pytest
+from PIL import Image
 
 from app.image.image_task import ImageTaskResult
 from app.image.regeneration import enqueue_regeneration, run_regeneration_now
 from app.image.regeneration import claim_regeneration_candidate, list_regeneration_candidates
 from app.v2.run_store import RunStore
 
-OLD_PNG = b"\x89PNG\r\n\x1a\nold-image"
-NEW_PNG = b"\x89PNG\r\n\x1a\nnew-image"
+
+def _png_bytes(color: tuple[int, int, int, int]) -> bytes:
+    buffer = BytesIO()
+    Image.new("RGBA", (2, 2), color).save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+OLD_PNG = _png_bytes((20, 40, 60, 255))
+NEW_PNG = _png_bytes((80, 100, 120, 255))
 
 
 class SuccessGenerator:

@@ -15,7 +15,7 @@ import pytest
 from fastapi import FastAPI
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine
-from starlette.testclient import TestClient
+from fastapi.testclient import TestClient
 
 from app.api import settings as settings_api
 from app.config.settings import Settings, get_settings

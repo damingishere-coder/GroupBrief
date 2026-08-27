@@ -28,7 +28,16 @@ _SUCCESS = frozenset(
 )
 _FAILED = frozenset({"failed", "error"})
 _PARTIAL = frozenset({"partial"})
-_BLOCKED = frozenset({"blocked", "held", "unknown", "result_unknown"})
+_BLOCKED = frozenset(
+    {
+        "blocked",
+        "held",
+        "unknown",
+        "result_unknown",
+        "retry_scheduled",
+        "failed_final",
+    }
+)
 _ALREADY_RUNNING = frozenset({"already_running"})
 _NOT_RUN = frozenset({"not_run", "no_groups", "no_work", "not_due", "empty"})
 

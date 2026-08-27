@@ -20,6 +20,10 @@ from app.sender.wechat_native import (
 import pytest
 
 
+def _write_valid_png(path: Path) -> None:
+    Image.new("RGBA", (8, 8), (0, 0, 0, 0)).save(path, format="PNG")
+
+
 class FakeNativeDriver:
     def __init__(self, *, verify=True, text=True, image=True):
         self.verify = verify
@@ -213,7 +217,7 @@ def test_verify_target_fails_closed_on_ambiguous_result(tmp_path):
 
 def test_bundle_verifies_once_then_sends_text_and_image(tmp_path):
     image = tmp_path / "daily_image.png"
-    image.write_bytes(b"\x89PNG\r\n\x1a\nmock")
+    _write_valid_png(image)
     driver = FakeNativeDriver()
     sender = WechatNativeSender(_settings(tmp_path), driver=driver)
 
@@ -226,7 +230,7 @@ def test_bundle_verifies_once_then_sends_text_and_image(tmp_path):
 
 def test_bundle_stops_when_target_verification_fails(tmp_path):
     image = tmp_path / "daily_image.png"
-    image.write_bytes(b"\x89PNG\r\n\x1a\nmock")
+    _write_valid_png(image)
     driver = FakeNativeDriver(verify=False)
     sender = WechatNativeSender(_settings(tmp_path), driver=driver)
 
@@ -239,7 +243,7 @@ def test_bundle_stops_when_target_verification_fails(tmp_path):
 
 def test_bundle_reports_image_failure_after_text_success(tmp_path):
     image = tmp_path / "daily_image.png"
-    image.write_bytes(b"\x89PNG\r\n\x1a\nmock")
+    _write_valid_png(image)
     driver = FakeNativeDriver(image=False)
     sender = WechatNativeSender(_settings(tmp_path), driver=driver)
 

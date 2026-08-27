@@ -4,6 +4,7 @@ import json
 from datetime import datetime
 
 import app.services.email_service as email_module
+from PIL import Image
 from sqlmodel import Session, select
 
 from app.config.settings import Settings, get_settings
@@ -216,7 +217,7 @@ def test_email_quit_failure_does_not_retry(tmp_path, monkeypatch):
 
 def test_email_send_is_per_group_and_attaches_valid_poster(tmp_path, monkeypatch):
     poster = tmp_path / "poster.png"
-    poster.write_bytes(b"\x89PNG\r\n\x1a\nminimal-png")
+    Image.new("RGBA", (2, 2), (20, 40, 60, 255)).save(poster, format="PNG")
     settings2 = Settings(
         email_enabled=True,
         email_smtp_host="smtp.example.com",

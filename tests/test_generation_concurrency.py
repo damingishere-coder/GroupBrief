@@ -31,16 +31,30 @@ def _isolate_concurrency_tests_from_group_name_sync(monkeypatch):
 class DelayedSource(WeChatDataSource):
     name = "delayed"
 
-    def __init__(self):
+    def __init__(self, barrier_participants: int = 0):
         self.lock = threading.Lock()
         self.active = 0
         self.maximum = 0
+        self.barrier = (
+            threading.Barrier(barrier_participants)
+            if barrier_participants > 1
+            else None
+        )
+        self.barrier_slots = barrier_participants
+        self.barrier_guard = threading.Lock()
 
     def fetch_messages(self, group_id, start_time, end_time):
         with self.lock:
             self.active += 1
             self.maximum = max(self.maximum, self.active)
-        time.sleep(0.06)
+        with self.barrier_guard:
+            use_barrier = self.barrier is not None and self.barrier_slots > 0
+            if use_barrier:
+                self.barrier_slots -= 1
+        if use_barrier:
+            self.barrier.wait(timeout=5)
+        else:
+            time.sleep(0.06)
         with self.lock:
             self.active -= 1
         if group_id == "group-3":
@@ -59,18 +73,32 @@ class DelayedSource(WeChatDataSource):
 
 
 class DelayedPrompt:
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, barrier_participants: int = 0):
         self.settings = settings
         self.lock = threading.Lock()
         self.active = 0
         self.maximum = 0
+        self.barrier = (
+            threading.Barrier(barrier_participants)
+            if barrier_participants > 1
+            else None
+        )
+        self.barrier_slots = barrier_participants
+        self.barrier_guard = threading.Lock()
 
     def build(self, _data):
         with bounded_slot("deepseek_request", self.settings.ai_request_concurrency):
             with self.lock:
                 self.active += 1
                 self.maximum = max(self.maximum, self.active)
-            time.sleep(0.06)
+            with self.barrier_guard:
+                use_barrier = self.barrier is not None and self.barrier_slots > 0
+                if use_barrier:
+                    self.barrier_slots -= 1
+            if use_barrier:
+                self.barrier.wait(timeout=5)
+            else:
+                time.sleep(0.06)
             with self.lock:
                 self.active -= 1
         return PromptOutput(True, "完整 Prompt", meta={"api_call_count": 1, "chunk_count": 1})
@@ -101,6 +129,7 @@ class ImmediateFakeImageGenerator:
         self.active = 0
         self.maximum = 0
         self.lock = threading.Lock()
+        self.barrier = threading.Barrier(2)
 
     def generate(self, prompt_file, output_path):
         from app.image.image_task import ImageTaskResult
@@ -112,14 +141,16 @@ class ImmediateFakeImageGenerator:
             self.calls.append(prompt)
         if prompt == "Prompt 快群":
             self.prompt_order.image_started.set()
-        time.sleep(0.15)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_bytes(bytes.fromhex(
-            "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489"
-            "0000000d4944415478da63f8cfc0f80100050001fff83f240000000049454e44ae426082"
-        ))
-        with self.lock:
-            self.active -= 1
+        try:
+            self.barrier.wait(timeout=5)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_bytes(bytes.fromhex(
+                "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489"
+                "0000000d4944415478da63f8cfc0f80100050001fff83f240000000049454e44ae426082"
+            ))
+        finally:
+            with self.lock:
+                self.active -= 1
         return ImageTaskResult(True, image_path=output_path)
 
 
@@ -130,8 +161,8 @@ def test_five_groups_overlap_with_limits_order_and_failure_isolation(tmp_path, m
         wechat_fetch_concurrency=3,
         ai_request_concurrency=2,
     )
-    source = DelayedSource()
-    prompt = DelayedPrompt(settings)
+    source = DelayedSource(barrier_participants=3)
+    prompt = DelayedPrompt(settings, barrier_participants=2)
     groups = [
         Group(
             display_name=f"群{index}",

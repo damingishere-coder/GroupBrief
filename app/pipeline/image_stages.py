@@ -9,6 +9,8 @@ import uuid
 
 from app.image.image_task import ImageJob, SerialImageQueue
 from app.image.regeneration import normalize_candidate_diagnostics
+from app.core.logging import get_logger
+from app.core.observability import log_event
 from app.v2.constants import (
     FAILED,
     IMAGE_GENERATION_FAILED,
@@ -16,6 +18,8 @@ from app.v2.constants import (
     READY_TO_SEND,
 )
 from app.v2.run_store import RunStore
+
+logger = get_logger("groupbrief.pipeline")
 
 
 class ImageStages:
@@ -133,7 +137,29 @@ class ImageStages:
             codex_stderr_tail=str(generator_detail.get("codex_stderr_tail") or ""),
             image_candidate_diagnostics=generator_detail.get("candidate_diagnostics") or [],
             image_attempts=generator_detail.get("attempts") or [],
+            image_fallback_level=int(generator_detail.get("fallback_level") or 0),
+            image_variant=str(generator_detail.get("image_variant") or "normal"),
+            image_fallback_reason=str(generator_detail.get("fallback_reason") or ""),
+            image_fallback_font=str(generator_detail.get("fallback_font") or ""),
+            image_safety_redactions=generator_detail.get("safety_redactions") or [],
+            image_force_local_fallback=(
+                False if result["success"] else current.get("image_force_local_fallback", False)
+            ),
             image_job=next_job,
+        )
+        latest = self.store.load_run(job.group_name, run_date)
+        log_event(
+            logger,
+            "IMAGE_GENERATION_FINISHED",
+            group_task_id=latest.get("group_task_id"),
+            group_name=job.group_name,
+            run_date=run_date,
+            stage="IMAGE",
+            status="success" if result["success"] else "failed",
+            duration_ms=imagegen_ms,
+            attempt=latest.get("image_attempt_count", 0),
+            error_type=error_type if not result["success"] else "",
+            error_summary=error_detail or "",
         )
 
     def advance_ready(self, job: ImageJob, run_date: str) -> None:
@@ -155,6 +181,18 @@ class ImageStages:
         queue_results = queue.run_all(image_jobs)
         final_results: list[dict] = []
         for job, queue_result in zip(image_jobs, queue_results):
+            if queue_result.get("hook_error"):
+                final_results.append(
+                    {
+                        "group_name": job.group_name,
+                        "status": "failed",
+                        "error_type": "IMAGE_STATE_PERSIST_FAILED",
+                        "detail": queue_result.get("detail")
+                        or "图片结果状态持久化失败",
+                        "failed_stage": "image",
+                    }
+                )
+                continue
             after_hook(job, run_date)
             run = self.store.load_run(job.group_name, run_date)
             final_status = run.get("status")
