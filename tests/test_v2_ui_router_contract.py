@@ -35,6 +35,7 @@ EXPECTED_V2_UI_OPERATIONS = {
     ("POST", "/api/v2/pipeline/send-due", "pipeline_send_due_api_v2_pipeline_send_due_post"),
     ("POST", "/api/v2/pipeline/send", "pipeline_send_api_v2_pipeline_send_post"),
     ("POST", "/api/v2/pipeline/resolve-send-unknown", "pipeline_resolve_send_unknown_api_v2_pipeline_resolve_send_unknown_post"),
+    ("POST", "/api/v2/pipeline/resolve-prompt-unknown", "pipeline_resolve_prompt_unknown_api_v2_pipeline_resolve_prompt_unknown_post"),
     ("POST", "/api/v2/pipeline/resolve-manual-send", "pipeline_resolve_manual_send_api_v2_pipeline_resolve_manual_send_post"),
 }
 
@@ -117,6 +118,50 @@ def test_dashboard_counts_send_unknown_as_held_and_surfaces_send_error(
     }
     assert result["cards"][0]["error"] == "文字已提交但 UI 验证结果未知"
     assert result["cards"][0]["send_error_type"] == "SEND_RESULT_UNKNOWN"
+
+
+def test_dashboard_counts_prompt_unknown_as_held(tmp_path, monkeypatch) -> None:
+    group = SimpleNamespace(
+        id=9,
+        display_name="Prompt 暂停群",
+        wechat_group_name="Prompt 暂停群",
+        send_time="08:30",
+        schedule_rule="daily",
+        image_enabled=True,
+        wechat_send_enabled=True,
+        ranking_template="",
+        image_prompt_template="",
+    )
+
+    class FakeStore:
+        def load_run(self, _group_name, _run_date):
+            return {
+                "status": "RANKING_READY",
+                "prompt_hold": True,
+                "prompt_hold_reason": "PROMPT_RESULT_UNKNOWN",
+                "prompt_operation_id": "operation-123",
+                "prompt_operation_status": "unknown",
+                "error": "Codex GPT 超时且结果未知",
+            }
+
+        def image_path(self, _group_name, _run_date):
+            return Path(tmp_path) / "missing.png"
+
+        def ranking_json_path(self, _group_name, _run_date):
+            return Path(tmp_path) / "missing-ranking.json"
+
+    monkeypatch.setattr(v2_ui_read, "_store", lambda _settings: FakeStore())
+    monkeypatch.setattr(v2_ui_read.repo, "list_groups", lambda *_args, **_kwargs: [group])
+
+    result = v2_ui_read.dashboard(
+        session=object(),
+        settings=Settings(_env_file=None, output_dir=tmp_path),
+        run_date="2026-08-27",
+    )
+
+    assert result["counts"]["held"] == 1
+    assert result["counts"]["pending"] == 0
+    assert result["cards"][0]["prompt_operation_id"] == "operation-123"
 
 
 def test_dashboard_accepts_run_date_and_returns_top_five_ranking_preview(

@@ -441,6 +441,58 @@ class RunStore:
             )
             return self.save_run(group_name, run_date, data)
 
+    def resolve_prompt_result_unknown(
+        self,
+        group_name: str,
+        run_date: str,
+        *,
+        expected_operation_id: str,
+        now: datetime,
+    ) -> tuple[bool, dict, str]:
+        """CAS 确认丢弃一次未知 Prompt 结果；本方法不调用外部模型。"""
+        path = self.run_path(group_name, run_date)
+        with _run_mutex(path):
+            data = self.load_run(group_name, run_date)
+            if self._is_corrupt(data):
+                return False, data, "state_corrupt"
+            if (
+                data.get("prompt_operation_status") != "unknown"
+                or not data.get("prompt_hold")
+                or data.get("prompt_hold_reason") != "PROMPT_RESULT_UNKNOWN"
+            ):
+                return False, data, "not_unknown"
+            operation_id = str(data.get("prompt_operation_id") or "")
+            if not expected_operation_id or operation_id != expected_operation_id:
+                return False, data, "stale"
+            if isinstance(data.get("prompt_operation_result"), dict):
+                return False, data, "result_available"
+
+            resolved_at = now.isoformat()
+            history = list(data.get("prompt_resolution_history") or [])
+            history.append(
+                {
+                    "operation_id": operation_id,
+                    "resolution": "discard_and_retry",
+                    "resolved_at": resolved_at,
+                    "previous_error": str(data.get("prompt_operation_error") or data.get("error") or ""),
+                }
+            )
+            data.update(
+                prompt_operation_status="failed",
+                prompt_operation_finished_at=resolved_at,
+                prompt_operation_error="已人工确认丢弃上次未知结果，可显式重新生成",
+                prompt_operation_result=None,
+                prompt_hold=False,
+                prompt_hold_reason="",
+                prompt_resolution_history=history[-20:],
+                prompt_last_resolution="discard_and_retry",
+                prompt_last_resolved_at=resolved_at,
+                needs_manual_review=False,
+            )
+            if str(data.get("error_type") or "") == "PROMPT_RESULT_UNKNOWN":
+                data.update(error="", error_type="", failed_stage="")
+            return True, self.save_run(group_name, run_date, data), "resolved"
+
     def previous_theme_signature(self, group_name: str, run_date: str) -> str:
         """读取当前日期之前最近一次运行的实际风格签名。"""
         validate_run_date(run_date)

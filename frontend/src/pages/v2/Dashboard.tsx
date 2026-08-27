@@ -14,6 +14,7 @@ import {
   pipelineGenerate,
   pipelineSend,
   resolveManualSend,
+  resolvePromptUnknown,
 } from "../../api";
 import {
   Button,
@@ -97,6 +98,7 @@ interface TaskActionsProps {
   senderOk: boolean;
   senderDetail: string;
   onGenerate: () => void;
+  onResolvePrompt: () => void;
   onSend: () => void;
   onResolve: () => void;
 }
@@ -108,10 +110,12 @@ function TaskActions({
   senderOk,
   senderDetail,
   onGenerate,
+  onResolvePrompt,
   onSend,
   onResolve,
 }: TaskActionsProps) {
-  const canGenerate = card.status !== "SENT";
+  const canGenerate = card.status !== "SENT" && !card.prompt_hold;
+  const canResolvePrompt = card.prompt_hold && card.prompt_hold_reason === "PROMPT_RESULT_UNKNOWN";
   const canSend = ["IMAGE_READY", "READY_TO_SEND"].includes(card.status) && !card.sent_at && !card.send_hold;
 
   return (
@@ -129,6 +133,18 @@ function TaskActions({
           title={generating ? "正在生成中，请耐心等待" : "立即生成当前选择日期的日报"}
         >
           {generating ? "生成中…" : "立即生成"}
+        </Button>
+      )}
+      {canResolvePrompt && (
+        <Button tone="secondary" className="ui-button-compact" onClick={onResolvePrompt}>
+          <WarningCircle size={16} aria-hidden="true" />
+          核对后重试
+        </Button>
+      )}
+      {card.prompt_hold && !canResolvePrompt && (
+        <Button tone="ghost" className="ui-button-compact" disabled title="当前 Prompt 暂停原因需要人工检查运行记录">
+          <WarningCircle size={16} aria-hidden="true" />
+          Prompt 待复核
         </Button>
       )}
       {canSend && senderOk && (
@@ -165,6 +181,7 @@ export default function Dashboard() {
   const [generatingId, setGeneratingId] = useState<number | null>(null);
   const [sendingId, setSendingId] = useState<number | null>(null);
   const [sendCard, setSendCard] = useState<DashboardCard | null>(null);
+  const [promptRetryCard, setPromptRetryCard] = useState<DashboardCard | null>(null);
   const [viewerImage, setViewerImage] = useState<ViewerImage | null>(null);
   const [manualCard, setManualCard] = useState<DashboardCard | null>(null);
   const [manualResolution, setManualResolution] = useState<"all_sent" | "text_sent" | "not_sent">("all_sent");
@@ -259,6 +276,33 @@ export default function Dashboard() {
       .finally(() => {
         setSendingId(null);
         setSendCard(null);
+      });
+  };
+
+  const confirmPromptRetry = () => {
+    if (!promptRetryCard || generatingId !== null) return;
+    const card = promptRetryCard;
+    setGeneratingId(card.group_id);
+    toast(`正在解除「${card.group_name}」的 Prompt 暂停并重新生成…`);
+    resolvePromptUnknown({
+      group_id: card.group_id,
+      run_date: runDate,
+      expected_operation_id: card.prompt_operation_id,
+    })
+      .then(() => pipelineGenerate({ group_id: card.group_id, force: true, run_date: runDate }))
+      .then((response) => {
+        const result = response.results?.[0];
+        if (!result || ["failed", "error", "blocked"].includes(result.status)) {
+          toast(`生成未完成：${result?.detail || result?.error_type || result?.status || "未知状态"}`);
+        } else {
+          toast(`生成完成：${result.detail || result.status}`);
+        }
+        dashboard.reload();
+      })
+      .catch((error: unknown) => toast(`Prompt 核对或重试失败：${String(error)}`))
+      .finally(() => {
+        setGeneratingId(null);
+        setPromptRetryCard(null);
       });
   };
 
@@ -436,7 +480,7 @@ export default function Dashboard() {
                     <h3>{card.group_name}</h3>
                     <span>{formatPeriod(card)} · 更新 {formatDateTime(card.updated_at)}</span>
                   </div>
-                  <StatusPill status={card.status} />
+                  {card.prompt_hold ? <StatusBadge tone="warning">暂停待核对</StatusBadge> : <StatusPill status={card.status} />}
                 </div>
                 <div className="dashboard-task-content">
                   <section className="dashboard-ranking-preview" aria-label={`${card.group_name} Top 5 排行榜`}>
@@ -469,6 +513,7 @@ export default function Dashboard() {
                   senderOk={health.data?.checks?.wechat_sender?.ok ?? false}
                   senderDetail={senderDetail}
                   onGenerate={() => handleGenerate(card)}
+                  onResolvePrompt={() => setPromptRetryCard(card)}
                   onSend={() => handleSend(card)}
                   onResolve={() => {
                     setManualResolution("all_sent");
@@ -499,6 +544,15 @@ export default function Dashboard() {
         busy={sendingId !== null}
         onConfirm={confirmSend}
         onCancel={() => sendingId === null && setSendCard(null)}
+      />
+      <ConfirmDialog
+        open={Boolean(promptRetryCard)}
+        title="确认丢弃未知 Prompt 结果并重试"
+        description={promptRetryCard ? `「${promptRetryCard.group_name}」上一次 Codex GPT 调用已经提交，但超时后没有可恢复的最终 Prompt。确认后会解除暂停并发起一次新的文本生成，可能增加一次模型用量；不会发送微信或邮件。` : ""}
+        confirmLabel="确认并重新生成"
+        busy={generatingId !== null}
+        onConfirm={confirmPromptRetry}
+        onCancel={() => generatingId === null && setPromptRetryCard(null)}
       />
       <AnimatePresence>
         {manualCard && (

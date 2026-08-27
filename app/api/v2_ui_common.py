@@ -48,6 +48,12 @@ class ResolveSendUnknownBody(BaseModel):
     expected_send_unknown_at: str = Field(min_length=10, max_length=80)
 
 
+class ResolvePromptUnknownBody(BaseModel):
+    group_id: int
+    run_date: str
+    expected_operation_id: str = Field(min_length=8, max_length=80)
+
+
 class ResolveManualSendBody(BaseModel):
     group_id: int
     run_date: str

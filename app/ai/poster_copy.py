@@ -23,6 +23,8 @@ _FORBIDDEN_RENDERED_TERMS = (
     "evidence_dialogue",
 )
 _ELLIPSIS_END_RE = re.compile(r"(?:\.{3}|…)$")
+_SENTENCE_SEGMENT_RE = re.compile(r"[^。！？!?]+[。！？!?]?")
+_CLAUSE_SEGMENT_RE = re.compile(r"[^，,；;：:]+[，,；;：:]?")
 _NUMBER_RE = re.compile(r"\d+(?:\.\d+)?")
 _GROUNDING_STOPWORDS = {
     "真实", "群友", "话题", "当天", "讨论", "聊天", "漫画", "事件", "画面",
@@ -178,7 +180,8 @@ event_summary 与 fact_line 必须是完整句，只能概括 source_summary 和
 主标题、副标题和底部总结必须回收入选主题，不使用通用套话。
 主标题不超过 24 个字符，副标题不超过 36 个字符，底部总结不超过 42 个字符；
 每个版面标题不超过 18 个字符，事实说明不超过 72 个字符。写数字前必须确认该数字
-原样存在于对应 topic 的 source_summary 或 evidence_dialogue 中。
+原样存在于对应 topic 的 source_summary 或 evidence_dialogue 中。每个 quote 最多 48 个字符；
+原消息更长时，只能选择其中一个连续、语义完整且不带悬空省略号的短句，不得复制整段长消息。
 
 严格 JSON 结构：
 {
@@ -234,6 +237,31 @@ def _quote_is_contiguous(quote: str, messages: Iterable[str]) -> bool:
     if not candidate:
         return False
     return any(candidate in message for message in messages)
+
+
+def _shorten_grounded_quote(quote: str, messages: Iterable[str]) -> str:
+    """把已证实来自原消息的长气泡缩成一个真实、连续、完整的短句。"""
+    normalized_messages = [re.sub(r"\s+", " ", str(message)).strip() for message in messages]
+    if not _quote_is_contiguous(quote, normalized_messages):
+        return ""
+
+    def candidates(pattern: re.Pattern[str], text: str) -> list[str]:
+        result: list[str] = []
+        for match in pattern.finditer(text):
+            candidate = match.group(0).strip().strip("“”\"")
+            candidate = candidate.rstrip("，,；;：:").strip()
+            if 2 <= len(candidate) <= MAX_VISIBLE_QUOTE_CHARS and not _ELLIPSIS_END_RE.search(candidate):
+                if _quote_is_contiguous(candidate, normalized_messages):
+                    result.append(candidate)
+        return result
+
+    sentence_candidates = candidates(_SENTENCE_SEGMENT_RE, quote)
+    if sentence_candidates:
+        return max(sentence_candidates, key=len)
+    clause_candidates = candidates(_CLAUSE_SEGMENT_RE, quote)
+    if clause_candidates:
+        return max(clause_candidates, key=len)
+    return ""
 
 
 def _assert_numbers_grounded(text: str, topic: dict[str, Any], label: str) -> None:
@@ -338,9 +366,15 @@ def parse_poster_copy(raw: str, source: dict[str, Any]) -> DailyPosterCopy:
             action = _clean_text(raw_person.get("action"), maximum=120, label=f"版面{index}人物动作")
             quote = re.sub(r"\s+", " ", str(raw_person.get("quote") or "")).strip().strip("“”\"")
             if quote:
-                quote = _clean_text(quote, maximum=MAX_VISIBLE_QUOTE_CHARS, label=f"版面{index}真实气泡")
                 if not _quote_is_contiguous(quote, dialogue.get(name, [])):
                     raise PosterCopyError(f"版面{index}中“{name}”的气泡无法回查原消息")
+                if len(quote) > MAX_VISIBLE_QUOTE_CHARS:
+                    quote = _shorten_grounded_quote(quote, dialogue.get(name, []))
+                    if not quote:
+                        raise PosterCopyError(
+                            f"版面{index}真实气泡超过 {MAX_VISIBLE_QUOTE_CHARS} 个字符且无法安全缩短"
+                        )
+                quote = _clean_text(quote, maximum=MAX_VISIBLE_QUOTE_CHARS, label=f"版面{index}真实气泡")
                 quoted_speakers.add(name)
             participants.append(ParticipantCopy(name=name, action=action, quote=quote))
 

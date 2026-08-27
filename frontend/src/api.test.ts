@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { get, getDashboard, getRuns, pipelineGenerate, pipelineSend, readV2JsonFile, resolveManualSend, resolveSendUnknown } from "./api";
+import { get, getDashboard, getRuns, pipelineGenerate, pipelineSend, readV2JsonFile, resolveManualSend, resolvePromptUnknown, resolveSendUnknown } from "./api";
 
 function response(body: unknown, options: { ok?: boolean; status?: number; raw?: string } = {}): Response {
   return {
@@ -75,6 +75,29 @@ describe("frontend API contract", () => {
           run_date: "2026-08-26",
           resolution: "text_sent",
           expected_send_unknown_at: "2026-08-26T08:30:59+08:00",
+        }),
+      }),
+    );
+  });
+
+  it("sends the prompt-unknown operation id to the resolution-only endpoint", async () => {
+    const fetchMock = vi.fn(async () => response({ result: { status: "resolved" } }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await resolvePromptUnknown({
+      group_id: 7,
+      run_date: "2026-08-27",
+      expected_operation_id: "operation-123",
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v2/pipeline/resolve-prompt-unknown",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          group_id: 7,
+          run_date: "2026-08-27",
+          expected_operation_id: "operation-123",
         }),
       }),
     );

@@ -6,8 +6,10 @@ from datetime import datetime
 import json
 import re
 
+import pytest
+
 from app.ai.image_themes import STYLE_FAMILY_KEYS
-from app.ai.poster_copy import PosterCopyError, validate_fixed_prompt_contract
+from app.ai.poster_copy import PosterCopyError, parse_poster_copy, validate_fixed_prompt_contract
 from app.ai.prompt_builder import DeepSeekImagePromptBuilder
 from app.ai.prompt_builder_types import PromptInput
 from app.ai.prompt_templates import DEFAULT_IMAGE_PROMPT_TEMPLATE, ImagePromptTemplateService
@@ -188,6 +190,66 @@ def test_build_renders_only_fixed_sections_and_real_multi_person_dialogue():
         assert quote in output.prompt
     for hidden in ("topic-", "message_id", "participant_options", "evidence_dialogue"):
         assert hidden not in output.prompt
+
+
+def _long_quote_payload(quote: str) -> tuple[str, dict]:
+    source = {
+        "topics": [
+            {
+                "topic_id": "topic-long",
+                "source_title": "部署复盘",
+                "source_summary": "张三分享部署复盘，大家讨论发布流程。",
+                "source_visual_gag": "把发布流程画成接力跑",
+                "participant_options": ["张三"],
+                "evidence_dialogue": [
+                    {"message_id": "m-long", "speaker": "张三", "text": quote}
+                ],
+                "shot_hints": ["对白"],
+            }
+        ]
+    }
+    payload = {
+        "title": "部署复盘",
+        "subtitle": "张三分享发布流程",
+        "panels": [
+            {
+                "topic_id": "topic-long",
+                "title": "部署复盘",
+                "event_summary": "张三分享部署复盘。",
+                "composition": "张三站在流程图旁讲解",
+                "participants": [
+                    {"name": "张三", "action": "指向发布流程图", "quote": quote}
+                ],
+                "visual_gag": "把发布流程画成接力跑",
+                "fact_line": "张三分享部署复盘。",
+            }
+        ],
+        "footer_summary": "张三分享部署复盘",
+    }
+    return json.dumps(payload, ensure_ascii=False), source
+
+
+def test_long_grounded_quote_is_reduced_to_complete_contiguous_sentence():
+    long_quote = (
+        "今天把部署流程从头到尾重新走了一遍，所有检查点都已经记录。"
+        "明天会按照这份记录继续核对自动发布和回滚步骤，避免遗漏。"
+    )
+    raw, source = _long_quote_payload(long_quote)
+
+    copy = parse_poster_copy(raw, source)
+    quote = copy.panels[0].participants[0].quote
+
+    assert 2 <= len(quote) <= 48
+    assert quote in long_quote
+    assert quote.endswith("。")
+
+
+def test_long_grounded_quote_without_safe_boundary_is_rejected():
+    long_quote = "这是一条完全没有任何标点因此无法安全判断语义边界的真实长消息" * 2
+    raw, source = _long_quote_payload(long_quote)
+
+    with pytest.raises(PosterCopyError, match="无法安全缩短"):
+        parse_poster_copy(raw, source)
 
 
 def test_ai_free_does_not_inject_daily_style_library():

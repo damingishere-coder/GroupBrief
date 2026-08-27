@@ -508,6 +508,59 @@ class DailyPipeline:
 
     # ================= 手动操作 =================
 
+    def resolve_prompt_unknown(
+        self,
+        group_id: int,
+        run_date: str,
+        *,
+        expected_operation_id: str,
+    ) -> dict:
+        """人工确认丢弃未知 Prompt 结果；本方法本身不调用任何外部模型。"""
+        parsed_run_date = parse_date(run_date)
+        if parsed_run_date is None:
+            return {
+                "status": "failed",
+                "error_type": "INVALID_RUN_DATE",
+                "detail": "run_date 必须是有效的 YYYY-MM-DD 日期",
+            }
+        group = self._get_group(group_id)
+        if group is None:
+            return {
+                "status": "failed",
+                "error_type": "GROUP_NOT_FOUND",
+                "detail": f"群不存在 {group_id}",
+            }
+        run_date = parsed_run_date.isoformat()
+        group_name = self._group_name(group)
+        resolved, run, reason = self.store.resolve_prompt_result_unknown(
+            group_name,
+            run_date,
+            expected_operation_id=expected_operation_id,
+            now=datetime.now(ZoneInfo(self.settings.app_timezone)),
+        )
+        if not resolved:
+            messages = {
+                "state_corrupt": "运行状态损坏，禁止人工覆盖",
+                "not_unknown": "当前任务已不是 Prompt 结果未知状态",
+                "stale": "Prompt 未知状态已变化，请刷新后重新核对",
+                "result_available": "已有可恢复 Prompt 结果，禁止丢弃",
+            }
+            return {
+                "group_name": group_name,
+                "status": "conflict",
+                "error_type": "PROMPT_RESOLUTION_CONFLICT",
+                "detail": messages.get(reason, "Prompt 未知状态无法消歧"),
+                "reason": reason,
+            }
+        return {
+            "group_name": group_name,
+            "status": "resolved",
+            "resolution": "discard_and_retry",
+            "next_stage": "prompt",
+            "updated_at": run.get("updated_at"),
+            "detail": "已解除 Prompt 未知暂停；本次确认没有调用外部模型",
+        }
+
     def resolve_send_unknown(
         self,
         group_id: int,

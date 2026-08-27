@@ -63,7 +63,9 @@ class Settings(BaseSettings):
     summary_provider_primary: str = "codex"
     summary_provider_fallback: str = "deepseek"
     codex_summary_model: str = "gpt-5.6-sol"
-    codex_summary_timeout_seconds: int = 240
+    # 结构化群聊整理在高峰期可能超过 4 分钟；600 秒仍有明确上限，
+    # 同时避免把正常的长响应误判成不可自动恢复的结果未知。
+    codex_summary_timeout_seconds: int = 600
     codex_summary_max_retries: int = 2
     codex_summary_request_concurrency: int = 2
 

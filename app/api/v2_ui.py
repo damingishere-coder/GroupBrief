@@ -10,6 +10,7 @@ from app.api.v2_ui_common import (
     PipelineGenerateBody,
     PipelineSendBody,
     ResolveManualSendBody,
+    ResolvePromptUnknownBody,
     ResolveSendUnknownBody,
     RetryBody,
     RunPromptUpdateBody,
@@ -356,6 +357,24 @@ def pipeline_resolve_send_unknown(body: ResolveSendUnknownBody):
         body.run_date,
         resolution=body.resolution,
         expected_send_unknown_at=body.expected_send_unknown_at,
+    )
+    if result.get("status") == "conflict":
+        raise HTTPException(status_code=409, detail=result)
+    if result.get("status") == "failed":
+        raise HTTPException(status_code=400, detail=result)
+    return {"result": result}
+
+
+@router.post("/pipeline/resolve-prompt-unknown")
+def pipeline_resolve_prompt_unknown(body: ResolvePromptUnknownBody):
+    """解除 Prompt 结果未知暂停；该接口本身不会调用外部模型。"""
+    from app.pipeline.daily_pipeline import DailyPipeline
+
+    _validate_run_date(body.run_date)
+    result = DailyPipeline(dry_run=False).resolve_prompt_unknown(
+        body.group_id,
+        body.run_date,
+        expected_operation_id=body.expected_operation_id,
     )
     if result.get("status") == "conflict":
         raise HTTPException(status_code=409, detail=result)

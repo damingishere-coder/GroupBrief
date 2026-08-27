@@ -128,6 +128,10 @@ export interface DashboardCard {
   ranking_error: string;
   error: string;
   sent_at: string;
+  prompt_hold: boolean;
+  prompt_hold_reason: string;
+  prompt_operation_id: string;
+  prompt_operation_status: string;
   wechat_send_enabled: boolean;
   send_hold: boolean;
   send_state: string;
@@ -398,6 +402,8 @@ export const pipelineSend = (body: { group_id: number; run_date?: string; confir
   post<{ result: { status: string; group_name?: string; error_type?: string; error?: string; detail?: string } }>("/v2/pipeline/send", body);
 export const resolveSendUnknown = (body: { group_id: number; run_date: string; resolution: "text_sent" | "not_sent"; expected_send_unknown_at: string }) =>
   post<{ result: { status: string; group_name: string; resolution: string; next_stage: string; detail: string } }>("/v2/pipeline/resolve-send-unknown", body);
+export const resolvePromptUnknown = (body: { group_id: number; run_date: string; expected_operation_id: string }) =>
+  post<{ result: { status: string; group_name: string; resolution: string; next_stage: string; detail: string } }>("/v2/pipeline/resolve-prompt-unknown", body);
 export const resolveManualSend = (body: { group_id: number; run_date: string; resolution: "all_sent" | "text_sent" | "not_sent"; expected_updated_at: string }) =>
   post<{ result: { status: string; group_name: string; resolution: string; next_stage: string; detail: string; run_status: string; updated_at: string } }>("/v2/pipeline/resolve-manual-send", body);
 export const getV2File = (group: string, date: string, file: string) =>

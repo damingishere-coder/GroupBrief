@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+
 import httpx
 import pytest
 
@@ -73,6 +75,48 @@ def test_unfinished_prompt_operation_becomes_manual_hold_even_with_force(tmp_pat
     )
     assert third_id is None
     assert third_reason == "result_unknown"
+
+
+def test_prompt_unknown_requires_matching_operation_id_before_retry(tmp_path):
+    store = RunStore(tmp_path)
+    store.update("测试群", "2026-08-27", status=RANKING_READY)
+    operation_id, _, reason = store.claim_prompt_operation(
+        "测试群", "2026-08-27", input_hash="input-v1"
+    )
+    assert operation_id and reason == "claimed"
+    store.mark_prompt_result_unknown(
+        "测试群",
+        "2026-08-27",
+        operation_id,
+        error="Codex GPT 超时且结果未知",
+    )
+
+    resolved, _, stale_reason = store.resolve_prompt_result_unknown(
+        "测试群",
+        "2026-08-27",
+        expected_operation_id="stale-operation",
+        now=datetime.now().astimezone(),
+    )
+    assert resolved is False
+    assert stale_reason == "stale"
+
+    resolved, run, resolved_reason = store.resolve_prompt_result_unknown(
+        "测试群",
+        "2026-08-27",
+        expected_operation_id=operation_id,
+        now=datetime.now().astimezone(),
+    )
+    assert resolved is True
+    assert resolved_reason == "resolved"
+    assert run["prompt_hold"] is False
+    assert run["prompt_operation_status"] == "failed"
+    assert run["prompt_last_resolution"] == "discard_and_retry"
+
+    next_id, _, next_reason = store.claim_prompt_operation(
+        "测试群", "2026-08-27", input_hash="input-v1", force=True
+    )
+    assert next_reason == "claimed"
+    assert next_id and next_id != operation_id
 
 
 class _Fallback:

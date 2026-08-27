@@ -110,6 +110,10 @@ def dashboard(
                     or ""
                 ),
                 "sent_at": run.get("sent_at", ""),
+                "prompt_hold": bool(run.get("prompt_hold")),
+                "prompt_hold_reason": str(run.get("prompt_hold_reason") or ""),
+                "prompt_operation_id": str(run.get("prompt_operation_id") or ""),
+                "prompt_operation_status": str(run.get("prompt_operation_status") or ""),
                 "send_hold": bool(run.get("send_hold")),
                 "send_state": str(run.get("send_state") or ""),
                 "send_hold_reason": str(run.get("send_hold_reason") or ""),
@@ -121,7 +125,7 @@ def dashboard(
         )
         if status == "SENT":
             counts["sent"] += 1
-        elif run.get("send_hold"):
+        elif run.get("prompt_hold") or run.get("send_hold"):
             counts["held"] += 1
         elif status in ("IMAGE_READY", "READY_TO_SEND"):
             counts["generated"] += 1

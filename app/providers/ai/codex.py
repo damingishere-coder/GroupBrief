@@ -188,6 +188,10 @@ class CodexGPTProvider(DeepSeekV4FlashProvider):
                 "exec",
                 "-C",
                 temp_dir,
+                "--ignore-user-config",
+                "--ignore-rules",
+                "--config",
+                'model_reasoning_effort="medium"',
                 "--sandbox",
                 "read-only",
                 "--skip-git-repo-check",
@@ -200,6 +204,7 @@ class CodexGPTProvider(DeepSeekV4FlashProvider):
             ]
             environment = os.environ.copy()
             environment["CODEX_HOME"] = str(self.codex_home)
+            timeout_seconds = max(1, int(self.settings.codex_summary_timeout_seconds))
             try:
                 with bounded_slot(
                     "codex_summary_request",
@@ -211,14 +216,15 @@ class CodexGPTProvider(DeepSeekV4FlashProvider):
                         text=True,
                         encoding="utf-8",
                         errors="replace",
-                        timeout=max(1, int(self.settings.codex_summary_timeout_seconds)),
+                        timeout=timeout_seconds,
                         cwd=temp_dir,
                         input=prompt,
                         env=environment,
                     )
             except subprocess.TimeoutExpired as exc:
                 raise ExternalCallResultUnknownError(
-                    f"Codex GPT 超时且结果未知（request_id={request_id}）"
+                    "Codex GPT 超时且结果未知"
+                    f"（timeout={timeout_seconds}s request_id={request_id}）"
                 ) from exc
             except OSError as exc:
                 raise ExternalCallNotSubmittedError(

@@ -52,6 +52,7 @@ def test_codex_success_uses_stdin_read_only_and_does_not_call_fallback(monkeypat
     def fake_run(command, **kwargs):
         captured["command"] = command
         captured["input"] = kwargs["input"]
+        captured["timeout"] = kwargs["timeout"]
         output_path = Path(command[command.index("--output-last-message") + 1])
         output_path.write_text('{"events": []}', encoding="utf-8")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
@@ -69,6 +70,14 @@ def test_codex_success_uses_stdin_read_only_and_does_not_call_fallback(monkeypat
     assert captured["command"][captured["command"].index("--model") + 1] == "gpt-5.6-sol"
     assert captured["command"][captured["command"].index("--sandbox") + 1] == "read-only"
     assert "--ephemeral" in captured["command"]
+    assert "--ignore-user-config" in captured["command"]
+    assert "--ignore-rules" in captured["command"]
+    assert 'model_reasoning_effort="medium"' in captured["command"]
+    assert captured["timeout"] == 30
+
+
+def test_default_codex_summary_timeout_allows_long_structured_responses():
+    assert Settings(_env_file=None).codex_summary_timeout_seconds == 600
 
 
 def test_codex_confirmed_not_submitted_uses_deepseek_fallback(monkeypatch):
