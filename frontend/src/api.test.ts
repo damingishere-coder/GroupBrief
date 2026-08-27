@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { get, getDashboard, getRuns, pipelineGenerate, pipelineSend, readV2JsonFile, resolveManualSend, resolvePromptUnknown, resolveSendUnknown } from "./api";
+import { confirmRecovery, get, getDashboard, getRuns, pipelineGenerate, pipelineSend, readV2JsonFile, resolveManualSend, resolvePromptUnknown, resolveSendUnknown } from "./api";
 
 function response(body: unknown, options: { ok?: boolean; status?: number; raw?: string } = {}): Response {
   return {
@@ -52,6 +52,27 @@ describe("frontend API contract", () => {
       run_date: "2026-08-25",
       confirm_regenerated: true,
       confirm_late_send: true,
+    });
+  });
+
+  it("confirms historical generation with CAS and no send field", async () => {
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
+      response({ status: "complete", send_invoked: false }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await confirmRecovery({
+      expected_version: "a".repeat(64),
+      tasks: [{ run_date: "2026-08-24", group_id: 7 }],
+    });
+
+    const options = fetchMock.mock.calls[0]?.[1];
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v2/recovery/confirm",
+      expect.objectContaining({ method: "POST" }),
+    );
+    expect(JSON.parse(String(options?.body))).toEqual({
+      expected_version: "a".repeat(64),
+      tasks: [{ run_date: "2026-08-24", group_id: 7 }],
     });
   });
 

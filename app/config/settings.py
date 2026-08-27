@@ -27,6 +27,11 @@ _ENVIRONMENT_ONLY_FIELDS = frozenset(
         "sqlite_busy_timeout_seconds",
         "sqlite_retry_max_attempts",
         "scheduler_heartbeat_stale_seconds",
+        "weekly_insights_enabled",
+        "weekly_send_enabled",
+        "weekly_generate_time",
+        "weekly_send_time",
+        "output_root_override",
     }
 )
 
@@ -166,9 +171,19 @@ class Settings(BaseSettings):
     # 无人值守恢复：定期扫描最近 N 天，按旧到新补生成和明确未提交的发送。
     # 仅通过环境/部署配置修改，避免运行时改值却没有重建 APScheduler job。
     reliability_watchdog_enabled: bool = True
-    reliability_lookback_days: int = 30
+    # 自动恢复严格限制为当前日和前一日（48 小时产品边界）。更早任务只预览。
+    reliability_lookback_days: int = 2
     reliability_watchdog_interval_minutes: int = 10
+    # 周报能力先部署、后灰度：14 天可靠性验收完成前保持关闭。
+    weekly_insights_enabled: bool = False
+    weekly_send_enabled: bool = False
+    weekly_generate_time: str = "07:45"
+    weekly_send_time: str = "08:30"
     scheduler_heartbeat_stale_seconds: int = 300
+
+    # 只供测试/离线执行通过环境变量隔离 output 与相邻 runtime；
+    # 生产默认留空，路径合同保持不变，且设置 API 无权修改。
+    output_root_override: str = ""
 
     # 路径
     @property
@@ -177,6 +192,8 @@ class Settings(BaseSettings):
 
     @property
     def output_dir(self) -> Path:
+        if self.output_root_override:
+            return Path(self.output_root_override).expanduser().resolve()
         return PROJECT_ROOT / "output"
 
     @property

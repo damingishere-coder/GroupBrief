@@ -113,8 +113,8 @@ def test_readiness_is_local_read_only_and_exposes_startup_capture_error(tmp_path
             "wechat_client",
             "summary_provider",
             "scheduler_heartbeat",
-            "daily_completion",
         }
+        assert ready.json()["daily_result"]["status"] == "NOT_DUE"
 
         api.state.startup_check_error = "startup probe crashed"
         failed = client.get("/api/system/ready")

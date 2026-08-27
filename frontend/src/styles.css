@@ -3632,6 +3632,53 @@ textarea:focus-visible {
   font-size: 11px;
 }
 
+.tasks-backlog {
+  margin-bottom: 20px;
+  padding: 20px;
+}
+
+.tasks-backlog-list {
+  display: grid;
+  gap: 10px;
+  margin-top: 16px;
+}
+
+.tasks-backlog-item {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  padding: 12px 14px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 12px;
+  background: var(--surface-soft);
+}
+
+.tasks-backlog-item span:not(.status-badge) {
+  display: grid;
+  gap: 4px;
+}
+
+.tasks-backlog-item small {
+  color: var(--text-muted);
+}
+
+.tasks-backlog-item.is-disabled {
+  opacity: 0.72;
+}
+
+@media (max-width: 640px) {
+  .tasks-backlog .tasks-section-head,
+  .tasks-backlog-item {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .tasks-backlog .tasks-section-head .ui-button,
+  .tasks-backlog-item .status-badge {
+    grid-column: 1 / -1;
+  }
+}
+
 @media (max-width: 1050px) {
   .tasks-kpi-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -4303,6 +4350,81 @@ textarea:focus-visible {
 
 .archive-group-catalog {
   margin-bottom: 14px;
+}
+
+.weekly-archive {
+  margin-bottom: 20px;
+  padding: 22px;
+}
+
+.weekly-archive-layout {
+  display: grid;
+  grid-template-columns: minmax(220px, 0.7fr) minmax(0, 1.8fr);
+  gap: 18px;
+  margin-top: 18px;
+}
+
+.weekly-archive-list {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+}
+
+.weekly-archive-list button {
+  display: grid;
+  gap: 4px;
+  width: 100%;
+  padding: 12px 14px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 12px;
+  background: var(--surface-soft);
+  color: inherit;
+  text-align: left;
+}
+
+.weekly-archive-list button.is-selected {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.weekly-archive-list span,
+.weekly-archive-list small,
+.weekly-archive-detail p,
+.weekly-archive-meta {
+  color: var(--text-muted);
+}
+
+.weekly-archive-detail {
+  min-width: 0;
+}
+
+.weekly-archive-detail img {
+  display: block;
+  width: min(100%, 420px);
+  margin: 16px 0;
+  border-radius: 16px;
+  border: 1px solid var(--border-subtle);
+}
+
+.weekly-archive-detail pre {
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  font: inherit;
+  line-height: 1.7;
+}
+
+.weekly-archive-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 14px;
+  font-size: 13px;
+}
+
+@media (max-width: 760px) {
+  .weekly-archive-layout {
+    grid-template-columns: 1fr;
+  }
 }
 
 .archive-catalog-head,

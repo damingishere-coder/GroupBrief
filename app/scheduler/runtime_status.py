@@ -7,7 +7,7 @@ import os
 from datetime import datetime
 from pathlib import Path
 
-from app.v2.constants import SENT
+from app.v2.constants import IMAGE_READY, READY_TO_SEND, SENT
 from app.v2.run_store import RunStore, validate_run_date
 
 _CHECKPOINT_ORDER = {
@@ -39,6 +39,11 @@ def _scheduler_snapshot(store: RunStore, run_date: str) -> dict:
             "email_status",
             "last_invocation_status",
             "last_invocation_exit_code",
+            "manifest_version",
+            "manifest_created_at",
+            "expected_group_count",
+            "expected_groups",
+            "state_version",
         )
         if parsed.get(key) not in (None, "")
     }
@@ -118,23 +123,81 @@ def write_daily_status(store: RunStore, run_date: str) -> Path:
     groups = [_group_snapshot(run) for run in store.list_runs(run_date)]
     groups.sort(key=lambda item: (item["group_id"], item["group_name"]))
     states = {item["execution_state"] for item in groups}
-    if groups and all(item["run_status"] == SENT for item in groups):
+    expected_rows = scheduler.get("expected_groups")
+    has_manifest = isinstance(expected_rows, list)
+    expected_rows = expected_rows if has_manifest else []
+    expected_by_id = {
+        str(item.get("group_id")): item
+        for item in expected_rows
+        if isinstance(item, dict) and item.get("group_id") is not None
+    }
+    actual_by_id = {item["group_id"]: item for item in groups if item["group_id"]}
+    missing_expected_ids = sorted(set(expected_by_id) - set(actual_by_id))
+
+    def reached_expected(group_id: str, item: dict) -> bool:
+        expected_terminal = str(
+            (expected_by_id.get(group_id) or {}).get("expected_terminal") or ""
+        )
+        status = item["run_status"]
+        if expected_terminal == SENT:
+            return status == SENT
+        return status in {READY_TO_SEND, IMAGE_READY, SENT}
+
+    completed_count = sum(
+        1 for group_id, item in actual_by_id.items() if reached_expected(group_id, item)
+    )
+    retry_count = sum(1 for item in groups if item["execution_state"] == "WAIT_RETRY")
+    manual_count = sum(
+        1
+        for item in groups
+        if item["execution_state"] == "HOLD_MANUAL" or item["send"]["status"] == "held"
+    )
+    external_call_count = sum(
+        int(item.get("external_call_count") or 0)
+        for item in store.list_runs(run_date)
+        if isinstance(item, dict)
+    )
+    actual_providers = sorted(
+        {
+            str(item.get(field) or "").strip()
+            for item in store.list_runs(run_date)
+            if isinstance(item, dict)
+            for field in ("summary_provider_actual", "prompt_provider_actual")
+            if str(item.get(field) or "").strip()
+        }
+    )
+    if not has_manifest and (groups or scheduler):
+        overall = "needs_attention"
+    elif missing_expected_ids:
+        overall = "needs_attention"
+    elif expected_by_id and completed_count == len(expected_by_id):
         overall = "complete"
-    elif "HOLD_MANUAL" in states or any(item["send"]["status"] == "held" for item in groups):
-        overall = "attention_required"
-    elif "WAIT_RETRY" in states:
-        overall = "retry_pending"
-    elif groups:
-        overall = "in_progress"
+    elif manual_count:
+        overall = "blocked"
+    elif completed_count and (retry_count or groups):
+        overall = "partial"
+    elif "WAIT_RETRY" in states or groups or expected_by_id:
+        overall = "running"
     else:
         overall = "not_started"
     payload = {
-        "schema_version": 1,
+        "schema_version": 2,
         "run_date": run_date,
         "run_id": str(scheduler.get("run_id") or f"groupbrief:{run_date}"),
         "updated_at": datetime.now().astimezone().isoformat(),
         "overall_status": overall,
         "scheduler": scheduler,
+        "summary": {
+            "expected_group_count": len(expected_by_id),
+            "discovered_group_count": len(actual_by_id),
+            "completed_group_count": completed_count,
+            "retry_group_count": retry_count,
+            "manual_group_count": manual_count,
+            "missing_expected_group_ids": missing_expected_ids,
+            "manifest_complete": has_manifest and not missing_expected_ids,
+            "external_call_count": external_call_count,
+            "actual_providers": actual_providers,
+        },
         "groups": groups,
     }
     runtime_root = store.root.parent / "runtime"

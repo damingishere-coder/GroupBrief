@@ -201,16 +201,18 @@ def readiness(
         daily_ok = False
         daily_status = "ERROR"
         daily_detail = str(exc)[:200]
-    checks["daily_completion"] = {
+    daily_result = {
         "ok": daily_ok,
         "status": daily_status,
         "detail": daily_detail,
     }
+    # readiness 仅表示进程和依赖可用性；今日任务结果单独投影，不再拖低 ready。
     ready = all(item["ok"] for item in checks.values())
     payload = {
         "ready": ready,
         "status": "ready" if ready else "degraded",
         "checks": checks,
+        "daily_result": daily_result,
         "scheduler_owner": getattr(
             request.app.state,
             "scheduler_owner",
@@ -258,6 +260,7 @@ def _prune_provider_health(
 @router.get("/providers")
 def providers(
     session: Session = Depends(repo.get_session),
+    settings: Settings = Depends(get_settings),
 ):
     """读取最近一次已保存的 Provider 健康结果，不执行外部检查。"""
     rows = session.exec(
@@ -269,7 +272,12 @@ def providers(
     latest: dict[str, StoredProviderHealth] = {}
     for row in rows:
         latest.setdefault(row.provider, row)
-    return {name: _provider_health_payload(row) for name, row in latest.items()}
+    from app.services.group_provider_config import provider_catalog
+
+    return {
+        **{name: _provider_health_payload(row) for name, row in latest.items()},
+        "catalog": provider_catalog(settings),
+    }
 
 
 @router.post("/providers/refresh")

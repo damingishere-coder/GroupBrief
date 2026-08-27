@@ -40,11 +40,15 @@ from app.api.v2_ui_read import (
 )
 from app.config.settings import Settings, get_settings
 from app.v2.constants import RUN_STATE_CORRUPT
+from app.api.v2_recovery import router as recovery_router
+from app.api.v2_weekly import router as weekly_router
 
 
 router = APIRouter(prefix="/api/v2", tags=["v2-ui"])
 router.include_router(read_router)
 router.include_router(image_router)
+router.include_router(recovery_router)
+router.include_router(weekly_router)
 
 
 @router.get("/system/health")

@@ -31,6 +31,7 @@ from app.config.settings import Settings, get_settings
 from app.core.logging import get_logger
 from app.data_sources.base import V2Message, WeChatDataSource
 from app.data_sources.wechat_data_analysis import WeChatDataAnalysisSource
+from app.data_sources.history_provider import HistoryProviderDataSource
 from app.data_sources.resilient import ResilientWeChatDataSource
 from app.db import repository as repo
 from app.db.models import Group
@@ -42,16 +43,21 @@ from app.pipeline.generation_stages import GenerationStages
 from app.pipeline.image_stages import ImageStages
 from app.ranking.engine import RankingEngine
 from app.ranking.renderer import RankingRenderer
-from app.scheduler.period import PeriodResolver
+from app.scheduler.period import PeriodResolver, PeriodWindow
 from app.scheduler.runtime_status import write_daily_status
 from app.sender.base import WechatSender
 from app.sender.wechat_native import create_wechat_sender
 from app.services.generation_runtime import generation_mutex
+from app.services.group_provider_config import (
+    normalize_history_provider,
+    resolve_group_ai_settings,
+)
 from app.services.group_name_sync import (
     GroupNameSyncReport,
     GroupNameSyncService,
     send_target_mode,
 )
+from app.providers.history.wechat_cli import WechatCliProvider
 from app.v2.constants import (
     CORRUPT,
     FAILED,
@@ -81,6 +87,7 @@ class DailyPipeline:
         dry_run: bool = False,
     ):
         self.settings = settings or get_settings()
+        self._data_source_injected = data_source is not None
         self.data_source = data_source or ResilientWeChatDataSource(
             WeChatDataAnalysisSource(self.settings),
             self.settings,
@@ -88,7 +95,13 @@ class DailyPipeline:
         self.period_resolver = PeriodResolver()
         self.ranking_engine = ranking_engine or RankingEngine()
         self.renderer = renderer or RankingRenderer()
-        self.prompt_builder = prompt_builder or GroupSummaryImagePromptBuilder(self.settings)
+        self._prompt_builder_injected = prompt_builder is not None
+        self.prompt_builder = prompt_builder or GroupSummaryImagePromptBuilder(
+            self.settings,
+            summary_settings=self.settings,
+        )
+        self._data_source_cache: dict[str, WeChatDataSource] = {}
+        self._prompt_builder_cache: dict[tuple[str, ...], GroupSummaryImagePromptBuilder] = {}
         self.image_generator = image_generator or CodexImageGenerator(self.settings)
         self.sender = sender or create_wechat_sender(settings=self.settings, dry_run=dry_run)
         self.store = store or RunStore(self.settings.output_dir)
@@ -103,6 +116,7 @@ class DailyPipeline:
         group_ids: list[int] | None = None,
         force: bool = False,
         refresh_messages: bool = False,
+        group_overrides: dict[int, dict] | None = None,
         *,
         acquire_lock: bool = True,
     ) -> list[dict]:
@@ -113,6 +127,7 @@ class DailyPipeline:
                     group_ids=group_ids,
                     force=force,
                     refresh_messages=refresh_messages,
+                    group_overrides=group_overrides,
                     acquire_lock=False,
                 )
         requested_date = parse_date(run_date)
@@ -122,12 +137,47 @@ class DailyPipeline:
                 "error_type": "INVALID_RUN_DATE",
                 "detail": "run_date 必须是有效的 YYYY-MM-DD 日期",
             }]
-        window = self.period_resolver.resolve(run_date=requested_date, timezone=self.settings.app_timezone)
-        run_date_str = window.run_date.isoformat()
+        base_window = self.period_resolver.resolve(
+            run_date=requested_date,
+            timezone=self.settings.app_timezone,
+            schedule_rule="daily_previous_day",
+        )
+        run_date_str = base_window.run_date.isoformat()
         self._last_name_sync_report = self._sync_group_names_safe(group_ids)
         groups = self._load_groups(group_ids)
+        if group_overrides:
+            allowed_override_fields = {
+                "wechat_group_id", "wechat_group_name", "provider_preference",
+                "schedule_rule", "send_time", "summary_provider", "summary_model",
+                "prompt_provider", "prompt_model", "image_enabled", "ranking_template",
+                "image_prompt_template", "image_theme", "image_theme_custom",
+                "image_prompt_override", "send_target",
+            }
+            groups = [
+                group.model_copy(
+                    update={
+                        key: value
+                        for key, value in group_overrides.get(int(group.id or 0), {}).items()
+                        if key in allowed_override_fields
+                    }
+                )
+                for group in groups
+            ]
         if not groups:
             return [{"status": "no_groups", "reason": "无启用群"}]
+        scheduled: list[tuple[Group, PeriodWindow]] = []
+        for group in groups:
+            window = self.period_resolver.resolve(
+                run_date=base_window.run_date,
+                timezone=self.settings.app_timezone,
+                schedule_rule=str(group.schedule_rule or "weekday_default"),
+            )
+            if window.should_run:
+                scheduled.append((group, window))
+        if not scheduled:
+            return [{"status": "no_groups", "reason": "当日没有符合群级统计规则的任务"}]
+        groups = [item[0] for item in scheduled]
+        windows = [item[1] for item in scheduled]
 
         group_limit = normalized_limit(self.settings.generation_group_concurrency, 5)
         image_limit = normalized_limit(self.settings.image_generation_concurrency, 2)
@@ -141,6 +191,7 @@ class DailyPipeline:
         )
         if len(groups) == 1:
             group = groups[0]
+            window = windows[0]
             try:
                 if refresh_messages:
                     result = self._generate_one_safe(
@@ -167,6 +218,7 @@ class DailyPipeline:
             ) as image_executor:
                 future_indexes = {}
                 for index, group in enumerate(groups):
+                    window = windows[index]
                     if refresh_messages:
                         future = executor.submit(
                             self._generate_one_safe,
@@ -228,18 +280,33 @@ class DailyPipeline:
     def _group_name(group: Group) -> str:
         return group.display_name or group.wechat_group_name
 
-    def _prompt_operation_hash(self, data: PromptInput) -> str:
+    def _prompt_operation_hash(
+        self,
+        data: PromptInput,
+        prompt_settings: Settings | None = None,
+        summary_settings: Settings | None = None,
+    ) -> str:
         """生成稳定输入指纹；不把 API Key 或原始输入写入运行状态。"""
         payload = dict(vars(data))
         payload["messages"] = [
             message.to_dict() if hasattr(message, "to_dict") else str(message)
             for message in data.messages
         ]
+        selected_prompt = prompt_settings or self.settings
+        selected_summary = summary_settings or self.settings
         payload["provider_config"] = {
-            "primary": self.settings.summary_provider_primary,
-            "fallback": self.settings.summary_provider_fallback,
-            "codex_model": self.settings.codex_summary_model,
-            "deepseek_model": self.settings.ai_model,
+            "summary": {
+                "primary": selected_summary.summary_provider_primary,
+                "fallback": selected_summary.summary_provider_fallback,
+                "codex_model": selected_summary.codex_summary_model,
+                "deepseek_model": selected_summary.ai_model,
+            },
+            "prompt": {
+                "primary": selected_prompt.summary_provider_primary,
+                "fallback": selected_prompt.summary_provider_fallback,
+                "codex_model": selected_prompt.codex_summary_model,
+                "deepseek_model": selected_prompt.ai_model,
+            },
         }
         canonical = json.dumps(
             payload,
@@ -352,17 +419,50 @@ class DailyPipeline:
         reuse_persisted_topic_selection: bool = False,
     ) -> dict:
         """保留原注入点；单群生成由显式阶段执行器负责。"""
+        data_source = self._data_source_for_group(group)
+        prompt_settings, prompt_config = resolve_group_ai_settings(
+            self.settings,
+            group,
+            capability="prompt",
+        )
+        summary_settings, summary_config = resolve_group_ai_settings(
+            self.settings,
+            group,
+            capability="summary",
+        )
+        self.store.update(
+            self._group_name(group),
+            run_date,
+            config_version=1,
+            history_provider_requested=(
+                normalize_history_provider(group.provider_preference) or self.data_source.name
+            ),
+            prompt_provider_requested=prompt_config["provider"],
+            prompt_model_requested=prompt_config["model"],
+            prompt_config_inherited=prompt_config["inherited"],
+            summary_provider_requested=summary_config["provider"],
+            summary_model_requested=summary_config["model"],
+            summary_config_inherited=summary_config["inherited"],
+        )
+        prompt_builder = self._prompt_builder_for_group(
+            summary_settings,
+            prompt_settings,
+        )
         return GenerationStages(
-            settings=self.settings,
-            data_source=self.data_source,
+            settings=prompt_settings,
+            data_source=data_source,
             ranking_engine=self.ranking_engine,
             renderer=self.renderer,
-            prompt_builder=self.prompt_builder,
+            prompt_builder=prompt_builder,
             store=self.store,
             group_name=self._group_name,
             name_sync_audit=self._name_sync_audit,
             get_group=self._get_group,
-            prompt_operation_hash=self._prompt_operation_hash,
+            prompt_operation_hash=lambda data: self._prompt_operation_hash(
+                data,
+                prompt_settings,
+                summary_settings,
+            ),
             save_json=self._save_json,
             load_message_snapshot=self._load_message_snapshot,
             logger=logger,
@@ -374,6 +474,45 @@ class DailyPipeline:
             refresh_messages=refresh_messages,
             reuse_persisted_topic_selection=reuse_persisted_topic_selection,
         )
+
+    def _data_source_for_group(self, group: Group) -> WeChatDataSource:
+        if self._data_source_injected:
+            return self.data_source
+        selected = normalize_history_provider(group.provider_preference)
+        if selected in {"", "wechat_data_analysis"}:
+            return self.data_source
+        if selected not in self._data_source_cache:
+            source = HistoryProviderDataSource(WechatCliProvider(settings=self.settings))
+            self._data_source_cache[selected] = ResilientWeChatDataSource(
+                source,
+                self.settings,
+            )
+        return self._data_source_cache[selected]
+
+    def _prompt_builder_for_group(
+        self,
+        summary_settings: Settings,
+        prompt_settings: Settings,
+    ) -> GroupSummaryImagePromptBuilder:
+        if self._prompt_builder_injected:
+            return self.prompt_builder
+        key = (
+            summary_settings.summary_provider_primary,
+            summary_settings.summary_provider_fallback,
+            summary_settings.codex_summary_model,
+            summary_settings.ai_model,
+            prompt_settings.summary_provider_primary,
+            prompt_settings.summary_provider_fallback,
+            prompt_settings.codex_summary_model,
+            prompt_settings.ai_model,
+        )
+        if key not in self._prompt_builder_cache:
+            self._prompt_builder_cache[key] = GroupSummaryImagePromptBuilder(
+                prompt_settings,
+                summary_settings=summary_settings,
+            )
+        return self._prompt_builder_cache[key]
+
     def _make_image_job(self, group: Group, run_date: str, force: bool) -> ImageJob:
         """保留原注入点；图片任务构造由图片阶段负责。"""
         return ImageStages(
@@ -481,6 +620,26 @@ class DailyPipeline:
                             "status": "held",
                             "error_type": "MISSED_SEND_WINDOW",
                             "detail": "已超过自动补发窗口，需人工确认",
+                        }
+                    )
+                    continue
+                if recovery and report_date < now.date():
+                    self.store.update(
+                        group_name,
+                        run_date,
+                        send_state="held",
+                        send_hold=True,
+                        send_hold_reason="HISTORICAL_SEND_REQUIRES_CONFIRMATION",
+                        needs_manual_send=True,
+                        send_error="历史任务禁止自动发送，需重新核对目标并人工确认",
+                        send_error_type="HISTORICAL_SEND_REQUIRES_CONFIRMATION",
+                    )
+                    results.append(
+                        {
+                            "group_name": group_name,
+                            "status": "held",
+                            "error_type": "HISTORICAL_SEND_REQUIRES_CONFIRMATION",
+                            "detail": "历史任务禁止自动发送",
                         }
                     )
                     continue

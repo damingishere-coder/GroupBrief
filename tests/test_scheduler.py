@@ -136,6 +136,67 @@ def test_daily_v2_job_persists_generation_and_email_idempotency(tmp_path, monkey
     assert state["email_completed_at"]
 
 
+def test_completed_legacy_day_lazily_adds_manifest_without_regeneration(
+    tmp_path,
+    monkeypatch,
+):
+    from app.config.settings import Settings
+    from app.db.models import Group
+    from app.scheduler import daily_v2_job as daily
+    from app.scheduler.period import PeriodResolver
+
+    settings = Settings(_env_file=None, email_enabled=False, email_smtp_host="")
+    real_state_class = daily.DailyScheduleState
+
+    class TempState(real_state_class):
+        def __init__(self, _output_root):
+            super().__init__(tmp_path)
+
+    state = TempState(tmp_path)
+    state.update(
+        "2026-08-25",
+        generation_started_at="2026-08-25T00:15:00+08:00",
+        generation_completed_at="2026-08-25T00:20:00+08:00",
+        generation_status="success",
+        generation_results=[{"group_name": "测试群", "status": "ready_to_send"}],
+        email_started_at="2026-08-25T00:21:00+08:00",
+        email_completed_at="2026-08-25T00:21:01+08:00",
+        email_status="skipped_disabled",
+    )
+
+    class CompletedPipeline:
+        def __init__(self, settings):
+            self.period_resolver = PeriodResolver()
+
+        def _load_groups(self):
+            return [
+                Group(
+                    id=7,
+                    display_name="测试群",
+                    wechat_group_id="test@chatroom",
+                    wechat_group_name="测试群",
+                    image_enabled=False,
+                    wechat_send_enabled=False,
+                )
+            ]
+
+        def generate_all(self, **_kwargs):
+            pytest.fail("已完成旧任务只能补清单，不得重新生成")
+
+    monkeypatch.setattr(daily, "DailyScheduleState", TempState)
+    monkeypatch.setattr(daily, "DailyPipeline", CompletedPipeline)
+    monkeypatch.setattr(daily.repo, "init_db", lambda settings: None)
+    monkeypatch.setattr(daily.repo, "apply_db_settings", lambda settings: [])
+
+    result = daily.run_daily_v2_job("2026-08-25", settings=settings)
+    saved = state.load("2026-08-25")
+
+    assert result["status"] == "already_completed"
+    assert saved["manifest_source"] == "legacy_current_config_compat"
+    assert saved["expected_group_count"] == 1
+    assert saved["expected_groups"][0]["group_id"] == 7
+
+
 def test_daily_v2_job_resumes_interrupted_generation_without_email(tmp_path, monkeypatch):
     from app.config.settings import Settings
     from app.scheduler import daily_v2_job as daily

@@ -30,6 +30,7 @@ from app.services.group_name_sync import (
     effective_send_target,
     send_target_mode,
 )
+from app.services.group_provider_config import validate_group_provider_values
 
 router = APIRouter(prefix="/api/groups", tags=["groups"])
 
@@ -43,8 +44,10 @@ class GroupCreate(BaseModel):
     # V2 扩展
     schedule_rule: str = "weekday_default"
     send_time: str = "08:30"
-    summary_model: str = "gpt-5.6-sol"
-    prompt_model: str = "gpt-5.6-sol"
+    summary_provider: str = ""
+    prompt_provider: str = ""
+    summary_model: str = ""
+    prompt_model: str = ""
     image_enabled: bool = True
     send_target: str = ""
     ranking_template: str = "default"
@@ -64,6 +67,8 @@ class GroupUpdate(BaseModel):
     # V2 扩展
     schedule_rule: str | None = None
     send_time: str | None = None
+    summary_provider: str | None = None
+    prompt_provider: str | None = None
     summary_model: str | None = None
     prompt_model: str | None = None
     image_enabled: bool | None = None
@@ -173,8 +178,11 @@ def list_groups(session: Session = Depends(repo.get_session)):
             "wechat_group_name": g.wechat_group_name,
             "enabled": g.enabled,
             "provider_preference": g.provider_preference,
+            "history_provider_preference": g.provider_preference,
             "schedule_rule": g.schedule_rule,
             "send_time": g.send_time,
+            "summary_provider": g.summary_provider,
+            "prompt_provider": g.prompt_provider,
             "summary_model": g.summary_model,
             "prompt_model": g.prompt_model,
             "image_enabled": g.image_enabled,
@@ -195,8 +203,15 @@ def list_groups(session: Session = Depends(repo.get_session)):
 
 
 @router.post("")
-def create_group(payload: GroupCreate, session: Session = Depends(repo.get_session)):
-    values = payload.model_dump()
+def create_group(
+    payload: GroupCreate,
+    session: Session = Depends(repo.get_session),
+    settings: Settings = Depends(get_settings),
+):
+    try:
+        values = validate_group_provider_values(payload.model_dump(), settings)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     values["display_name"] = _validate_output_group_name(
         values.get("display_name"), field_name="display_name"
     )
@@ -227,10 +242,20 @@ def create_group(payload: GroupCreate, session: Session = Depends(repo.get_sessi
 
 @router.put("/{group_id}")
 def update_group(
-    group_id: int, payload: GroupUpdate, session: Session = Depends(repo.get_session)
+    group_id: int,
+    payload: GroupUpdate,
+    session: Session = Depends(repo.get_session),
+    settings: Settings = Depends(get_settings),
 ):
     group = _require_active_group(session, group_id)
-    updates = payload.model_dump(exclude_unset=True)
+    try:
+        updates = validate_group_provider_values(
+            payload.model_dump(exclude_unset=True),
+            settings,
+            base=group,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     for field_name in ("display_name", "wechat_group_name"):
         if updates.get(field_name):
             updates[field_name] = _validate_output_group_name(

@@ -14,9 +14,13 @@ class TopSpeaker:
     rank: int
     name: str
     count: int
+    identity_key: str = ""
 
     def to_dict(self) -> dict:
-        return {"rank": self.rank, "name": self.name, "count": self.count}
+        payload = {"rank": self.rank, "name": self.name, "count": self.count}
+        if self.identity_key:
+            payload["identity_key"] = self.identity_key
+        return payload
 
 
 @dataclass

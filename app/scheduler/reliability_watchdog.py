@@ -1,4 +1,4 @@
-"""最近 30 天无人值守欠账恢复。
+"""最近 48 小时无人值守欠账恢复。
 
 生成按日期从旧到新补跑。发送只处理现有 run.json 明确处于 READY 且未被
 hold 的任务，并继续复用 DeliveryStages 的 claim/unknown/目标预检合同。
@@ -12,7 +12,13 @@ from zoneinfo import ZoneInfo
 from app.config.settings import Settings, get_settings
 from app.core.logging import get_logger
 from app.pipeline.daily_pipeline import DailyPipeline
-from app.scheduler.daily_v2_job import DailyScheduleState, run_daily_v2_job
+from app.scheduler.daily_v2_job import (
+    DailyScheduleState,
+    ensure_daily_manifest,
+    run_daily_v2_job,
+)
+from app.scheduler.runtime_status import write_daily_status
+from app.v2.run_store import RunStore
 
 logger = get_logger("groupbrief.scheduler")
 
@@ -25,7 +31,8 @@ def _generate_time(value: str) -> time:
 
 
 def recovery_dates(now: datetime, lookback_days: int) -> list[str]:
-    days = min(max(int(lookback_days), 1), 30)
+    # 产品安全边界：部署配置即使遗留 30，也不得重新触发整月 AI/生图。
+    days = min(max(int(lookback_days), 1), 2)
     start = now.date() - timedelta(days=days - 1)
     return [(start + timedelta(days=index)).isoformat() for index in range(days)]
 
@@ -60,6 +67,25 @@ def run_reliability_watchdog(
                 }
             )
             continue
+        try:
+            state = ensure_daily_manifest(
+                settings,
+                run_date,
+                state_store=state_store,
+                state=state,
+            )
+            write_daily_status(RunStore(settings.output_dir), run_date)
+        except Exception as exc:
+            logger.exception("Watchdog 任务清单投影失败：run_date=%s", run_date)
+            generation_results.append(
+                {
+                    "run_date": run_date,
+                    "status": "failed",
+                    "error_type": type(exc).__name__,
+                    "detail": str(exc)[:300],
+                }
+            )
+            continue
         if state.get("generation_completed_at"):
             continue
         try:
@@ -79,10 +105,9 @@ def run_reliability_watchdog(
         generation_results.append(result)
 
     try:
+        # 历史任务只能生成恢复；微信自动发送仍只扫描当天。
         send_results = DailyPipeline(settings=settings).send_due_for_dates(
-            dates,
-            now=now,
-            recovery=True,
+            [now.date().isoformat()], now=now, recovery=False
         )
     except Exception as exc:
         logger.exception("Watchdog 历史发送扫描异常")

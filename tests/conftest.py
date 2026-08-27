@@ -10,16 +10,18 @@
 
 import os
 import random
+import shutil
 import tempfile
 import uuid
 from pathlib import Path
 
-_TEST_DB_PATH = (
-    Path(tempfile.gettempdir())
-    / f"groupbrief-pytest-{os.getpid()}-{uuid.uuid4().hex}.db"
+_TEST_ROOT = Path(
+    tempfile.mkdtemp(prefix=f"groupbrief-pytest-{os.getpid()}-")
 )
+_TEST_DB_PATH = _TEST_ROOT / "groupbrief-test.db"
 
 os.environ["DATABASE_URL"] = f"sqlite:///{_TEST_DB_PATH.as_posix()}"
+os.environ["OUTPUT_ROOT_OVERRIDE"] = str(_TEST_ROOT / "output")
 os.environ["GROUPBRIEF_NO_SCHEDULER"] = "1"
 # 测试不读取真实微信联系人库（避免本机 APPDATA 下的 contact.db 影响断言）
 os.environ["GROUPBRIEF_NO_CONTACT_DB"] = "1"
@@ -32,6 +34,10 @@ os.environ["AI_API_KEY"] = ""
 os.environ["SUMMARY_PROVIDER_PRIMARY"] = "deepseek"
 # 旧 V1 单测需要显式进入兼容维护模式；生产默认仍是 read_only。
 os.environ["LEGACY_V1_WRITE_MODE"] = "maintenance"
+# 普通测试必须能在真实 8766 运行时执行，不能争抢生产生成锁。
+os.environ["GROUPBRIEF_GENERATION_MUTEX_NAMESPACE"] = (
+    f"pytest-{os.getpid()}-{uuid.uuid4().hex}"
+)
 
 
 def pytest_addoption(parser) -> None:
@@ -76,3 +82,7 @@ def pytest_sessionfinish(session, exitstatus) -> None:
             candidate.unlink(missing_ok=True)
         except OSError:
             pass
+    try:
+        shutil.rmtree(_TEST_ROOT)
+    except OSError:
+        pass

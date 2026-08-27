@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import sys
 import tempfile
@@ -16,6 +17,12 @@ from zoneinfo import ZoneInfo
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+
+# 仿真即使在生产服务运行时也必须使用独立 Windows 命名锁。
+os.environ.setdefault(
+    "GROUPBRIEF_GENERATION_MUTEX_NAMESPACE",
+    f"simulation-{os.getpid()}-{hashlib.sha256(str(PROJECT_ROOT).encode()).hexdigest()[:12]}",
+)
 
 from PIL import Image
 
@@ -44,6 +51,7 @@ class FaultPlan:
         "image_generation_failed": 0.05,
         "image_download_failed": 0.03,
         "send_failed": 0.03,
+        "send_result_unknown": 0.02,
         "program_interrupt": 0.03,
         "duplicate_start": 0.08,
     }
@@ -156,6 +164,7 @@ class SimulationImageGenerator:
     def __init__(self, faults: FaultPlan):
         self.faults = faults
         self.calls: Counter[str] = Counter()
+        self.successful_calls: Counter[str] = Counter()
         self.settings = Settings(_env_file=None)
 
     def generate(self, prompt_file: Path, output_path: Path, **_kwargs):
@@ -172,6 +181,7 @@ class SimulationImageGenerator:
             output_path.write_bytes(b"truncated-image")
             return ImageTaskResult(True, image_path=output_path, detail={"attempt_count": 1})
         Image.new("RGB", (64, 96), "white").save(output_path, format="PNG")
+        self.successful_calls[key] += 1
         return ImageTaskResult(
             True,
             image_path=output_path,
@@ -206,6 +216,14 @@ class SimulationSender(WechatSender):
         if self.faults.once("send_failed", occurrence_key):
             return SendResult(False, "simulated pre-submit send failure", submitted=False)
         self.text_submissions[key] += 1
+        if self.faults.once("send_result_unknown", key):
+            return SendResult(
+                False,
+                "simulated submitted result unknown",
+                datetime.now().astimezone().isoformat(),
+                submitted=True,
+                outcome_unknown=True,
+            )
         return SendResult(
             True,
             "simulation text sent",
@@ -316,6 +334,7 @@ def run_simulation(
             image_enabled=True,
             wechat_send_enabled=True,
             send_time="08:30",
+            schedule_rule="daily_previous_day",
         )
         for index in range(1, groups_count + 1)
     ]
@@ -331,35 +350,69 @@ def run_simulation(
     try:
         start = date(2026, 8, 27) - timedelta(days=days - 1)
         all_dates: list[str] = []
+        downtime_offsets = {10, 11} if days >= 14 else set()
+        downtime_dates: list[str] = []
         for offset in range(days):
             run_date = (start + timedelta(days=offset)).isoformat()
             all_dates.append(run_date)
+            if offset in downtime_offsets:
+                downtime_dates.append(run_date)
+                continue
+
+            generate_dates = [*downtime_dates, run_date]
+            downtime_dates = []
+            for generate_date in generate_dates:
+                pipeline = _pipeline(settings, store, groups, source, prompt, image, sender)
+                for _ in range(5):
+                    _scheduler_generate(pipeline, state, generate_date)
+                    if state.load(generate_date).get("generation_completed_at"):
+                        break
+                send_now = datetime.fromisoformat(f"{run_date}T09:00:00+08:00")
+                if generate_date == run_date:
+                    # 同日中断由 48 小时窗口内的新实例继续；未知提交必须保持暂停。
+                    if faults.once("program_interrupt", f"before-send|{run_date}"):
+                        send_now = datetime.fromisoformat(f"{run_date}T09:10:00+08:00")
+                    for send_attempt in range(4):
+                        attempt_now = send_now + timedelta(minutes=15 * send_attempt)
+                        pipeline.send_due_for_dates([generate_date], now=attempt_now, recovery=True)
+                        day_runs = [
+                            store.load_run(group.display_name, generate_date)
+                            for group in groups
+                        ]
+                        if all(
+                            item.get("status") == SENT or item.get("send_hold")
+                            for item in day_runs
+                        ):
+                            break
+                else:
+                    # 停机期间产生的历史任务只生成并进入人工清单，禁止自动补发。
+                    pipeline.send_due_for_dates([generate_date], now=send_now, recovery=True)
+                if faults.once("duplicate_start", generate_date):
+                    duplicate = _pipeline(settings, store, groups, source, prompt, image, sender)
+                    _scheduler_generate(duplicate, state, generate_date)
+
+        # 天数很短时也确保尾部停机日被恢复；历史发送仍只进入人工待处理。
+        for generate_date in downtime_dates:
             pipeline = _pipeline(settings, store, groups, source, prompt, image, sender)
             for _ in range(5):
-                _scheduler_generate(pipeline, state, run_date)
-                if state.load(run_date).get("generation_completed_at"):
+                _scheduler_generate(pipeline, state, generate_date)
+                if state.load(generate_date).get("generation_completed_at"):
                     break
-            # 随机“进程在发送扫描前中断”：新实例随后通过历史恢复继续。
-            if not faults.once("program_interrupt", f"before-send|{run_date}"):
-                now = datetime.fromisoformat(f"{run_date}T09:00:00+08:00")
-                pipeline.send_due_for_dates([run_date], now=now, recovery=True)
-            if faults.once("duplicate_start", run_date):
-                duplicate = _pipeline(settings, store, groups, source, prompt, image, sender)
-                _scheduler_generate(duplicate, state, run_date)
-
-            recovery = _pipeline(settings, store, groups, source, prompt, image, sender)
-            now = datetime.fromisoformat(f"{run_date}T09:10:00+08:00")
-            for _ in range(4):
-                recovery.send_due_for_dates(all_dates, now=now, recovery=True)
+            now = datetime.fromisoformat(f"{all_dates[-1]}T09:10:00+08:00")
+            pipeline.send_due_for_dates([generate_date], now=now, recovery=True)
 
         runs = store.list_runs()
         expected = days * groups_count
         sent = [run for run in runs if run.get("status") == SENT]
-        manual_holds = [run for run in runs if run.get("execution_state") == "HOLD_MANUAL"]
+        manual_holds = [
+            run
+            for run in runs
+            if run.get("execution_state") == "HOLD_MANUAL" or run.get("send_hold")
+        ]
         retry_pending = [run for run in runs if run.get("execution_state") == "WAIT_RETRY"]
         failed_final = [run for run in runs if run.get("execution_state") == "FAILED_FINAL"]
         task_loss = max(expected - len(runs), 0)
-        duplicate_images = sum(max(count - 1, 0) for count in image.calls.values())
+        duplicate_images = sum(max(count - 1, 0) for count in image.successful_calls.values())
         duplicate_image_sends = sum(max(count - 1, 0) for count in sender.image_submissions.values())
         duplicate_text_sends = sum(max(count - 1, 0) for count in sender.text_submissions.values())
         scheduler_incomplete = sum(
@@ -376,6 +429,7 @@ def run_simulation(
             "expected_tasks": expected,
             "runs_found": len(runs),
             "sent": len(sent),
+            "accounted_terminal_tasks": len(sent) + len(manual_holds),
             "manual_holds": len(manual_holds),
             "failed_final": len(failed_final),
             "retry_pending": len(retry_pending),
@@ -385,14 +439,16 @@ def run_simulation(
             "duplicate_successful_text_sends": duplicate_text_sends,
             "scheduler_incomplete_dates": scheduler_incomplete,
             "runtime_reports": runtime_reports,
+            "downtime_dates": sorted(
+                (start + timedelta(days=value)).isoformat() for value in downtime_offsets
+            ),
             "injected": dict(sorted(faults.injected.items())),
             "source_max_attempts": max(source.calls.values(), default=0),
             "prompt_max_attempts": max(prompt.calls.values(), default=0),
             "image_max_attempts": max(image.calls.values(), default=0),
             "ok": (
                 len(runs) == expected
-                and len(sent) == expected
-                and not manual_holds
+                and len(sent) + len(manual_holds) == expected
                 and not failed_final
                 and not retry_pending
                 and task_loss == 0
@@ -401,6 +457,9 @@ def run_simulation(
                 and duplicate_text_sends == 0
                 and scheduler_incomplete == 0
                 and runtime_reports == days
+                and max(source.calls.values(), default=0) <= 5
+                and max(prompt.calls.values(), default=0) <= 5
+                and max(image.calls.values(), default=0) <= 5
             ),
         }
         return result

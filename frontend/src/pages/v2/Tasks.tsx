@@ -9,11 +9,14 @@ import {
 import {
   getRunDetail,
   getRecoveryInfo,
+  getRecoveryBacklog,
+  confirmRecovery,
   getRuns,
   getSystemReadiness,
   resolveSendUnknown,
   retryFailed,
   RecoveryInfo,
+  RecoveryBacklog,
   V2Run,
 } from "../../api";
 import {
@@ -99,6 +102,10 @@ export default function Tasks() {
   const [entries, setEntries] = useState<TaskEntry[]>([]);
   const [recovery, setRecovery] = useState<RecoveryInfo | null>(null);
   const [recoveryError, setRecoveryError] = useState("");
+  const [backlog, setBacklog] = useState<RecoveryBacklog | null>(null);
+  const [selectedBacklog, setSelectedBacklog] = useState<Set<string>>(new Set());
+  const [confirmingBacklog, setConfirmingBacklog] = useState(false);
+  const [showBacklogConfirm, setShowBacklogConfirm] = useState(false);
   const [dateFilter, setDateFilter] = useState("");
   const [groupFilter, setGroupFilter] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
@@ -120,11 +127,21 @@ export default function Tasks() {
         setRecoveryError(`恢复完整性读取失败：${String(reason)}`);
         return null;
       }),
+      getRecoveryBacklog().catch((reason: unknown) => {
+        setRecoveryError(`历史恢复清单读取失败：${String(reason)}`);
+        return null;
+      }),
     ])
-      .then(async ([runData, recoveryData]) => {
+      .then(async ([runData, recoveryData, backlogData]) => {
         if (recoveryData) {
           setRecovery(recoveryData);
           setRecoveryError("");
+        }
+        if (backlogData) {
+          setBacklog(backlogData);
+          setSelectedBacklog((current) => new Set(
+            [...current].filter((key) => backlogData.items.some((item) => `${item.run_date}:${item.group_id}` === key && item.recoverable)),
+          ));
         }
         const integrityMap = new Map<string, RecoveryInfo["integrity"][number]>();
         recoveryData?.integrity.forEach((item) => integrityMap.set(`${item.group_name}\u0000${item.run_date}`, item));
@@ -222,6 +239,24 @@ export default function Tasks() {
       .finally(() => setResolving(false));
   };
 
+  const confirmSelectedBacklog = () => {
+    if (!backlog || selectedBacklog.size === 0 || confirmingBacklog) return;
+    const tasks = backlog.items
+      .filter((item) => item.recoverable && item.group_id && selectedBacklog.has(`${item.run_date}:${item.group_id}`))
+      .map((item) => ({ run_date: item.run_date, group_id: item.group_id as number }));
+    if (tasks.length === 0) return;
+    setConfirmingBacklog(true);
+    confirmRecovery({ expected_version: backlog.version, tasks })
+      .then((response) => {
+        toast(`历史生成恢复完成：${response.status}；接口确认未调用发送`);
+        setSelectedBacklog(new Set());
+        setShowBacklogConfirm(false);
+        loadTasks();
+      })
+      .catch((reason: unknown) => toast(`历史恢复失败：${String(reason)}`))
+      .finally(() => setConfirmingBacklog(false));
+  };
+
   if (loading && entries.length === 0) return <LoadingState label="正在加载任务中心…" />;
   if (loadError && entries.length === 0) {
     return <EmptyState title="任务中心加载失败" description={loadError} action={<Button tone="secondary" onClick={loadTasks}>重新加载</Button>} />;
@@ -241,6 +276,40 @@ export default function Tasks() {
         <div className="tasks-kpi"><WarningCircle size={19} aria-hidden="true" /><span>失败</span><strong>{failedCount}</strong><small>仅失败任务提供重跑</small></div>
         <div className="tasks-kpi"><Clock size={19} aria-hidden="true" /><span>未完成</span><strong>{waitingCount}</strong><small>不等同于实时进度</small></div>
       </section>
+
+      {backlog && backlog.items.length > 0 && (
+        <section className="tasks-backlog card" aria-label="历史恢复待核对清单">
+          <div className="tasks-section-head">
+            <div><h2>48 小时外恢复待核对</h2><p>这里只允许恢复生成；不会调用历史发送。结果未知、状态损坏或群已停用的项目只能人工查看。</p></div>
+            <Button
+              tone="danger"
+              disabled={selectedBacklog.size === 0}
+              onClick={() => setShowBacklogConfirm(true)}
+            >确认恢复生成（{selectedBacklog.size}）</Button>
+          </div>
+          <div className="tasks-backlog-list">
+            {backlog.items.map((item) => {
+              const key = `${item.run_date}:${item.group_id}`;
+              return (
+                <label key={key} className={`tasks-backlog-item ${item.recoverable ? "" : "is-disabled"}`}>
+                  <input
+                    type="checkbox"
+                    disabled={!item.recoverable || !item.group_id}
+                    checked={selectedBacklog.has(key)}
+                    onChange={(event) => setSelectedBacklog((current) => {
+                      const next = new Set(current);
+                      if (event.target.checked) next.add(key); else next.delete(key);
+                      return next;
+                    })}
+                  />
+                  <span><strong>{item.group_name || "未知任务"} · {item.run_date}</strong><small>{item.recoverable ? `预计摘要 ${item.estimated_summary_calls || 0} 次、生图 ${item.estimated_image_calls || 0} 次` : `仅人工核对：${item.reason}`}</small></span>
+                  <StatusBadge tone={item.recoverable ? "warning" : "danger"}>{item.safe_stage}</StatusBadge>
+                </label>
+              );
+            })}
+          </div>
+        </section>
+      )}
 
       <section className="tasks-filter-bar" aria-label="任务筛选">
         <label><span>运行日期</span><input type="date" value={dateFilter} onChange={(event) => setDateFilter(event.target.value)} /></label>
@@ -275,6 +344,15 @@ export default function Tasks() {
       </div>
 
       {recovery && <div className="tasks-recovery-summary">恢复扫描：{recovery.incomplete.length} 条未完成任务 · 完整性记录 {recovery.integrity.length} 条。这里只展示后端返回的恢复信息。</div>}
+      <ConfirmDialog
+        open={showBacklogConfirm}
+        title="确认恢复所选历史生成？"
+        description="这会按当前清单版本调用摘要 AI 和生图，可能产生外部调用；只恢复生成，绝不会发送历史微信。若清单已变化，后端会拒绝并要求刷新。"
+        confirmLabel="确认，仅恢复生成"
+        busy={confirmingBacklog}
+        onConfirm={confirmSelectedBacklog}
+        onCancel={() => !confirmingBacklog && setShowBacklogConfirm(false)}
+      />
       <ConfirmDialog
         open={Boolean(retryTarget)}
         title="重跑失败任务？"

@@ -2,13 +2,13 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 
-def test_recovery_dates_are_oldest_first_and_capped_at_thirty():
+def test_recovery_dates_are_oldest_first_and_capped_at_two_days():
     from app.scheduler.reliability_watchdog import recovery_dates
 
     now = datetime(2026, 8, 27, 9, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
 
-    assert recovery_dates(now, 3) == ["2026-08-25", "2026-08-26", "2026-08-27"]
-    assert len(recovery_dates(now, 999)) == 30
+    assert recovery_dates(now, 3) == ["2026-08-26", "2026-08-27"]
+    assert recovery_dates(now, 999) == ["2026-08-26", "2026-08-27"]
 
 
 def test_watchdog_backfills_in_date_order_and_scans_same_dates_for_send(tmp_path, monkeypatch):
@@ -56,7 +56,7 @@ def test_watchdog_backfills_in_date_order_and_scans_same_dates_for_send(tmp_path
     result = watchdog.run_reliability_watchdog(settings=settings, now=now)
 
     assert generated == [("2026-08-26", True), ("2026-08-27", True)]
-    assert sent == [(["2026-08-25", "2026-08-26", "2026-08-27"], True)]
+    assert sent == [(["2026-08-27"], False)]
     assert result["status"] == "success"
 
 

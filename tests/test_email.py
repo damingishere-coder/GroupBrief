@@ -22,10 +22,12 @@ repo.init_db(settings)
 
 
 def _prepare_run(session: Session) -> int:
-    group = repo.save_group(
-        session,
-        Group(display_name="示例UED-4群", wechat_group_id="group-a"),
-    )
+    group = repo.find_group_by_wechat_id(session, "group-a", include_deleted=False)
+    if group is None:
+        group = repo.save_group(
+            session,
+            Group(display_name="示例UED-4群", wechat_group_id="group-a"),
+        )
     test_settings = Settings(
         _env_file=None,
         allow_test_providers=True,

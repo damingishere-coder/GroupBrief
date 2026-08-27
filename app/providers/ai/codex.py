@@ -81,6 +81,14 @@ class CodexGPTProvider(DeepSeekV4FlashProvider):
             if fallback == "deepseek"
             else None
         )
+        self.last_provider_used = ""
+        self.last_fallback_reason = ""
+        self.providers_used: list[str] = []
+
+    def reset_usage(self) -> None:
+        self.last_provider_used = ""
+        self.last_fallback_reason = ""
+        self.providers_used = []
 
     def _resolve_binary(self) -> str:
         if self._resolved_binary:
@@ -147,7 +155,11 @@ class CodexGPTProvider(DeepSeekV4FlashProvider):
         max_tokens: int = 3000,
     ) -> str:
         try:
-            return self._codex_chat(messages, response_format=response_format)
+            result = self._codex_chat(messages, response_format=response_format)
+            self.last_provider_used = self.name
+            if self.name not in self.providers_used:
+                self.providers_used.append(self.name)
+            return result
         except ExternalCallResultUnknownError:
             # 主请求可能已经产生费用；此时切备用会形成第二次收费调用。
             raise
@@ -164,6 +176,11 @@ class CodexGPTProvider(DeepSeekV4FlashProvider):
                     temperature=temperature,
                     max_tokens=max_tokens,
                 )
+                fallback_name = str(getattr(self._fallback, "name", "deepseek"))
+                self.last_provider_used = fallback_name
+                self.last_fallback_reason = str(primary_exc)[:200]
+                if fallback_name not in self.providers_used:
+                    self.providers_used.append(fallback_name)
                 logger.info("Codex GPT 未提交，已由 DeepSeek 备用完成本次调用")
                 return result
             except ExternalCallResultUnknownError:

@@ -150,6 +150,29 @@ class GenerationStages:
                 context.group_name,
                 context.run_date,
                 prompt_meta=prompt_meta,
+                summary_provider_actual=str(
+                    prompt_meta.get("summary_provider_actual") or ""
+                ),
+                summary_model_actual=str(prompt_meta.get("summary_model_actual") or ""),
+                summary_fallback_reason=str(
+                    prompt_meta.get("summary_fallback_reason") or ""
+                ),
+                prompt_provider_actual=str(
+                    prompt_meta.get("prompt_provider_actual")
+                    or prompt_meta.get("actual_provider")
+                    or ""
+                ),
+                prompt_model_actual=str(
+                    prompt_meta.get("prompt_model_actual")
+                    or prompt_meta.get("actual_model")
+                    or ""
+                ),
+                prompt_fallback_reason=str(
+                    prompt_meta.get("prompt_fallback_reason")
+                    or prompt_meta.get("fallback_reason")
+                    or ""
+                ),
+                external_call_count=int(prompt_meta.get("api_call_count") or 0),
             )
         image_stage = self._decide_image(context)
         return self._finish(context, image_stage.terminal_response())

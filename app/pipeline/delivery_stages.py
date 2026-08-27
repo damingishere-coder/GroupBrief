@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -31,6 +32,8 @@ class DeliveryContext:
     ranking_text: str = ""
     image_enabled: bool = False
     image_path: str | None = None
+    text_sha256: str = ""
+    image_sha256: str = ""
     text_sent_at: str = ""
     image_sent_at: str = ""
     verification_levels: list[str] = field(default_factory=list)
@@ -204,6 +207,7 @@ class DeliveryStages:
             )
 
         context.ranking_text = ranking_text
+        context.text_sha256 = hashlib.sha256(ranking_text.encode("utf-8")).hexdigest()
         context.image_enabled = bool(context.group.image_enabled)
         if context.image_enabled:
             image_ok, image_detail = verify_image(image_path)
@@ -227,6 +231,51 @@ class DeliveryStages:
                     }
                 )
             context.image_path = str(image_path.resolve())
+            try:
+                context.image_sha256 = hashlib.sha256(image_path.read_bytes()).hexdigest()
+            except OSError:
+                self.store.finish_send_claim(
+                    context.group_name,
+                    context.run_date,
+                    context.claim_id,
+                    send_state="failed",
+                    status=FAILED,
+                    failed_stage="send",
+                    error="图片无法读取以生成送达证据",
+                    error_type=IMAGE_FILE_MISSING,
+                )
+                return StageResult.stop(
+                    {
+                        "group_name": context.group_name,
+                        "status": "failed",
+                        "error_type": IMAGE_FILE_MISSING,
+                        "detail": "图片无法读取以生成送达证据",
+                    }
+                )
+        evidence = {
+            "target": context.target,
+            "prepared_at": datetime.now(context.now.tzinfo).isoformat(),
+            "text_sha256": context.text_sha256,
+            "image_sha256": context.image_sha256,
+            "image_enabled": context.image_enabled,
+            "result": "pending",
+        }
+        persisted, latest = self.store.update_send_claim(
+            context.group_name,
+            context.run_date,
+            context.claim_id,
+            delivery_evidence=evidence,
+        )
+        if not persisted:
+            return StageResult.stop(
+                {
+                    "group_name": context.group_name,
+                    "status": "skipped",
+                    "error_type": "SEND_CLAIM_LOST",
+                    "detail": "送达证据落盘前发送 claim 已失效，未调用发送器",
+                }
+            )
+        context.run = latest
         context.text_sent_at = str(context.run.get("text_sent_at") or "")
         context.image_sent_at = str(context.run.get("image_sent_at") or "")
         return StageResult.proceed(context)
@@ -311,6 +360,12 @@ class DeliveryStages:
                 text_attempt_finished_at=finished_at,
                 text_submitted_at="",
                 text_verification_diagnostics=result.diagnostics,
+                delivery_evidence=self._delivery_evidence(
+                    context,
+                    result="failed",
+                    completed_at=finished_at,
+                    detail=result.detail,
+                ),
             )
             if not persisted:
                 return StageResult.stop(
@@ -445,6 +500,12 @@ class DeliveryStages:
                 image_attempt_finished_at=finished_at,
                 image_submitted_at="",
                 image_verification_diagnostics=result.diagnostics,
+                delivery_evidence=self._delivery_evidence(
+                    context,
+                    result="failed",
+                    completed_at=finished_at,
+                    detail=result.detail,
+                ),
             )
             if not persisted:
                 return StageResult.stop(
@@ -524,6 +585,12 @@ class DeliveryStages:
             send_error="",
             send_error_type="",
             verification_level=verification_level,
+            delivery_evidence=self._delivery_evidence(
+                context,
+                result="sent",
+                completed_at=context.now.isoformat(),
+                verification_level=verification_level,
+            ),
             send_hold=False,
             send_hold_reason="",
             needs_manual_send=False,
@@ -568,6 +635,32 @@ class DeliveryStages:
             "sent_at": context.now.isoformat(),
         }
 
+    @staticmethod
+    def _delivery_evidence(
+        context: DeliveryContext,
+        *,
+        result: str,
+        completed_at: str,
+        detail: str = "",
+        verification_level: str = "",
+    ) -> dict:
+        evidence = dict(
+            context.run.get("delivery_evidence")
+            if isinstance(context.run.get("delivery_evidence"), dict)
+            else {}
+        )
+        evidence.update(
+            target=context.target,
+            completed_at=completed_at,
+            text_sha256=context.text_sha256,
+            image_sha256=context.image_sha256,
+            image_enabled=context.image_enabled,
+            result=result,
+            detail=str(detail or "")[:300],
+            verification_level=verification_level,
+        )
+        return evidence
+
     def finish_unknown(
         self,
         group_name: str,
@@ -582,10 +675,23 @@ class DeliveryStages:
         finished_at = datetime.now(
             ZoneInfo(self.settings.app_timezone)
         ).isoformat()
+        current = self.store.load_run(group_name, run_date)
+        evidence = dict(
+            current.get("delivery_evidence")
+            if isinstance(current.get("delivery_evidence"), dict)
+            else {}
+        )
+        evidence.update(
+            completed_at=finished_at,
+            result="unknown",
+            detail=str(detail or "")[:300],
+            verification_level="unknown",
+        )
         fields = {
             f"{stage}_attempt_finished_at": "",
             f"{stage}_submitted_at": submitted_at,
             f"{stage}_verification_diagnostics": diagnostics or {},
+            "delivery_evidence": evidence,
         }
         persisted, run = self.store.finish_send_claim(
             group_name,

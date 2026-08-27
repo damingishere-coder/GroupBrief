@@ -158,6 +158,21 @@ def dashboard(
         earliest, name = min(upcoming, key=lambda item: item[0])
         next_send = f"{earliest.strftime('%H:%M')}（{name}）"
 
+    runtime_status = {"overall_status": "not_started", "summary": {}}
+    store_root = getattr(store, "root", None)
+    if isinstance(store_root, Path):
+        runtime_path = store_root.parent / "runtime" / selected_run_date / "status.json"
+        try:
+            value = json.loads(runtime_path.read_text(encoding="utf-8"))
+            if isinstance(value, dict):
+                runtime_status = {
+                    "overall_status": str(value.get("overall_status") or "needs_attention"),
+                    "summary": value.get("summary") if isinstance(value.get("summary"), dict) else {},
+                    "updated_at": str(value.get("updated_at") or ""),
+                }
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            pass
+
     return {
         "today": selected_run_date,
         "run_date": selected_run_date,
@@ -167,6 +182,7 @@ def dashboard(
         "enabled_groups": len(cards),
         "counts": counts,
         "next_send": next_send,
+        "daily_status": runtime_status,
         "cards": cards,
     }
 

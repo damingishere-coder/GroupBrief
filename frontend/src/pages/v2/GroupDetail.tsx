@@ -15,9 +15,11 @@ import {
   GroupMatch,
   GroupPayload,
   GroupV2,
+  ProviderCatalogResponse,
   createGroup,
   discoverGroups,
   listGroups,
+  getProviderCatalog,
   listImagePromptTemplates,
   listRankingTemplates,
   pipelineGenerate,
@@ -55,8 +57,10 @@ const EMPTY_FORM: GroupPayload = {
   provider_preference: "",
   schedule_rule: "weekday_default",
   send_time: "08:30",
-  summary_model: "gpt-5.6-sol",
-  prompt_model: "gpt-5.6-sol",
+  summary_provider: "",
+  prompt_provider: "",
+  summary_model: "",
+  prompt_model: "",
   image_enabled: true,
   send_target: "",
   ranking_template: "default",
@@ -81,8 +85,10 @@ function toForm(group: GroupV2): GroupPayload {
     provider_preference: group.provider_preference || "",
     schedule_rule: group.schedule_rule || "weekday_default",
     send_time: group.send_time || "08:30",
-    summary_model: group.summary_model || "gpt-5.6-sol",
-    prompt_model: group.prompt_model || "gpt-5.6-sol",
+    summary_provider: group.summary_provider || "",
+    prompt_provider: group.prompt_provider || "",
+    summary_model: group.summary_model || "",
+    prompt_model: group.prompt_model || "",
     image_enabled: group.image_enabled,
     send_target: group.send_target || "",
     ranking_template: group.ranking_template || "default",
@@ -126,6 +132,7 @@ export default function GroupDetail({ groupId, invalidGroupId }: GroupDetailProp
   const [rankingTemplates, setRankingTemplates] = useState<string[]>([]);
   const [imagePromptTemplates, setImagePromptTemplates] = useState<string[]>([]);
   const [templateError, setTemplateError] = useState("");
+  const [providerCatalog, setProviderCatalog] = useState<ProviderCatalogResponse["catalog"]>({ history: [], ai: [] });
   const [discovered, setDiscovered] = useState<DiscoveredGroup[]>([]);
   const [discovering, setDiscovering] = useState(false);
   const [showDiscovered, setShowDiscovered] = useState(false);
@@ -164,9 +171,10 @@ export default function GroupDetail({ groupId, invalidGroupId }: GroupDetailProp
     }
 
     const loadTemplates = async () => {
-      const [rankingResult, promptResult] = await Promise.allSettled([
+      const [rankingResult, promptResult, providerResult] = await Promise.allSettled([
         listRankingTemplates(),
         listImagePromptTemplates(),
+        getProviderCatalog(),
       ]);
       if (!active) return;
       const failures: string[] = [];
@@ -174,6 +182,8 @@ export default function GroupDetail({ groupId, invalidGroupId }: GroupDetailProp
       else failures.push(`排行榜模板：${String(rankingResult.reason)}`);
       if (promptResult.status === "fulfilled") setImagePromptTemplates(promptResult.value.templates);
       else failures.push(`Prompt 模板：${String(promptResult.reason)}`);
+      if (providerResult.status === "fulfilled") setProviderCatalog(providerResult.value.catalog);
+      else failures.push(`Provider 白名单：${String(providerResult.reason)}`);
       if (failures.length > 0) {
         setTemplateError(`模板列表加载失败，已保留当前配置。${failures.join("；")}`);
         toast("模板列表加载失败，当前值仍可保存");
@@ -306,6 +316,10 @@ export default function GroupDetail({ groupId, invalidGroupId }: GroupDetailProp
   const currentPromptTemplates = imagePromptTemplates.includes(form.image_prompt_template)
     ? imagePromptTemplates
     : [form.image_prompt_template, ...imagePromptTemplates];
+  const aiModelsFor = (provider: string, current: string) => {
+    const models = providerCatalog.ai.find((item) => item.provider === provider)?.models || [];
+    return current && !models.includes(current) ? [current, ...models] : models;
+  };
 
   return (
     <div className="group-detail-page">
@@ -367,10 +381,13 @@ export default function GroupDetail({ groupId, invalidGroupId }: GroupDetailProp
           </Field>
           <Field id="provider-preference" label="数据源偏好">
             <select id="provider-preference" value={form.provider_preference} onChange={(event) => setField("provider_preference", event.target.value)}>
-              <option value="">自动选择</option>
-              <option value="wechat_data_analysis">WeChatDataAnalysis</option>
-              <option value="wechat-cli">wechat-cli</option>
+              <option value="">继承全局历史数据源</option>
+              {(providerCatalog.history.length ? providerCatalog.history : [
+                { provider: "wechat_data_analysis", label: "WeChatDataAnalysis", available: true, capabilities: [] },
+                { provider: "wechat_cli", label: "wechat-cli", available: false, capabilities: [] },
+              ]).map((item) => <option key={item.provider} value={item.provider} disabled={!item.available}>{item.label}{item.available ? "" : "（当前不可用）"}</option>)}
             </select>
+            <span className="group-detail-field-help">这里只控制聊天历史读取，不代表 AI Provider。</span>
           </Field>
           <label className="group-detail-switch" htmlFor="group-enabled">
             <input id="group-enabled" type="checkbox" checked={form.enabled} onChange={(event) => setField("enabled", event.target.checked)} />
@@ -385,6 +402,7 @@ export default function GroupDetail({ groupId, invalidGroupId }: GroupDetailProp
           <Field id="schedule-rule" label="统计周期规则">
             <select id="schedule-rule" value={form.schedule_rule} onChange={(event) => setField("schedule_rule", event.target.value)}>
               <option value="weekday_default">工作日默认（周一=周五至周日）</option>
+              <option value="daily_previous_day">每日统计前一天</option>
             </select>
           </Field>
           <Field id="send-time" label="发送时间" required error={errors.send_time}>
@@ -425,14 +443,28 @@ export default function GroupDetail({ groupId, invalidGroupId }: GroupDetailProp
       <section className="group-detail-card">
         <div className="group-detail-section-heading"><div><h2>模型与模板</h2><p>{templateError || "模板选择来自真实模板列表 API。"}</p></div></div>
         <div className="group-detail-form-grid">
-          <Field id="summary-model" label="摘要模型">
-            <select id="summary-model" value={form.summary_model} onChange={(event) => setField("summary_model", event.target.value)}>
-              <option value="gpt-5.6-sol">GPT-5.6 Sol（Codex 主用）</option>
+          <Field id="summary-provider" label="摘要 Provider">
+            <select id="summary-provider" value={form.summary_provider} onChange={(event) => { setField("summary_provider", event.target.value); setField("summary_model", ""); }}>
+              <option value="">继承全局配置</option>
+              {providerCatalog.ai.filter((item) => item.capabilities.includes("summary")).map((item) => <option key={item.provider} value={item.provider} disabled={!item.available}>{item.label}{item.available ? "" : "（当前不可用）"}</option>)}
             </select>
           </Field>
-          <Field id="prompt-model" label="Prompt 模型">
+          <Field id="summary-model" label="每周摘要模型">
+            <select id="summary-model" value={form.summary_model} onChange={(event) => setField("summary_model", event.target.value)}>
+              <option value="">继承 Provider 默认模型</option>
+              {aiModelsFor(form.summary_provider, form.summary_model).map((model) => <option key={model} value={model}>{model}</option>)}
+            </select>
+          </Field>
+          <Field id="prompt-provider" label="日报 Prompt Provider">
+            <select id="prompt-provider" value={form.prompt_provider} onChange={(event) => { setField("prompt_provider", event.target.value); setField("prompt_model", ""); }}>
+              <option value="">继承全局配置</option>
+              {providerCatalog.ai.filter((item) => item.capabilities.includes("prompt")).map((item) => <option key={item.provider} value={item.provider} disabled={!item.available}>{item.label}{item.available ? "" : "（当前不可用）"}</option>)}
+            </select>
+          </Field>
+          <Field id="prompt-model" label="日报 Prompt 模型">
             <select id="prompt-model" value={form.prompt_model} onChange={(event) => setField("prompt_model", event.target.value)}>
-              <option value="gpt-5.6-sol">GPT-5.6 Sol（Codex 主用）</option>
+              <option value="">继承 Provider 默认模型</option>
+              {aiModelsFor(form.prompt_provider, form.prompt_model).map((model) => <option key={model} value={model}>{model}</option>)}
             </select>
           </Field>
           <Field id="ranking-template" label="排行榜模板">

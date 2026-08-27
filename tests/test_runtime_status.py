@@ -10,6 +10,13 @@ def test_runtime_status_summarizes_groups_without_business_payload(tmp_path):
     store = RunStore(tmp_path / "output")
     DailyScheduleState(store.root).update(
         "2026-08-27",
+        manifest_version=1,
+        manifest_created_at="2026-08-27T00:14:00+08:00",
+        expected_group_count=2,
+        expected_groups=[
+            {"group_id": 1, "expected_terminal": SENT},
+            {"group_id": 2, "expected_terminal": SENT},
+        ],
         generation_started_at="2026-08-27T00:15:00+08:00",
         generation_status="success",
         generation_completed_at="2026-08-27T00:16:00+08:00",
@@ -32,7 +39,9 @@ def test_runtime_status_summarizes_groups_without_business_payload(tmp_path):
 
     assert path == tmp_path / "runtime" / "2026-08-27" / "status.json"
     assert payload["run_id"].startswith("groupbrief:2026-08-27:")
-    assert payload["overall_status"] == "in_progress"
+    assert payload["overall_status"] == "partial"
+    assert payload["summary"]["expected_group_count"] == 2
+    assert payload["summary"]["completed_group_count"] == 1
     assert [item["group_task_id"] for item in payload["groups"]] == [
         "groupbrief:2026-08-27:group-1",
         "groupbrief:2026-08-27:group-2",
@@ -45,6 +54,16 @@ def test_runtime_status_summarizes_groups_without_business_payload(tmp_path):
 
 def test_runtime_status_exposes_send_retry_and_final_hold(tmp_path):
     store = RunStore(tmp_path / "output")
+    DailyScheduleState(store.root).update(
+        "2026-08-27",
+        manifest_version=1,
+        manifest_created_at="2026-08-27T00:14:00+08:00",
+        expected_group_count=2,
+        expected_groups=[
+            {"group_id": 3, "expected_terminal": SENT},
+            {"group_id": 4, "expected_terminal": SENT},
+        ],
+    )
     store.save_run(
         "重试群",
         "2026-08-27",
@@ -78,4 +97,29 @@ def test_runtime_status_exposes_send_retry_and_final_hold(tmp_path):
     assert by_name["重试群"]["send"]["attempts"] == 1
     assert by_name["终止群"]["send"]["status"] == "held"
     assert by_name["终止群"]["send"]["hold_reason"] == "SEND_RETRY_EXHAUSTED"
-    assert payload["overall_status"] == "attention_required"
+    assert payload["overall_status"] == "blocked"
+
+
+def test_runtime_status_never_completes_when_manifest_group_is_missing(tmp_path):
+    store = RunStore(tmp_path / "output")
+    DailyScheduleState(store.root).update(
+        "2026-08-27",
+        manifest_version=1,
+        manifest_created_at="2026-08-27T00:14:00+08:00",
+        expected_group_count=2,
+        expected_groups=[
+            {"group_id": 1, "expected_terminal": SENT},
+            {"group_id": 2, "expected_terminal": SENT},
+        ],
+    )
+    store.save_run(
+        "仅完成群",
+        "2026-08-27",
+        {"group_id": "1", "status": SENT, "sent_at": "2026-08-27T08:30:00+08:00"},
+    )
+
+    payload = json.loads(write_daily_status(store, "2026-08-27").read_text(encoding="utf-8"))
+
+    assert payload["overall_status"] == "needs_attention"
+    assert payload["summary"]["missing_expected_group_ids"] == ["2"]
+    assert payload["summary"]["manifest_complete"] is False

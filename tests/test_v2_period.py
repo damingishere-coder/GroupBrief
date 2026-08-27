@@ -23,7 +23,10 @@ resolver = PeriodResolver()
     ],
 )
 def test_every_day_covers_only_previous_natural_day(run_date, target_date):
-    window = resolver.resolve(run_date=run_date)
+    window = resolver.resolve(
+        run_date=run_date,
+        schedule_rule="daily_previous_day",
+    )
 
     assert window.should_run is True
     assert window.period_start == datetime.combine(target_date, datetime.min.time())

@@ -357,6 +357,14 @@ export default function Dashboard() {
 
   const data = dashboard.data;
   const counts = data.counts;
+  const dailyStatusMeta = {
+    not_started: { label: "今日未开始", tone: "neutral" as const },
+    running: { label: "今日运行中", tone: "info" as const },
+    complete: { label: "今日已完成", tone: "success" as const },
+    partial: { label: "今日部分完成", tone: "warning" as const },
+    blocked: { label: "今日已阻断", tone: "danger" as const },
+    needs_attention: { label: "今日待核对", tone: "danger" as const },
+  }[data.daily_status?.overall_status || "not_started"];
 
   return (
     <div className="dashboard-page">
@@ -365,6 +373,7 @@ export default function Dashboard() {
         description={`${data.today} · 统计周期 ${data.period_start} ~ ${data.period_end}${!data.should_run ? " · 今天不生成" : ""}`}
         actions={
           <>
+            <StatusBadge tone={dailyStatusMeta.tone}>{dailyStatusMeta.label}</StatusBadge>
             <button
               type="button"
               className="dashboard-health-trigger"

@@ -26,6 +26,11 @@ from app.services.email_service import email_delivery_config_error
 from app.v2.constants import IMAGE_GENERATION_FAILED, SCHEDULER_STATE_CORRUPT
 from app.v2.run_store import _run_mutex
 from app.scheduler.outcome import ProcessExitCode, attach_outcome, summarize_results
+from app.scheduler.task_manifest import (
+    build_expected_groups,
+    expected_group_ids,
+    manifest_fields,
+)
 
 logger = get_logger("groupbrief.scheduler")
 # 兼容旧测试/调用名，底层已改为 V1/V2 共用锁。
@@ -91,6 +96,7 @@ class DailyScheduleState:
             "updated_at",
             "owner_busy_at",
             "next_retry_at",
+            "manifest_created_at",
         )
         for field in timestamp_fields:
             value = data.get(field)
@@ -124,6 +130,17 @@ class DailyScheduleState:
             or any(not isinstance(item, dict) for item in generation_results)
         ):
             return "generation_results_invalid"
+        expected_groups = data.get("expected_groups")
+        if expected_groups is not None:
+            if not isinstance(expected_groups, list) or any(
+                not isinstance(item, dict)
+                or not isinstance(item.get("group_id"), int)
+                or item.get("group_id", 0) <= 0
+                for item in expected_groups
+            ):
+                return "expected_groups_invalid"
+            if data.get("manifest_version") != 1:
+                return "manifest_version_invalid"
         if data.get("generation_started_at") and not data.get("generation_status"):
             return "generation_status_missing"
         if data.get("generation_completed_at") and not data.get("generation_status"):
@@ -140,6 +157,7 @@ class DailyScheduleState:
                 "email_started_at",
                 "email_completed_at",
                 "owner_busy_at",
+                "manifest_created_at",
             )
         ):
             return "lifecycle_marker_missing"
@@ -241,6 +259,45 @@ def _finalize_invocation(settings: Settings, run_date: str, result: dict) -> dic
     return finalized
 
 
+def ensure_daily_manifest(
+    settings: Settings,
+    run_date: str,
+    *,
+    pipeline: DailyPipeline | None = None,
+    state_store: DailyScheduleState | None = None,
+    state: dict | None = None,
+) -> dict:
+    """为 48 小时活动窗口惰性补齐任务清单，不执行生成或发送。"""
+    parsed = parse_date(run_date)
+    if parsed is None:
+        raise ValueError("run_date 必须是有效的 YYYY-MM-DD 日期")
+    state_store = state_store or DailyScheduleState(settings.output_dir)
+    state = state or state_store.load(run_date)
+    if state.get("state_status") == "corrupt":
+        return state
+    if isinstance(state.get("expected_groups"), list):
+        return state
+    if pipeline is None:
+        repo.init_db(settings)
+        repo.apply_db_settings(settings)
+        pipeline = DailyPipeline(settings=settings)
+    loader = getattr(pipeline, "_load_groups", None)
+    resolver = getattr(pipeline, "period_resolver", None)
+    if not callable(loader) or resolver is None:
+        return state
+    expected = build_expected_groups(
+        loader(),
+        parsed,
+        timezone=settings.app_timezone,
+        resolver=resolver,
+    )
+    manifest = manifest_fields(expected)
+    if state.get("generation_completed_at"):
+        # 部署新清单合同前已经完成的活动窗口只补状态投影。
+        manifest["manifest_source"] = "legacy_current_config_compat"
+    return state_store.update(run_date, **manifest)
+
+
 def _run_locked(settings: Settings, run_date: date, *, skip_email: bool) -> dict:
     run_date_text = run_date.isoformat()
     state_store = DailyScheduleState(settings.output_dir)
@@ -255,6 +312,19 @@ def _run_locked(settings: Settings, run_date: date, *, skip_email: bool) -> dict
         }
     repo.init_db(settings)
     repo.apply_db_settings(settings)
+    pipeline = DailyPipeline(settings=settings)
+    state = ensure_daily_manifest(
+        settings,
+        run_date_text,
+        pipeline=pipeline,
+        state_store=state_store,
+        state=state,
+    )
+    manifest_ids = (
+        expected_group_ids(state)
+        if isinstance(state.get("expected_groups"), list)
+        else None
+    )
 
     generation_results = state.get("generation_results") or []
     if not state.get("generation_completed_at"):
@@ -284,11 +354,32 @@ def _run_locked(settings: Settings, run_date: date, *, skip_email: bool) -> dict
                 generation_hold=False,
                 generation_error="",
             )
-        pipeline = DailyPipeline(settings=settings)
         try:
-            generation_results = pipeline.generate_all(
-                run_date=run_date_text, acquire_lock=False
-            )
+            if manifest_ids is None:
+                # 兼容显式测试替身与上一版注入点；生产 DailyPipeline 必有任务清单。
+                generation_results = pipeline.generate_all(
+                    run_date=run_date_text,
+                    acquire_lock=False,
+                )
+            elif manifest_ids:
+                generation_results = pipeline.generate_all(
+                    run_date=run_date_text,
+                    group_ids=manifest_ids,
+                    group_overrides={
+                        int(row["group_id"]): row
+                        for row in state.get("expected_groups", [])
+                        if isinstance(row, dict)
+                        and isinstance(row.get("group_id"), int)
+                    },
+                    acquire_lock=False,
+                )
+            else:
+                generation_results = [
+                    {
+                        "status": "no_groups",
+                        "reason": "当日没有符合群级统计规则的任务",
+                    }
+                ]
         except Exception as exc:
             state_store.update(
                 run_date_text,

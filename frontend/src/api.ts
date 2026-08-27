@@ -76,6 +76,8 @@ export interface LatestReport {
 export interface GroupV2 extends Group {
   schedule_rule: string;
   send_time: string;
+  summary_provider: string;
+  prompt_provider: string;
   summary_model: string;
   prompt_model: string;
   image_enabled: boolean;
@@ -98,6 +100,8 @@ export interface GroupPayload {
   provider_preference: string;
   schedule_rule: string;
   send_time: string;
+  summary_provider: string;
+  prompt_provider: string;
   summary_model: string;
   prompt_model: string;
   image_enabled: boolean;
@@ -150,6 +154,11 @@ export interface Dashboard {
   enabled_groups: number;
   counts: { pending: number; generated: number; sent: number; failed: number; held: number };
   next_send: string;
+  daily_status: {
+    overall_status: "not_started" | "running" | "complete" | "partial" | "blocked" | "needs_attention";
+    updated_at?: string;
+    summary: Record<string, unknown>;
+  };
   cards: DashboardCard[];
 }
 
@@ -219,6 +228,57 @@ export interface StartupCheck {
 export interface RecoveryInfo {
   incomplete: V2Run[];
   integrity: { group_name: string; run_date: string; status: string; missing: string[]; ok: boolean }[];
+}
+
+export interface RecoveryBacklogItem {
+  run_date: string;
+  group_id: number | null;
+  group_name: string;
+  status: string;
+  reason: string;
+  safe_stage: "generation_only" | "manual_review_only";
+  recoverable: boolean;
+  manifest_source: string;
+  estimated_summary_calls?: number;
+  estimated_image_calls?: number;
+}
+
+export interface RecoveryBacklog {
+  generated_at: string;
+  automatic_recovery_dates: string[];
+  lookback_days: number;
+  version: string;
+  items: RecoveryBacklogItem[];
+}
+
+export interface ProviderCatalogResponse {
+  catalog: {
+    history: { provider: string; label: string; available: boolean; capabilities: string[] }[];
+    ai: { provider: string; label: string; available: boolean; models: string[]; capabilities: string[] }[];
+  };
+  [key: string]: unknown;
+}
+
+export interface WeeklyInsight {
+  schema_version: number;
+  week_start: string;
+  week_end: string;
+  group_id: number;
+  group_name: string;
+  status: string;
+  narrative: string;
+  narrative_source: string;
+  ai_status: string;
+  actual_provider: string;
+  actual_model: string;
+  generated_at: string;
+  aggregation: {
+    message_count: number;
+    missing_days: string[];
+    contributors: { identity_key: string; name: string; count: number }[];
+    topics: { title: string; days: number }[];
+  };
+  card_url?: string;
 }
 
 export interface TemplateItem {
@@ -364,6 +424,7 @@ export const testReadGroup = (groupId: number) =>
   post<TestReadResult>(`/groups/${groupId}/test-read`);
 
 export const listGroups = () => get<GroupV2[]>("/groups");
+export const getProviderCatalog = () => get<ProviderCatalogResponse>("/system/providers");
 export const syncWechatGroupNames = () => post<GroupNameSyncResult>("/groups/sync-wechat-names");
 export const createGroup = (body: GroupPayload) => post<{ id: number; restored?: boolean }>("/groups", body);
 export const updateGroup = (groupId: number, body: Partial<GroupPayload>) =>
@@ -393,6 +454,13 @@ export const getSystemHealth = () => get<SystemHealth>("/v2/system/health");
 export const getSystemReadiness = () => get<SystemReadiness>("/system/ready");
 export const getStartupChecks = () => get<StartupCheck>("/v2/system/startup");
 export const getRecoveryInfo = () => get<RecoveryInfo>("/v2/system/recovery");
+export const getRecoveryBacklog = (lookbackDays = 30) =>
+  get<RecoveryBacklog>(`/v2/recovery/backlog?lookback_days=${lookbackDays}`);
+export const confirmRecovery = (body: { expected_version: string; tasks: { run_date: string; group_id: number }[] }) =>
+  post<{ status: string; generation_only: boolean; send_invoked: boolean; results: { status: string; group_name?: string }[] }>("/v2/recovery/confirm", body);
+export const listWeeklyInsights = () => get<{ schema_version: number; items: WeeklyInsight[] }>("/v2/weekly");
+export const getWeeklyInsight = (weekStart: string, groupId: number) =>
+  get<WeeklyInsight>(`/v2/weekly/${weekStart}/${groupId}`);
 export const retryFailed = (body: { group_id?: number; run_date?: string }) =>
   post<{ results: { group_name?: string; status: string; detail?: string }[] }>("/v2/pipeline/retry-failed", body);
 export const pipelineGenerate = (body: { group_id?: number; run_date?: string; force?: boolean; refresh_messages?: boolean }) =>

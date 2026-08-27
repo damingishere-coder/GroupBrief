@@ -298,7 +298,7 @@ def test_generate_skip_when_already_ready(tmp_path):
     assert results[0]["status"] == "skipped"
 
 
-def test_historical_recovery_sends_clearly_unsubmitted_run_once(tmp_path):
+def test_historical_recovery_requires_confirmation_and_never_auto_sends(tmp_path):
     pipeline, group = _make_pipeline(tmp_path, send_time="08:30")
     pipeline.generate_all(run_date="2026-08-18")
     sender = FakeSender()
@@ -308,13 +308,14 @@ def test_historical_recovery_sends_clearly_unsubmitted_run_once(tmp_path):
     first = pipeline.send_due_for_dates(["2026-08-18"], now=now, recovery=True)
     second = pipeline.send_due_for_dates(["2026-08-18"], now=now, recovery=True)
 
-    assert first[0]["status"] == "sent"
+    assert first[0]["status"] == "held"
+    assert first[0]["error_type"] == "HISTORICAL_SEND_REQUIRES_CONFIRMATION"
     assert second == []
-    assert len(sender.text_calls) == 1
-    assert len(sender.image_calls) == 1
+    assert sender.text_calls == []
+    assert sender.image_calls == []
     run = pipeline.store.load_run("测试群", "2026-08-18")
-    assert run["status"] == SENT
-    assert run["send_recovery"] is True
+    assert run["status"] == READY_TO_SEND
+    assert run["send_hold_reason"] == "HISTORICAL_SEND_REQUIRES_CONFIRMATION"
 
 
 def test_generate_force_regenerates(tmp_path):
@@ -752,13 +753,12 @@ def test_identical_generation_failure_exhausts_budget_after_real_retries(tmp_pat
     assert len(run["attempt_ledger"]) == 3
 
 
-def test_saturday_generates_previous_day(tmp_path):
+def test_weekday_default_skips_saturday(tmp_path):
     pipeline, group = _make_pipeline(tmp_path)
     results = pipeline.generate_all(run_date="2026-08-22")  # 周六
-    assert results[0]["status"] == "ready_to_send"
+    assert results == [{"status": "no_groups", "reason": "当日没有符合群级统计规则的任务"}]
     run = pipeline.store.load_run("测试群", "2026-08-22")
-    assert run["period_start"] == "2026-08-21 00:00:00"
-    assert run["period_end"] == "2026-08-21 23:59:59"
+    assert run["status"] == "PENDING"
 
 
 # ---------- 发送阶段 ----------
@@ -784,6 +784,12 @@ def test_send_due_sends_text_then_image(tmp_path):
     assert run["image_attempt_started_at"]
     assert run["image_attempt_finished_at"]
     assert run["verification_level"] == "provider_reported"
+    evidence = run["delivery_evidence"]
+    assert evidence["target"] == "测试群"
+    assert evidence["result"] == "sent"
+    assert evidence["verification_level"] == "provider_reported"
+    assert len(evidence["text_sha256"]) == 64
+    assert len(evidence["image_sha256"]) == 64
     sender = pipeline.sender
     assert len(sender.text_calls) == 1
     assert len(sender.image_calls) == 1
@@ -1262,7 +1268,9 @@ def test_text_success_persistence_failure_holds_before_image(tmp_path, monkeypat
     def flaky_update(*args, **kwargs):
         nonlocal calls
         calls += 1
-        if calls == 2:
+        # 第 1 次先原子保存送达证据，第 2 次标记文字提交中，
+        # 第 3 次模拟文字已成功但成功检查点无法落盘。
+        if calls == 3:
             return False, pipeline.store.load_run("测试群", "2026-08-18")
         return original(*args, **kwargs)
 
@@ -1284,7 +1292,9 @@ def test_image_claim_update_failure_stops_before_external_submit(tmp_path, monke
     def flaky_update(*args, **kwargs):
         nonlocal calls
         calls += 1
-        if calls == 3:
+        # 保存证据、文字提交中、文字成功检查点之后，
+        # 第 4 次在图片外部提交前模拟 claim 丢失。
+        if calls == 4:
             return False, pipeline.store.load_run("测试群", "2026-08-18")
         return original(*args, **kwargs)
 

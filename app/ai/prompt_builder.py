@@ -168,17 +168,41 @@ class DeepSeekImagePromptBuilder:
         settings: Settings | None = None,
         templates: ImagePromptTemplateService | None = None,
         provider=None,
+        *,
+        summary_settings: Settings | None = None,
+        summary_provider=None,
+        prompt_provider=None,
     ):
         self.settings = settings or get_settings()
+        self.summary_settings = summary_settings or self.settings
         self.templates = templates or ImagePromptTemplateService()
-        # V1/V2 使用同一主备 Provider，不重复实现模型调用。
-        self._provider = provider or build_summary_provider(self.settings)
+        # 兼容旧注入点：显式 provider 仍同时承担分析与海报 Prompt。
+        # 生产路径允许两项能力分别选择白名单 Provider/模型。
+        if provider is not None:
+            self._summary_provider = provider
+            self._prompt_provider = provider
+        else:
+            self._summary_provider = summary_provider or build_summary_provider(
+                self.summary_settings
+            )
+            self._prompt_provider = prompt_provider or build_summary_provider(
+                self.settings
+            )
+        self._provider = self._summary_provider
 
     # ---------- 对外 ----------
 
     def build(self, data: PromptInput) -> PromptOutput:
         started_at = perf_counter()
-        api_model = self._provider.model
+        api_model = self._prompt_provider.model
+        seen_providers: set[int] = set()
+        for provider_instance in (self._summary_provider, self._prompt_provider):
+            if id(provider_instance) in seen_providers:
+                continue
+            seen_providers.add(id(provider_instance))
+            reset_usage = getattr(provider_instance, "reset_usage", None)
+            if callable(reset_usage):
+                reset_usage()
         try:
             theme = resolve_image_theme(
                 data.image_theme,
@@ -229,6 +253,10 @@ class DeepSeekImagePromptBuilder:
                 "api_model": api_model,
                 "primary_provider": self.settings.summary_provider_primary,
                 "fallback_provider": self.settings.summary_provider_fallback,
+                "summary_primary_provider": self.summary_settings.summary_provider_primary,
+                "summary_fallback_provider": self.summary_settings.summary_provider_fallback,
+                "prompt_primary_provider": self.settings.summary_provider_primary,
+                "prompt_fallback_provider": self.settings.summary_provider_fallback,
                 "message_lines": len(messages),
                 "context_chars": sum(len(message.text) for message in messages),
                 "chunk_count": len(chunks),
@@ -352,7 +380,7 @@ class DeepSeekImagePromptBuilder:
                     )
                     if last_violations:
                         prompt += "\n上次具体违反：" + "；".join(last_violations[:8])
-                raw_copy = self._analysis_chat(
+                raw_copy = self._prompt_chat(
                     POSTER_EDITOR_SYSTEM,
                     prompt,
                     response_format="json_object",
@@ -392,6 +420,40 @@ class DeepSeekImagePromptBuilder:
                 raise ValueError("最终生图 Prompt 未通过固定漫画合同：" + "；".join(last_violations[:8]))
 
             meta["api_call_count"] = analysis_calls + layout_calls + final_calls
+            summary_actual = (
+                self._provider_actual(
+                    self._summary_provider,
+                    self.summary_settings,
+                )
+                if analysis_calls
+                else {
+                    "provider": "",
+                    "model": "",
+                    "providers_used": [],
+                    "fallback_reason": "",
+                }
+            )
+            prompt_actual = self._provider_actual(
+                self._prompt_provider,
+                self.settings,
+            )
+            meta["summary_provider_actual"] = summary_actual["provider"]
+            meta["summary_model_actual"] = summary_actual["model"]
+            meta["summary_fallback_reason"] = summary_actual["fallback_reason"]
+            meta["summary_providers_used"] = summary_actual["providers_used"]
+            meta["summary_api_call_count"] = analysis_calls
+            meta["prompt_provider_actual"] = prompt_actual["provider"]
+            meta["prompt_model_actual"] = prompt_actual["model"]
+            meta["prompt_fallback_reason"] = prompt_actual["fallback_reason"]
+            meta["prompt_providers_used"] = prompt_actual["providers_used"]
+            meta["prompt_api_call_count"] = layout_calls + final_calls
+            # 旧字段继续表示最终海报 Prompt 能力，供旧 run.json 读取器兼容。
+            meta["actual_provider"] = prompt_actual["provider"]
+            meta["actual_model"] = prompt_actual["model"]
+            meta["providers_used"] = sorted(
+                set(summary_actual["providers_used"] + prompt_actual["providers_used"])
+            )
+            meta["fallback_reason"] = prompt_actual["fallback_reason"]
 
             summary_ms = round((perf_counter() - started_at) * 1000)
             meta["summary_ms"] = summary_ms
@@ -470,7 +532,7 @@ class DeepSeekImagePromptBuilder:
         max_tokens: int = 4000,
     ) -> str:
         """结构化分析调用不混入最终海报格式约束，避免候选阶段角色冲突。"""
-        return self._provider._chat(
+        return self._summary_provider._chat(
             [
                 {"role": "system", "content": system},
                 {"role": "user", "content": user_prompt},
@@ -479,6 +541,47 @@ class DeepSeekImagePromptBuilder:
             temperature=temperature,
             max_tokens=max_tokens,
         )
+
+    def _prompt_chat(
+        self,
+        system: str,
+        user_prompt: str,
+        *,
+        response_format: str = "json_object",
+        temperature: float = 0.1,
+        max_tokens: int = 4000,
+    ) -> str:
+        """最终版式与海报编辑调用使用群级 Prompt Provider。"""
+        return self._prompt_provider._chat(
+            [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user_prompt},
+            ],
+            response_format=response_format,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+
+    @staticmethod
+    def _provider_actual(provider, settings: Settings) -> dict:
+        actual_provider = str(
+            getattr(provider, "last_provider_used", "")
+            or getattr(provider, "name", "unknown")
+        )
+        actual_model = str(
+            settings.ai_model
+            if actual_provider == "deepseek"
+            else getattr(provider, "model", settings.codex_summary_model)
+        )
+        providers_used = list(getattr(provider, "providers_used", []) or [])
+        return {
+            "provider": actual_provider,
+            "model": actual_model,
+            "providers_used": providers_used or [actual_provider],
+            "fallback_reason": str(
+                getattr(provider, "last_fallback_reason", "") or ""
+            ),
+        }
 
     def _layout_plan_with_retry(
         self,
@@ -509,7 +612,7 @@ class DeepSeekImagePromptBuilder:
         last_error: LayoutPlanError | None = None
         for attempt in range(STRUCTURED_ANALYSIS_MAX_ATTEMPTS):
             prompt = user_prompt if attempt == 0 else user_prompt + _LAYOUT_RETRY_INSTRUCTION
-            raw = self._analysis_chat(
+            raw = self._prompt_chat(
                 LAYOUT_DIRECTOR_SYSTEM,
                 prompt,
                 response_format="json_object",

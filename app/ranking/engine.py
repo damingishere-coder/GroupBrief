@@ -12,6 +12,7 @@ from __future__ import annotations
 from app.data_sources.base import V2Message
 from app.services.message_normalizer import COUNTABLE_TYPES, SYSTEM_KEYWORDS
 from app.services.speaker_identity import build_speaker_stats, speaker_name_sort_key
+import hashlib
 from app.ranking.engine_types import RankingResult, TopSpeaker
 
 
@@ -49,7 +50,14 @@ class RankingEngine:
             key=lambda item: (-item.count, speaker_name_sort_key(item.name), item.key),
         )
         top_speakers = [
-            TopSpeaker(rank=i + 1, name=item.name, count=item.count)
+            TopSpeaker(
+                rank=i + 1,
+                name=item.name,
+                count=item.count,
+                identity_key=hashlib.sha256(
+                    f"{item.key[0]}:{item.key[1]}".encode("utf-8")
+                ).hexdigest()[:16],
+            )
             for i, item in enumerate(ordered[:top_limit])
         ]
 

@@ -17,6 +17,7 @@ from app.scheduler.outcome import require_scheduler_success
 from app.scheduler.send_job import run_send_due_job
 from app.scheduler.heartbeat import record_scheduler_heartbeat
 from app.scheduler.reliability_watchdog import run_reliability_watchdog
+from app.weekly.service import WeeklyInsightsService
 
 logger = get_logger("groupbrief.scheduler")
 
@@ -78,6 +79,19 @@ def run_scheduled_reliability_watchdog() -> dict:
     return result
 
 
+def run_scheduled_weekly_insights() -> dict:
+    """周一独立生成上一自然周归档；不读取原始聊天、不发送。"""
+    settings = get_settings()
+    record_scheduler_heartbeat(settings, job="weekly_insights", status="started")
+    result = WeeklyInsightsService(settings).generate_previous_week()
+    record_scheduler_heartbeat(
+        settings,
+        job="weekly_insights",
+        status=str(result.get("status") or "unknown"),
+    )
+    return result
+
+
 def _parse_generate_time(value: str) -> time:
     """解析每日生成时间；无效配置安全回退到 00:15。"""
     text = str(value or "").strip()
@@ -112,6 +126,22 @@ def start_scheduler(settings: Settings) -> BackgroundScheduler:
         coalesce=True,
         max_instances=1,
     )
+    if settings.weekly_insights_enabled:
+        weekly_time = _parse_weekly_time(settings.weekly_generate_time)
+        scheduler.add_job(
+            run_scheduled_weekly_insights,
+            trigger=CronTrigger(
+                day_of_week="mon",
+                hour=weekly_time.hour,
+                minute=weekly_time.minute,
+                timezone=tz,
+            ),
+            id="weekly_insights_generate",
+            name="WeeklyInsightsGenerate",
+            misfire_grace_time=1800,
+            coalesce=True,
+            max_instances=1,
+        )
     scheduler.add_job(
         run_send_due_job,
         trigger=CronTrigger(minute="*", second=15, timezone=tz),
@@ -153,6 +183,18 @@ def start_scheduler(settings: Settings) -> BackgroundScheduler:
         settings.max_context_chars,
     )
     return scheduler
+
+
+def _parse_weekly_time(value: str) -> time:
+    text = str(value or "").strip()
+    try:
+        parsed = datetime.strptime(text, "%H:%M").time()
+        if parsed.strftime("%H:%M") != text:
+            raise ValueError
+        return parsed
+    except (TypeError, ValueError):
+        logger.warning("无效的 weekly_generate_time=%r，已回退到 07:45", value)
+        return time(7, 45)
 
 
 def _schedule_startup_watchdog(

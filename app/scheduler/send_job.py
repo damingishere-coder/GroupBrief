@@ -7,6 +7,7 @@ from app.core.logging import get_logger
 from app.pipeline.daily_pipeline import DailyPipeline
 from app.scheduler.outcome import require_scheduler_success, summarize_results
 from app.scheduler.heartbeat import record_scheduler_heartbeat
+from app.weekly.service import WeeklyInsightsService
 
 logger = get_logger("groupbrief.scheduler")
 
@@ -16,7 +17,9 @@ def run_send_due_job() -> dict:
     settings = get_settings()
     record_scheduler_heartbeat(settings, job="send_due", status="started")
     try:
+        # 同一 APScheduler job 内严格串行：先日报，再周报；状态和 claim 完全独立。
         results = DailyPipeline(settings=settings).send_due()
+        results.extend(WeeklyInsightsService(settings).send_due())
     except Exception as exc:
         logger.exception("微信 send_due 调度异常")
         record_scheduler_heartbeat(

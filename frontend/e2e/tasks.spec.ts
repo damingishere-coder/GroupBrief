@@ -45,6 +45,15 @@ test("任务中心使用批量 files 且不再逐条请求运行详情", async (
         integrity: [{ group_name: "测试群", run_date: runDate, status: "PROMPT_READY", missing: [], ok: true }],
       });
     }
+    if (url.pathname === "/api/v2/recovery/backlog") {
+      return json(route, {
+        generated_at: "2026-08-27T09:00:00+08:00",
+        automatic_recovery_dates: ["2026-08-26", "2026-08-27"],
+        lookback_days: 30,
+        version: "a".repeat(64),
+        items: [],
+      });
+    }
     throw new Error(`E2E 出现未拦截 API：${request.method()} ${url.pathname}`);
   });
 

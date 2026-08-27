@@ -32,6 +32,8 @@ class Group(SQLModel, table=True):
     # ---------- V2 扩展字段（P3 起使用，P7 pipeline 落地） ----------
     schedule_rule: str = "weekday_default"  # 统计周期规则
     send_time: str = "08:30"  # 本群独立发送时间 HH:MM
+    summary_provider: str = ""  # 周报摘要 AI；空值继承全局
+    prompt_provider: str = ""  # 日报 Prompt AI；空值继承全局
     summary_model: str = "gpt-5.6-sol"  # 总结主模型
     prompt_model: str = "gpt-5.6-sol"  # Prompt 主模型
     image_enabled: bool = True  # 是否生图

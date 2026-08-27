@@ -192,4 +192,7 @@ def test_ranking_json_structure():
         "top_speakers",
     }
     assert d["top_limit"] == 10
-    assert d["top_speakers"][0] == {"rank": 1, "name": "张三", "count": 1}
+    assert d["top_speakers"][0]["rank"] == 1
+    assert d["top_speakers"][0]["name"] == "张三"
+    assert d["top_speakers"][0]["count"] == 1
+    assert len(d["top_speakers"][0]["identity_key"]) == 16

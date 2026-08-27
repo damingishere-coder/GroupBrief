@@ -176,6 +176,8 @@ def _ensure_relationship_schema_current() -> None:
 _V2_GROUP_COLUMNS: dict[str, str] = {
     "schedule_rule": "VARCHAR(64) NOT NULL DEFAULT 'weekday_default'",
     "send_time": "VARCHAR(8) NOT NULL DEFAULT '08:30'",
+    "summary_provider": "VARCHAR(32) NOT NULL DEFAULT ''",
+    "prompt_provider": "VARCHAR(32) NOT NULL DEFAULT ''",
     "summary_model": "VARCHAR(64) NOT NULL DEFAULT 'gpt-5.6-sol'",
     "prompt_model": "VARCHAR(64) NOT NULL DEFAULT 'gpt-5.6-sol'",
     "image_enabled": "BOOLEAN NOT NULL DEFAULT 1",

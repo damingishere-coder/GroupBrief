@@ -192,6 +192,27 @@ def test_build_renders_only_fixed_sections_and_real_multi_person_dialogue():
         assert hidden not in output.prompt
 
 
+def test_summary_and_prompt_phases_use_independent_provider_instances():
+    summary = FakeSummaryProvider()
+    prompt = FakeSummaryProvider()
+    summary.name = "summary-fake"
+    prompt.name = "prompt-fake"
+    builder = DeepSeekImagePromptBuilder(
+        summary_provider=summary,
+        prompt_provider=prompt,
+    )
+
+    output = builder.build(_input())
+
+    assert output.success
+    assert summary.calls
+    assert prompt.calls
+    assert output.meta["summary_provider_actual"] == "summary-fake"
+    assert output.meta["prompt_provider_actual"] == "prompt-fake"
+    assert output.meta["summary_api_call_count"] >= 1
+    assert output.meta["prompt_api_call_count"] >= 1
+
+
 def _long_quote_payload(quote: str) -> tuple[str, dict]:
     source = {
         "topics": [

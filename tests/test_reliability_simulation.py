@@ -11,7 +11,7 @@ def test_deterministic_reliability_simulation_has_no_loss_or_duplicates(tmp_path
 
     assert result["ok"] is True
     assert result["runs_found"] == 15
-    assert result["sent"] == 15
+    assert result["sent"] + result["manual_holds"] == 15
     assert result["task_loss"] == 0
     assert result["retry_pending"] == 0
     assert result["duplicate_external_image_calls"] == 0
