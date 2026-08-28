@@ -39,6 +39,8 @@ class Group(SQLModel, table=True):
     image_enabled: bool = True  # 是否生图
     send_target: str = ""  # 可选人工发送目标；为空时自动跟随 wechat_group_name
     ranking_template: str = "default"  # 排行榜模板名
+    ranking_count_policy: str = "all_messages"  # all_messages / text_primary_with_interactions
+    sender_name_policy: str = "resolved"  # resolved / wechat_data_analysis
     image_prompt_template: str = "default"  # 生图 Prompt 模板名
     image_theme: str = "ai_free"  # 生图主题键（默认由 AI 按聊天内容自由发挥）
     image_theme_custom: str = ""  # 自定义生图大主题（image_theme=custom 时使用）

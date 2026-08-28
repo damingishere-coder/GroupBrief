@@ -51,6 +51,8 @@ class GroupCreate(BaseModel):
     image_enabled: bool = True
     send_target: str = ""
     ranking_template: str = "default"
+    ranking_count_policy: str = "all_messages"
+    sender_name_policy: str = "resolved"
     image_prompt_template: str = "default"
     image_theme: str = DEFAULT_IMAGE_THEME
     image_theme_custom: str = ""
@@ -74,6 +76,8 @@ class GroupUpdate(BaseModel):
     image_enabled: bool | None = None
     send_target: str | None = None
     ranking_template: str | None = None
+    ranking_count_policy: str | None = None
+    sender_name_policy: str | None = None
     image_prompt_template: str | None = None
     image_theme: str | None = None
     image_theme_custom: str | None = None
@@ -190,6 +194,8 @@ def list_groups(session: Session = Depends(repo.get_session)):
             "effective_send_target": effective_send_target(g),
             "send_target_mode": send_target_mode(g),
             "ranking_template": g.ranking_template,
+            "ranking_count_policy": g.ranking_count_policy,
+            "sender_name_policy": g.sender_name_policy,
             "image_prompt_template": g.image_prompt_template,
             "image_theme": g.image_theme,
             "image_theme_custom": g.image_theme_custom,

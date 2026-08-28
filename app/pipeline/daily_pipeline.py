@@ -151,6 +151,7 @@ class DailyPipeline:
                 "wechat_group_id", "wechat_group_name", "provider_preference",
                 "schedule_rule", "send_time", "summary_provider", "summary_model",
                 "prompt_provider", "prompt_model", "image_enabled", "ranking_template",
+                "ranking_count_policy", "sender_name_policy",
                 "image_prompt_template", "image_theme", "image_theme_custom",
                 "image_prompt_override", "send_target",
             }
@@ -1492,6 +1493,10 @@ class DailyPipeline:
                     timestamp=timestamp,
                     message_type=str(item.get("message_type") or "text"),
                     content=str(item.get("content") or ""),
+                    upstream_sender_name=str(item.get("upstream_sender_name") or ""),
+                    sender_name_source=str(
+                        item.get("sender_name_source") or "snapshot"
+                    ),
                 )
             )
         return messages

@@ -19,6 +19,7 @@ from time import perf_counter
 from typing import Any, Callable
 
 from app.v2.constants import (
+    IMAGE_CONTENT_VERIFICATION_FAILED,
     IMAGE_GENERATION_FAILED,
     IMAGE_FILE_MISSING,
     PROMPT_FAILED,
@@ -107,8 +108,22 @@ def verify_image(path: Path) -> tuple[bool, str]:
 
 def verify_image_contract(prompt_file: Path, image_path: Path) -> tuple[bool, str]:
     """校验群报图片完整性；Prompt 中的画布尺寸仅作为生成偏好。"""
-    _ = prompt_file  # 保留参数以兼容现有调用方；不再把 Prompt 尺寸当作硬门槛。
-    return verify_image(image_path)
+    ok, detail = verify_image(image_path)
+    if not ok:
+        return ok, detail
+    from app.image.fact_verification import (
+        review_image_facts,
+        strict_fact_verification_enabled,
+        write_fact_review,
+    )
+
+    if not strict_fact_verification_enabled(prompt_file):
+        return True, detail
+    review = review_image_facts(prompt_file, image_path)
+    write_fact_review(prompt_file, review)
+    if not review.ok:
+        return False, review.detail
+    return True, f"{detail}；{review.detail}"
 
 
 def copy_generated_image(src: Path, dst: Path) -> None:
@@ -140,17 +155,28 @@ class ImageJob:
         self.revision = max(1, int(revision))
         self.prompt_sha256 = prompt_sha256
 
-    def _call_generator(self, prompt_file: Path, *, safe_variant: bool = False):
+    def _call_generator(
+        self,
+        prompt_file: Path,
+        *,
+        safe_variant: bool = False,
+        quality_retry: bool = False,
+    ):
         generate_parameters = inspect.signature(self.generator.generate).parameters
         prompt_sha256 = hashlib.sha256(prompt_file.read_bytes()).hexdigest()
-        job_id = f"{self.job_id}-safe" if safe_variant and self.job_id else self.job_id
+        if safe_variant and self.job_id:
+            job_id = f"{self.job_id}-safe"
+        elif quality_retry and self.job_id:
+            job_id = f"{self.job_id}-quality-2"
+        else:
+            job_id = self.job_id
         if "job_id" in generate_parameters:
             return self.generator.generate(
                 prompt_file,
                 self.output_path,
                 force=self.force,
                 job_id=job_id,
-                revision=self.revision + (1 if safe_variant else 0),
+                revision=self.revision + (1 if safe_variant or quality_retry else 0),
                 prompt_sha256=prompt_sha256,
             )
         if "force" in generate_parameters:
@@ -168,6 +194,18 @@ class ImageJob:
             font_path=str(getattr(settings, "image_fallback_font_path", "") or ""),
             failure_class=failure_class,
         )
+        from app.image.fact_verification import strict_fact_verification_enabled
+
+        if strict_fact_verification_enabled(self.prompt_file):
+            ok, verification_detail = verify_image_contract(
+                self.prompt_file,
+                self.output_path,
+            )
+            if not ok:
+                if self.output_path.exists():
+                    self.output_path.unlink()
+                raise ValueError(verification_detail)
+            detail["fact_verification"] = verification_detail
         return {
             "group_name": self.group_name,
             "status": "success",
@@ -296,6 +334,53 @@ class ImageJob:
                 }
         ok, detail = verify_image_contract(self.prompt_file, self.output_path)
         if not ok:
+            from app.image.fact_verification import strict_fact_verification_enabled
+
+            if strict_fact_verification_enabled(self.prompt_file):
+                try:
+                    if self.output_path.exists():
+                        self.output_path.unlink()
+                    retry_result = self._call_generator(
+                        self.prompt_file,
+                        quality_retry=True,
+                    )
+                except Exception as exc:
+                    return {
+                        "group_name": self.group_name,
+                        "status": "failed",
+                        "success": False,
+                        "detail": f"第一次{detail}；第二次生图异常：{str(exc)[:180]}",
+                        "error_type": IMAGE_CONTENT_VERIFICATION_FAILED,
+                    }
+                if retry_result.success:
+                    retry_ok, retry_detail = verify_image_contract(
+                        self.prompt_file,
+                        self.output_path,
+                    )
+                    if retry_ok:
+                        retry_meta = dict(retry_result.detail or {})
+                        retry_meta["fact_verification_retry"] = 2
+                        return {
+                            "group_name": self.group_name,
+                            "status": "success",
+                            "success": True,
+                            "detail": f"第二次生图通过事实校验：{retry_detail}",
+                            "error_type": "",
+                            "generator_detail": retry_meta,
+                        }
+                    retry_error = retry_detail
+                else:
+                    retry_error = retry_result.error or "第二次生图失败"
+                if self.output_path.exists():
+                    self.output_path.unlink()
+                return {
+                    "group_name": self.group_name,
+                    "status": "failed",
+                    "success": False,
+                    "detail": f"第一次{detail}；第二次{retry_error}",
+                    "error_type": IMAGE_CONTENT_VERIFICATION_FAILED,
+                    "generator_detail": retry_result.detail or {},
+                }
             try:
                 return self._local_fallback(IMAGE_FILE_MISSING)
             except Exception as fallback_exc:

@@ -78,6 +78,11 @@ def dashboard(
                             "rank": int(item.get("rank") or index),
                             "name": speaker_name,
                             "count": int(count),
+                            "text_count": int(item.get("text_count") or 0),
+                            "interaction_count": int(
+                                item.get("interaction_count") or 0
+                            ),
+                            "name_source": str(item.get("name_source") or "resolved"),
                         }
                     )
             except (OSError, UnicodeError, json.JSONDecodeError, ValueError, TypeError) as exc:
@@ -93,6 +98,9 @@ def dashboard(
                     getattr(group, "wechat_send_enabled", False)
                 ),
                 "ranking_template": group.ranking_template,
+                "ranking_count_policy": getattr(
+                    group, "ranking_count_policy", "all_messages"
+                ),
                 "image_prompt_template": group.image_prompt_template,
                 "status": status,
                 "period_start": run.get("period_start", ""),

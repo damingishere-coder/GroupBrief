@@ -95,6 +95,62 @@ def test_system_message_filtered():
     assert r.speaker_count == 2
 
 
+def test_text_primary_counts_text_and_interactions_separately():
+    messages = [
+        _msg("白白", "text", i=1),
+        _msg("白白", "text", i=2),
+        _msg("白白", "image", i=3),
+        _msg("白白", "quote", i=4),
+        _msg("只发图", "image", i=5),
+        _msg("系统", "system", i=6),
+    ]
+
+    result = engine.compute(
+        messages,
+        "测试群",
+        PERIOD_START,
+        PERIOD_END,
+        count_policy="text_primary_with_interactions",
+        name_source="wechat_data_analysis",
+    )
+
+    assert result.message_count == 5
+    assert result.text_message_count == 2
+    assert result.interaction_message_count == 3
+    assert result.speaker_count == 2
+    assert result.text_speaker_count == 1
+    assert [item.name for item in result.top_speakers] == ["白白"]
+    assert result.top_speakers[0].count == 2
+    assert result.top_speakers[0].text_count == 2
+    assert result.top_speakers[0].interaction_count == 2
+    assert result.top_speakers[0].name_source == "wechat_data_analysis"
+
+
+def test_text_primary_tie_does_not_use_interactions_to_change_rank():
+    messages = [
+        _msg("B", "text", i=1),
+        _msg("B", "image", i=2),
+        _msg("B", "emoji", i=3),
+        _msg("A", "text", i=4),
+    ]
+
+    result = engine.compute(
+        messages,
+        "测试群",
+        PERIOD_START,
+        PERIOD_END,
+        count_policy="text_primary_with_interactions",
+    )
+
+    assert [
+        (item.name, item.text_count, item.interaction_count)
+        for item in result.top_speakers
+    ] == [
+        ("A", 1, 0),
+        ("B", 1, 2),
+    ]
+
+
 def test_identity_uses_sender_id_and_counts_supported_forward_types():
     messages = [
         _msg("同名", "red_packet", i=1, sender_id="wxid-a"),
@@ -188,6 +244,10 @@ def test_ranking_json_structure():
         "period_end",
         "speaker_count",
         "message_count",
+        "count_policy",
+        "text_message_count",
+        "interaction_message_count",
+        "text_speaker_count",
         "top_limit",
         "top_speakers",
     }
@@ -195,4 +255,7 @@ def test_ranking_json_structure():
     assert d["top_speakers"][0]["rank"] == 1
     assert d["top_speakers"][0]["name"] == "张三"
     assert d["top_speakers"][0]["count"] == 1
+    assert d["top_speakers"][0]["text_count"] == 1
+    assert d["top_speakers"][0]["interaction_count"] == 0
+    assert d["top_speakers"][0]["name_source"] == "resolved"
     assert len(d["top_speakers"][0]["identity_key"]) == 16

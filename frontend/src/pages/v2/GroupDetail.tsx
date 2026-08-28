@@ -64,6 +64,8 @@ const EMPTY_FORM: GroupPayload = {
   image_enabled: true,
   send_target: "",
   ranking_template: "default",
+  ranking_count_policy: "all_messages",
+  sender_name_policy: "resolved",
   image_prompt_template: "default",
   image_prompt_override: "",
   wechat_send_enabled: false,
@@ -92,6 +94,8 @@ function toForm(group: GroupV2): GroupPayload {
     image_enabled: group.image_enabled,
     send_target: group.send_target || "",
     ranking_template: group.ranking_template || "default",
+    ranking_count_policy: group.ranking_count_policy || "all_messages",
+    sender_name_policy: group.sender_name_policy || "resolved",
     image_prompt_template: group.image_prompt_template || "default",
     wechat_send_enabled: group.wechat_send_enabled,
   };
@@ -407,6 +411,18 @@ export default function GroupDetail({ groupId, invalidGroupId }: GroupDetailProp
           </Field>
           <Field id="send-time" label="发送时间" required error={errors.send_time}>
             <input id="send-time" type="time" value={form.send_time} onChange={(event) => setField("send_time", event.target.value)} />
+          </Field>
+          <Field id="ranking-count-policy" label="排行榜统计口径">
+            <select id="ranking-count-policy" value={form.ranking_count_policy} onChange={(event) => setField("ranking_count_policy", event.target.value as GroupPayload["ranking_count_policy"])}>
+              <option value="all_messages">所有非系统消息</option>
+              <option value="text_primary_with_interactions">文字主榜＋互动数</option>
+            </select>
+          </Field>
+          <Field id="sender-name-policy" label="排行榜名称来源">
+            <select id="sender-name-policy" value={form.sender_name_policy} onChange={(event) => setField("sender_name_policy", event.target.value as GroupPayload["sender_name_policy"])}>
+              <option value="resolved">冲突时使用联系人解析</option>
+              <option value="wechat_data_analysis">WeChatDataAnalysis 名称</option>
+            </select>
           </Field>
         </div>
       </section>

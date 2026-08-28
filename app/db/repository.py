@@ -183,6 +183,8 @@ _V2_GROUP_COLUMNS: dict[str, str] = {
     "image_enabled": "BOOLEAN NOT NULL DEFAULT 1",
     "send_target": "VARCHAR(256) NOT NULL DEFAULT ''",
     "ranking_template": "VARCHAR(64) NOT NULL DEFAULT 'default'",
+    "ranking_count_policy": "VARCHAR(64) NOT NULL DEFAULT 'all_messages'",
+    "sender_name_policy": "VARCHAR(64) NOT NULL DEFAULT 'resolved'",
     "image_prompt_template": "VARCHAR(64) NOT NULL DEFAULT 'default'",
     "image_theme": "VARCHAR(64) NOT NULL DEFAULT 'ai_free'",
     "image_theme_custom": "VARCHAR(80) NOT NULL DEFAULT ''",

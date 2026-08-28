@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 from PIL import Image
 
+from app.image import regeneration
 from app.image.image_task import ImageTaskResult
 from app.image.regeneration import enqueue_regeneration, run_regeneration_now
 from app.image.regeneration import claim_regeneration_candidate, list_regeneration_candidates
@@ -114,6 +115,75 @@ def test_policy_rejection_does_not_fallback_and_keeps_old_image(tmp_path):
     assert run["image_regen_status"] == "failed"
     assert run["desktop_regen_requested"] is False
     assert run["send_hold"] is True
+
+
+def test_strict_fact_review_retries_once_then_promotes(tmp_path, monkeypatch):
+    settings, store, group, run_date = _run(tmp_path)
+    store.update(
+        group,
+        run_date,
+        ranking_count_policy="text_primary_with_interactions",
+    )
+
+    class CountingGenerator:
+        def __init__(self):
+            self.calls = 0
+
+        def generate(self, prompt_path, output_path):
+            self.calls += 1
+            output_path.write_bytes(NEW_PNG)
+            return ImageTaskResult(True, image_path=output_path)
+
+    checks = iter(
+        [
+            (False, "图片事实校验失败：无证据数字 12%"),
+            (True, "事实校验通过"),
+            (True, "提升前复核通过"),
+        ]
+    )
+    monkeypatch.setattr(regeneration, "verify_image_contract", lambda *_args: next(checks))
+    generator = CountingGenerator()
+
+    run = run_regeneration_now(settings, group, run_date, generator)
+
+    assert generator.calls == 2
+    assert store.image_path(group, run_date).read_bytes() == NEW_PNG
+    assert run["image_regen_status"] == "ready_for_review"
+    assert run["image_regen_job"]["receipt"]["success"] is True
+
+
+def test_strict_fact_review_fails_closed_after_two_attempts(tmp_path, monkeypatch):
+    settings, store, group, run_date = _run(tmp_path)
+    store.update(
+        group,
+        run_date,
+        ranking_count_policy="text_primary_with_interactions",
+    )
+
+    class CountingGenerator:
+        def __init__(self):
+            self.calls = 0
+
+        def generate(self, prompt_path, output_path):
+            self.calls += 1
+            output_path.write_bytes(NEW_PNG)
+            return ImageTaskResult(True, image_path=output_path)
+
+    monkeypatch.setattr(
+        regeneration,
+        "verify_image_contract",
+        lambda *_args: (False, "图片事实校验失败：无证据文字"),
+    )
+    generator = CountingGenerator()
+
+    run = run_regeneration_now(settings, group, run_date, generator)
+
+    assert generator.calls == 2
+    assert store.image_path(group, run_date).read_bytes() == OLD_PNG
+    assert not store.previous_image_path(group, run_date).exists()
+    assert run["image_regen_status"] == "failed"
+    assert run["send_hold"] is True
+    assert run["needs_manual_send"] is True
 
 
 def test_duplicate_click_is_rejected_while_same_run_is_active(tmp_path):

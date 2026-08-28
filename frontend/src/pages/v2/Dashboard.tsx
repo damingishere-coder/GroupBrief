@@ -498,7 +498,7 @@ export default function Dashboard() {
                       <ol>
                         {(card.ranking_preview || []).map((speaker) => (
                           <li key={`${speaker.rank}-${speaker.name}`}>
-                            <span>{speaker.rank}</span><strong>{speaker.name}</strong><em>{speaker.count} 条</em>
+                            <span>{speaker.rank}</span><strong>{speaker.name}</strong><em>{card.ranking_count_policy === "text_primary_with_interactions" ? `文字 ${speaker.text_count}｜互动 ${speaker.interaction_count}` : `${speaker.count} 条`}</em>
                           </li>
                         ))}
                       </ol>

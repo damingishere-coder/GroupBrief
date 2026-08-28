@@ -229,4 +229,7 @@ def test_dashboard_accepts_run_date_and_returns_top_five_ranking_preview(
         "rank": 1,
         "name": "成员1",
         "count": 19,
+        "text_count": 0,
+        "interaction_count": 0,
+        "name_source": "resolved",
     }

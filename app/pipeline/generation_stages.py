@@ -11,6 +11,7 @@ from typing import Any, Callable
 from app.ai.concurrency import bounded_slot
 from app.ai.prompt_builder import GroupSummaryImagePromptBuilder
 from app.ai.prompt_builder_types import PromptInput
+from app.ai.strict_prompt_contract import append_strict_image_fact_contract
 from app.config.settings import Settings
 from app.core.observability import log_event
 from app.data_sources.base import V2Message, WeChatDataSource
@@ -20,6 +21,8 @@ from app.providers.ai.base import ExternalCallResultUnknownError
 from app.ranking.engine import RankingEngine
 from app.ranking.engine_types import RankingResult
 from app.ranking.renderer import RankingRenderer
+from app.ranking.policies import uses_strict_image_fact_contract
+from app.services.sender_name_policy import apply_sender_name_policy
 from app.scheduler.period import PeriodWindow
 from app.services.group_name_sync import effective_send_target, send_target_mode
 from app.v2.constants import (
@@ -280,6 +283,10 @@ class GenerationStages:
             "send_time": group.send_time,
             "image_enabled": bool(group.image_enabled),
             "ranking_template": group.ranking_template,
+            "ranking_count_policy": getattr(
+                group, "ranking_count_policy", "all_messages"
+            ),
+            "sender_name_policy": getattr(group, "sender_name_policy", "resolved"),
             "image_prompt_template": group.image_prompt_template,
             "image_theme": group.image_theme,
             "image_theme_custom": group.image_theme_custom,
@@ -359,6 +366,10 @@ class GenerationStages:
                 }
             )
 
+        apply_sender_name_policy(
+            messages,
+            getattr(context.group, "sender_name_policy", "resolved"),
+        )
         context.timings["fetch_ms"] = round((perf_counter() - started_at) * 1000)
         self.store.update(
             context.group_name,
@@ -438,6 +449,10 @@ class GenerationStages:
             )
 
         messages = list(fetch.messages)
+        apply_sender_name_policy(
+            messages,
+            getattr(context.group, "sender_name_policy", "resolved"),
+        )
         if not context.refresh_messages:
             self._save_json(
                 snapshot_path,
@@ -470,6 +485,10 @@ class GenerationStages:
                 context.period_start,
                 context.period_end,
                 top_limit=10,
+                count_policy=getattr(
+                    context.group, "ranking_count_policy", "all_messages"
+                ),
+                name_source=getattr(context.group, "sender_name_policy", "resolved"),
             )
             ranking_txt = self.renderer.render(
                 ranking,
@@ -507,6 +526,12 @@ class GenerationStages:
             encoding="utf-8",
         )
         next_status = SENT if context.run.get("status") == SENT else RANKING_READY
+        prior_hold_reason = str(context.run.get("send_hold_reason") or "")
+        hold_reason = (
+            prior_hold_reason
+            if prior_hold_reason.startswith("USER_REQUEST_")
+            else "MESSAGE_SNAPSHOT_REFRESHED"
+        )
         self.store.update(
             context.group_name,
             context.run_date,
@@ -515,6 +540,9 @@ class GenerationStages:
             error=None,
             speaker_count=ranking.speaker_count,
             message_count=ranking.message_count,
+            text_message_count=ranking.text_message_count,
+            interaction_message_count=ranking.interaction_message_count,
+            text_speaker_count=ranking.text_speaker_count,
             message_snapshot_reused=False,
             message_snapshot_refreshed=True,
             message_snapshot_saved_at=datetime.now().astimezone().isoformat(),
@@ -526,7 +554,7 @@ class GenerationStages:
             prompt_rebuild_status="required",
             prompt_rebuild_error="",
             send_hold=True,
-            send_hold_reason="MESSAGE_SNAPSHOT_REFRESHED",
+            send_hold_reason=hold_reason,
             needs_manual_send=True,
         )
         return StageResult.stop(
@@ -550,6 +578,10 @@ class GenerationStages:
                 context.period_start,
                 context.period_end,
                 top_limit=10,
+                count_policy=getattr(
+                    context.group, "ranking_count_policy", "all_messages"
+                ),
+                name_source=getattr(context.group, "sender_name_policy", "resolved"),
             )
         except Exception as exc:
             self.store.update(
@@ -587,6 +619,9 @@ class GenerationStages:
             status=RANKING_READY,
             speaker_count=ranking.speaker_count,
             message_count=ranking.message_count,
+            text_message_count=ranking.text_message_count,
+            interaction_message_count=ranking.interaction_message_count,
+            text_speaker_count=ranking.text_speaker_count,
         )
         return StageResult.proceed(ranking)
 
@@ -790,6 +825,19 @@ class GenerationStages:
             prompt_meta = committed.get("prompt_meta")
 
         self._record_prompt_timing(context, started_at)
+        if uses_strict_image_fact_contract(
+            getattr(context.group, "ranking_count_policy", "all_messages")
+        ):
+            prompt_path = self.store.prompt_path(context.group_name, context.run_date)
+            strict_prompt = append_strict_image_fact_contract(
+                prompt_path.read_text(encoding="utf-8")
+            )
+            prompt_path.write_text(strict_prompt, encoding="utf-8")
+            self.store.update(
+                context.group_name,
+                context.run_date,
+                image_fact_contract="strict_evidence_v1",
+            )
         return StageResult.proceed(
             PromptStageOutput(
                 prompt_meta=prompt_meta if isinstance(prompt_meta, dict) else None

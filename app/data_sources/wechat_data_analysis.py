@@ -195,6 +195,15 @@ def _to_v2_message(m: RawMessage) -> V2Message:
         timestamp=m.timestamp,
         message_type=m.message_type,
         content=m.content,
+        upstream_sender_name=(
+            m.upstream_sender_name
+            or (
+                m.sender_name
+                if m.sender_name_source in {"", "wechat_data_analysis"}
+                else ""
+            )
+        ),
+        sender_name_source=m.sender_name_source or "wechat_data_analysis",
         raw={
             "source": m.source,
             "source_message_id": m.source_message_id,

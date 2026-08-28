@@ -6,6 +6,10 @@ import shutil
 
 from app.config.settings import Settings
 from app.db.models import Group
+from app.ranking.policies import (
+    normalize_ranking_policy,
+    normalize_sender_name_policy,
+)
 
 HISTORY_PROVIDERS = frozenset({"", "wechat_data_analysis", "wechat_cli"})
 AI_PROVIDERS = frozenset({"codex", "deepseek"})
@@ -135,6 +139,14 @@ def validate_group_provider_values(
         "daily_previous_day",
     }:
         raise ValueError(f"不支持的统计周期规则：{schedule_rule}")
+    if "ranking_count_policy" in normalized:
+        normalized["ranking_count_policy"] = normalize_ranking_policy(
+            normalized.get("ranking_count_policy")
+        )
+    if "sender_name_policy" in normalized:
+        normalized["sender_name_policy"] = normalize_sender_name_policy(
+            normalized.get("sender_name_policy")
+        )
     candidate_values = (
         {key: getattr(base, key) for key in Group.model_fields if hasattr(base, key)}
         if base is not None

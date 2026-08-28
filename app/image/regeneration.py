@@ -18,6 +18,7 @@ from app.ai.concurrency import bounded_slot, normalized_limit
 from app.config.settings import Settings
 from app.core.logging import get_logger
 from app.image.codex_generator import CodexImageGenerator
+from app.image.fact_verification import strict_fact_verification_enabled
 from app.image.image_task import ImageTaskResult, verify_image_contract
 from app.v2.constants import (
     IMAGE_FILE_MISSING,
@@ -150,6 +151,34 @@ def _invoke_generator(
     if "force" in parameters:
         return generator.generate(prompt_path, output_path, force=True)
     return generator.generate(prompt_path, output_path)
+
+
+def _enforce_job_identity(
+    generator: Any,
+    result: ImageTaskResult,
+    job: dict[str, Any],
+) -> ImageTaskResult:
+    """支持稳定任务回执的生成器必须返回与本次尝试一致的身份。"""
+    detail = result.detail if isinstance(result.detail, dict) else {}
+    supports_identity = "job_id" in inspect.signature(generator.generate).parameters
+    if not result.success or not supports_identity:
+        return result
+    if (
+        str(detail.get("job_id") or "") == str(job["job_id"])
+        and str(detail.get("prompt_sha256") or "").lower()
+        == str(job["prompt_sha256"]).lower()
+    ):
+        return result
+    return ImageTaskResult(
+        False,
+        error="生图回执的 job_id 或 Prompt 哈希不匹配，拒绝自动认领",
+        detail={
+            **detail,
+            "stage": "ambiguous",
+            "outcome_unknown": True,
+            "candidate_diagnostics": detail.get("candidate_diagnostics") or [],
+        },
+    )
 
 
 def normalize_candidate_diagnostics(detail: dict[str, Any]) -> list[dict[str, Any]]:
@@ -321,33 +350,73 @@ def _run_regeneration(
             needs_manual_send=True,
         )
         limit = normalized_limit(getattr(settings, "image_generation_concurrency", 2), 2, maximum=6)
+        prompt_path = store.prompt_path(group_name, run_date)
         with bounded_slot("image_regeneration", limit):
-            result = _invoke_generator(
+            result = _enforce_job_identity(
                 generator,
-                store.prompt_path(group_name, run_date),
-                temp_path,
+                _invoke_generator(generator, prompt_path, temp_path, job),
                 job,
             )
+            if result.success and strict_fact_verification_enabled(prompt_path):
+                first_ok, first_detail = verify_image_contract(prompt_path, temp_path)
+                if not first_ok:
+                    if temp_path.exists():
+                        temp_path.unlink()
+                    retry_job = {
+                        **job,
+                        "job_id": f"{job_id}-quality-2",
+                        "revision": int(job["revision"]) + 1,
+                    }
+                    retry_result = _enforce_job_identity(
+                        generator,
+                        _invoke_generator(generator, prompt_path, temp_path, retry_job),
+                        retry_job,
+                    )
+                    if retry_result.success:
+                        retry_ok, retry_detail = verify_image_contract(
+                            prompt_path,
+                            temp_path,
+                        )
+                        if retry_ok:
+                            retry_meta = dict(retry_result.detail or {})
+                            retry_meta.update(
+                                generation_attempt_job_id=str(
+                                    retry_meta.get("job_id") or retry_job["job_id"]
+                                ),
+                                job_id=job_id,
+                                revision=int(job["revision"]),
+                                prompt_sha256=str(job["prompt_sha256"]),
+                                fact_verification_retry=2,
+                            )
+                            result = ImageTaskResult(
+                                True,
+                                image_path=temp_path,
+                                detail=retry_meta,
+                            )
+                        else:
+                            result = ImageTaskResult(
+                                False,
+                                error=f"第一次{first_detail}；第二次{retry_detail}",
+                                detail={
+                                    **dict(retry_result.detail or {}),
+                                    "stage": "fact_verify",
+                                    "fact_verification_retry": 2,
+                                },
+                            )
+                    else:
+                        result = ImageTaskResult(
+                            False,
+                            error=(
+                                f"第一次{first_detail}；第二次"
+                                f"{retry_result.error or '生图失败'}"
+                            ),
+                            detail={
+                                **dict(retry_result.detail or {}),
+                                "fact_verification_retry": 2,
+                            },
+                        )
         detail = result.detail if isinstance(result.detail, dict) else {}
         candidates = normalize_candidate_diagnostics(detail)
-        supports_identity = "job_id" in inspect.signature(generator.generate).parameters
-        if result.success and supports_identity and (
-            str(detail.get("job_id") or "") != job_id
-            or str(detail.get("prompt_sha256") or "").lower()
-            != str(job["prompt_sha256"]).lower()
-        ):
-            result = ImageTaskResult(
-                False,
-                error="生图回执的 job_id 或 Prompt 哈希不匹配，拒绝自动认领",
-                detail={
-                    **detail,
-                    "stage": "ambiguous",
-                    "outcome_unknown": True,
-                    "candidate_diagnostics": detail.get("candidate_diagnostics") or [],
-                },
-            )
-            detail = result.detail or {}
-            candidates = normalize_candidate_diagnostics(detail)
         receipt = {
             "success": bool(result.success),
             "job_id": str(detail.get("job_id") or job_id),

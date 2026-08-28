@@ -591,14 +591,18 @@ def _sanitize_sender_name(value: object) -> str:
     for char in str(value):
         if char in _INVISIBLE_NAME_CHARS:
             continue
-        if unicodedata.category(char) in {"Cf", "Cc"}:
+        category = unicodedata.category(char)
+        if category == "Cf":
+            continue
+        if category == "Cc" or char.isspace():
+            visible.append(" ")
             continue
         visible.append(char)
-    return "".join(visible).strip()
+    return " ".join("".join(visible).split())
 
 
 def _usable_sender_name(name: str, sender_id: str) -> bool:
-    if not name or name.lower() in {"none", "null"}:
+    if not name or name.lower() in {"none", "null", "(未知)", "未知"}:
         return False
     return not sender_id or name.casefold() != sender_id.strip().casefold()
 
@@ -616,6 +620,9 @@ def _resolve_sender_names(
     for message in messages:
         sender_id = (message.sender_id or "").strip()
         upstream_name = _sanitize_sender_name(message.sender_name)
+        message.upstream_sender_name = _sanitize_sender_name(
+            message.upstream_sender_name or upstream_name
+        )
         message.sender_name = upstream_name
         if sender_id and _usable_sender_name(upstream_name, sender_id):
             upstream_ids.setdefault(upstream_name.casefold(), set()).add(sender_id)
@@ -638,11 +645,14 @@ def _resolve_sender_names(
 
         if _usable_sender_name(resolved_name, sender_id):
             message.sender_name = resolved_name
+            message.sender_name_source = "contact"
             contact_identities.add(sender_id)
         elif upstream_usable and not upstream_conflicted:
             message.sender_name = upstream_name
+            message.sender_name_source = "wechat_data_analysis"
         else:
             message.sender_name = _anonymous_sender_name(sender_id or upstream_name)
+            message.sender_name_source = "anonymous"
             anonymous_identities.add(sender_id or upstream_name or message.sender_name)
 
     # 即便 contact.db 中存在真实同名，最终展示也必须保持一身份一名称。
@@ -693,17 +703,27 @@ def _normalize_ts(raw: str) -> datetime:
 
 
 def _to_raw(item: dict, ts: datetime) -> RawMessage:
+    upstream_name = _first_visible_str(
+        item,
+        "senderDisplayName",
+        "sender_display_name",
+        "sender_name",
+        "senderName",
+        "fromNickName",
+    )
     return RawMessage(
         group_id=item["group_id"],
         group_name=item.get("group_name", ""),
         sender_id=item.get("sender_id", ""),
-        sender_name=item.get("sender_name", ""),
+        sender_name=upstream_name,
         timestamp=ts,
         message_type=item.get("message_type", "text"),
         content=item.get("content", ""),
         source=item.get("source", "wechat_data_analysis"),
         source_message_id=item.get("source_message_id", ""),
         content_hash=item.get("content_hash", ""),
+        upstream_sender_name=upstream_name,
+        sender_name_source="wechat_data_analysis",
     )
 
 
@@ -842,17 +862,20 @@ def _mcp_message_type(render_type) -> str:
 
 
 def _mcp_to_raw(item: dict, group_id: str, ts: datetime) -> RawMessage:
+    upstream_name = _first_visible_str(
+        item, "senderDisplayName", "sender_display_name", "senderName", "fromNickName"
+    )
     return RawMessage(
         group_id=group_id,
         group_name="",
         sender_id=_first_str(item, "senderUsername", "sender_username", "sender", "fromUser"),
-        sender_name=_first_visible_str(
-            item, "senderDisplayName", "sender_display_name", "senderName", "fromNickName"
-        ),
+        sender_name=upstream_name,
         timestamp=ts,
         message_type=_mcp_message_type(item.get("renderType", item.get("render_type"))),
         content=str(item.get("content") or ""),
         source="wechat_data_analysis",
         source_message_id=str(item.get("id") or item.get("messageId") or ""),
         content_hash="",
+        upstream_sender_name=upstream_name,
+        sender_name_source="wechat_data_analysis",
     )

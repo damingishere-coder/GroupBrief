@@ -1,0 +1,16 @@
+===== {{group_name}} =====
+【文字发言排行榜】
+{{group_name}}
+消息统计
+------------
+时间起：{{period_start}}
+时间止：{{period_end}}
+------------
+活跃人数：{{speaker_count}}
+文字发言人数：{{text_speaker_count}}
+文字消息：{{text_message_count}}
+互动消息：{{interaction_message_count}}
+总消息：{{message_count}}
+------------
+文字发言 Top{{top_limit}}
+{{top_lines}}

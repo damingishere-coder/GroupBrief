@@ -103,6 +103,34 @@ def test_render_top10_lines_format():
     assert lines[-1] == "10.神奇小郭【7】"
 
 
+def test_render_text_primary_shows_text_and_interactions():
+    result = RankingResult(
+        group_name="Eason张UED-4群🤘",
+        period_start="2026-08-28 00:00:00",
+        period_end="2026-08-28 08:14:59",
+        speaker_count=2,
+        message_count=4,
+        count_policy="text_primary_with_interactions",
+        text_message_count=2,
+        interaction_message_count=2,
+        text_speaker_count=2,
+        top_speakers=[
+            TopSpeaker(
+                rank=1,
+                name="深圳-UI-白白",
+                count=1,
+                text_count=1,
+                interaction_count=2,
+                name_source="wechat_data_analysis",
+            )
+        ],
+    )
+
+    text = render_ranking(result, "{{top_lines}}")
+
+    assert text == "1.深圳-UI-白白【文字 1｜互动 2】"
+
+
 def test_render_top15_heading_and_lines():
     result = RankingResult(
         group_name="周末群",
@@ -218,12 +246,14 @@ def test_group_v2_defaults():
     assert g.image_enabled is True
     assert g.send_target == ""
     assert g.ranking_template == "default"
+    assert g.ranking_count_policy == "all_messages"
+    assert g.sender_name_policy == "resolved"
     assert g.image_prompt_template == "default"
     assert g.image_theme == "ai_free"
     assert g.image_theme_custom == ""
 
 
-def test_existing_groups_table_gets_image_theme_columns(tmp_path, monkeypatch):
+def test_existing_groups_table_gets_v2_policy_columns(tmp_path, monkeypatch):
     """旧数据库启动时应补列，并为已有群写入安全默认值。"""
     engine = create_engine(f"sqlite:///{tmp_path / 'legacy.db'}")
     with engine.begin() as conn:
@@ -238,7 +268,13 @@ def test_existing_groups_table_gets_image_theme_columns(tmp_path, monkeypatch):
     with engine.connect() as conn:
         columns = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(groups)")}
         row = conn.exec_driver_sql(
-            "SELECT image_theme, image_theme_custom FROM groups WHERE id = 1"
+            "SELECT image_theme, image_theme_custom, ranking_count_policy, "
+            "sender_name_policy FROM groups WHERE id = 1"
         ).one()
-    assert {"image_theme", "image_theme_custom"}.issubset(columns)
-    assert tuple(row) == ("ai_free", "")
+    assert {
+        "image_theme",
+        "image_theme_custom",
+        "ranking_count_policy",
+        "sender_name_policy",
+    }.issubset(columns)
+    assert tuple(row) == ("ai_free", "", "all_messages", "resolved")

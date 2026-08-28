@@ -48,6 +48,13 @@ def build_expected_groups(
                 "send_time": str(group.send_time or "08:30"),
                 "image_enabled": bool(group.image_enabled),
                 "ranking_template": str(group.ranking_template or "default"),
+                "ranking_count_policy": str(
+                    getattr(group, "ranking_count_policy", "all_messages")
+                    or "all_messages"
+                ),
+                "sender_name_policy": str(
+                    getattr(group, "sender_name_policy", "resolved") or "resolved"
+                ),
                 "image_prompt_template": str(group.image_prompt_template or "default"),
                 "image_theme": str(group.image_theme or "ai_free"),
                 "image_theme_custom": str(group.image_theme_custom or ""),

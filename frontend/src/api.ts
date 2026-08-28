@@ -85,6 +85,8 @@ export interface GroupV2 extends Group {
   effective_send_target: string;
   send_target_mode: "auto" | "manual";
   ranking_template: string;
+  ranking_count_policy: "all_messages" | "text_primary_with_interactions";
+  sender_name_policy: "resolved" | "wechat_data_analysis";
   image_prompt_template: string;
   image_theme: string;
   image_theme_custom: string;
@@ -107,6 +109,8 @@ export interface GroupPayload {
   image_enabled: boolean;
   send_target: string;
   ranking_template: string;
+  ranking_count_policy: "all_messages" | "text_primary_with_interactions";
+  sender_name_policy: "resolved" | "wechat_data_analysis";
   image_prompt_template: string;
   image_theme?: string;
   image_theme_custom?: string;
@@ -121,6 +125,7 @@ export interface DashboardCard {
   schedule_rule: string;
   image_enabled: boolean;
   ranking_template: string;
+  ranking_count_policy: "all_messages" | "text_primary_with_interactions";
   image_prompt_template: string;
   status: string;
   period_start: string;
@@ -128,7 +133,14 @@ export interface DashboardCard {
   message_count: number;
   speaker_count: number;
   image_url: string;
-  ranking_preview: { rank: number; name: string; count: number }[];
+  ranking_preview: {
+    rank: number;
+    name: string;
+    count: number;
+    text_count: number;
+    interaction_count: number;
+    name_source: string;
+  }[];
   ranking_error: string;
   error: string;
   sent_at: string;
