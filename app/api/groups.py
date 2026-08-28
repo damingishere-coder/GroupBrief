@@ -42,7 +42,7 @@ class GroupCreate(BaseModel):
     enabled: bool = True
     provider_preference: str = ""
     # V2 扩展
-    schedule_rule: str = "weekday_default"
+    schedule_rule: str = "daily_previous_day"
     send_time: str = "08:30"
     summary_provider: str = ""
     prompt_provider: str = ""

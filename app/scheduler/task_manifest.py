@@ -27,7 +27,7 @@ def build_expected_groups(
     for group in groups:
         if group.id is None:
             continue
-        rule = str(group.schedule_rule or "weekday_default")
+        rule = str(group.schedule_rule or "daily_previous_day")
         if rule not in SUPPORTED_SCHEDULE_RULES:
             raise ValueError(f"不支持的群级统计周期规则：{rule}")
         window = resolver.resolve(run_date, timezone, schedule_rule=rule)

@@ -229,7 +229,7 @@ class SubmittedFailureTextSender(FakeSender):
         )
 
 
-def _make_pipeline(tmp_path, source=None, prompt=None, gen=None, sender=None, image_enabled=True, send_time="08:30", image_theme="blue_white", image_theme_custom=""):
+def _make_pipeline(tmp_path, source=None, prompt=None, gen=None, sender=None, image_enabled=True, send_time="08:30", image_theme="blue_white", image_theme_custom="", schedule_rule="daily_previous_day"):
     source = source or FakeSource()
     prompt = prompt or FakePrompt()
     gen = gen or FakeGenerator()
@@ -247,6 +247,7 @@ def _make_pipeline(tmp_path, source=None, prompt=None, gen=None, sender=None, im
                 wechat_group_id="g@chatroom",
                 wechat_group_name="测试群",
                 enabled=True,
+                schedule_rule=schedule_rule,
                 send_time=send_time,
                 image_enabled=image_enabled,
                 image_theme=image_theme,
@@ -257,6 +258,7 @@ def _make_pipeline(tmp_path, source=None, prompt=None, gen=None, sender=None, im
             group.wechat_group_id = "g@chatroom"
             group.wechat_group_name = "测试群"
             group.send_target = ""
+            group.schedule_rule = schedule_rule
             group.image_enabled = image_enabled
             group.send_time = send_time
             group.image_theme = image_theme
@@ -821,7 +823,7 @@ def test_identical_generation_failure_exhausts_budget_after_real_retries(tmp_pat
 
 
 def test_weekday_default_skips_saturday(tmp_path):
-    pipeline, group = _make_pipeline(tmp_path)
+    pipeline, group = _make_pipeline(tmp_path, schedule_rule="weekday_default")
     results = pipeline.generate_all(run_date="2026-08-22")  # 周六
     assert results == [{"status": "no_groups", "reason": "当日没有符合群级统计规则的任务"}]
     run = pipeline.store.load_run("测试群", "2026-08-22")

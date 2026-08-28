@@ -174,7 +174,7 @@ def _ensure_relationship_schema_current() -> None:
 
 # V2 群配置扩展列（幂等迁移：仅在列不存在时 ALTER TABLE ADD COLUMN）
 _V2_GROUP_COLUMNS: dict[str, str] = {
-    "schedule_rule": "VARCHAR(64) NOT NULL DEFAULT 'weekday_default'",
+    "schedule_rule": "VARCHAR(64) NOT NULL DEFAULT 'daily_previous_day'",
     "send_time": "VARCHAR(8) NOT NULL DEFAULT '08:30'",
     "summary_provider": "VARCHAR(32) NOT NULL DEFAULT ''",
     "prompt_provider": "VARCHAR(32) NOT NULL DEFAULT ''",

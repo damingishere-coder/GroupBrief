@@ -271,7 +271,7 @@ def test_renderer_uses_template_file(tmp_path):
 
 def test_group_v2_defaults():
     g = Group()
-    assert g.schedule_rule == "weekday_default"
+    assert g.schedule_rule == "daily_previous_day"
     assert g.send_time == "08:30"
     assert g.summary_model == "gpt-5.6-sol"
     assert g.prompt_model == "gpt-5.6-sol"

@@ -19,7 +19,7 @@ class PeriodWindow:
     period_end: datetime  # 统计终点（含）
     should_run: bool  # 今天是否生成
     weekday: int  # 0=周一 ... 6=周日
-    rule: str = "weekday_default"
+    rule: str = "daily_previous_day"
     covered_dates: list[date] | None = None
 
     def period_start_str(self) -> str:
@@ -36,7 +36,7 @@ class PeriodResolver:
         self,
         run_date: date | None = None,
         timezone: str = "Asia/Shanghai",
-        schedule_rule: str = "weekday_default",
+        schedule_rule: str = "daily_previous_day",
     ) -> PeriodWindow:
         tz = ZoneInfo(timezone)
         today = run_date or datetime.now(tz).date()

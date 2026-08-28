@@ -83,7 +83,7 @@ test("群配置只展示后端白名单并支持两种统计规则", async ({ pa
         wechat_group_name: "低风险测试群",
         enabled: true,
         provider_preference: "wechat_data_analysis",
-        schedule_rule: "weekday_default",
+        schedule_rule: "daily_previous_day",
         send_time: "08:30",
         summary_provider: "codex",
         summary_model: "gpt-5.6-sol",
@@ -121,9 +121,9 @@ test("群配置只展示后端白名单并支持两种统计规则", async ({ pa
 
   await page.goto("/#/groups/7");
   await expect(page.getByRole("heading", { name: "群配置详情" })).toBeVisible();
-  await expect(page.getByLabel("统计周期规则")).toHaveValue("weekday_default");
-  await page.getByLabel("统计周期规则").selectOption("daily_previous_day");
   await expect(page.getByLabel("统计周期规则")).toHaveValue("daily_previous_day");
+  await page.getByLabel("统计周期规则").selectOption("weekday_default");
+  await expect(page.getByLabel("统计周期规则")).toHaveValue("weekday_default");
   await expect(page.getByLabel("摘要 Provider").locator("option[value=deepseek]")).toBeDisabled();
   await expect(page.getByLabel("日报 Prompt Provider").locator("option[value=deepseek]")).toBeDisabled();
 });

@@ -177,7 +177,7 @@ class DailyPipeline:
             window = self.period_resolver.resolve(
                 run_date=base_window.run_date,
                 timezone=self.settings.app_timezone,
-                schedule_rule=str(group.schedule_rule or "weekday_default"),
+                schedule_rule=str(group.schedule_rule or "daily_previous_day"),
             )
             if window.should_run:
                 scheduled.append((group, window))

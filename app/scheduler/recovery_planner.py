@@ -10,7 +10,13 @@ from zoneinfo import ZoneInfo
 from app.config.settings import Settings
 from app.db import repository as repo
 from app.pipeline.daily_pipeline import DailyPipeline
-from app.scheduler.daily_v2_job import DailyScheduleState, _generation_status
+from app.scheduler.daily_v2_job import (
+    DailyScheduleState,
+    ScheduleStateVersionConflictError,
+    _compact_results,
+    _generation_results_terminal,
+    _generation_status,
+)
 from app.scheduler.reliability_watchdog import recovery_dates
 from app.scheduler.runtime_status import write_daily_status
 from app.scheduler.task_manifest import build_expected_groups, manifest_fields
@@ -237,6 +243,146 @@ class RecoveryPlanner:
             "send_invoked": False,
             "results": results,
         }
+
+    def repair_empty_manifest_and_generate(
+        self,
+        run_date: str,
+        *,
+        expected_state_version: int,
+        expected_group_ids: list[int],
+    ) -> dict:
+        """显式修复因配置回归形成的空清单，并只执行当天生成阶段。"""
+
+        run_date = validate_run_date(run_date)
+        requested_ids = sorted(set(expected_group_ids))
+        if not requested_ids or any(group_id <= 0 for group_id in requested_ids):
+            raise RecoverySelectionError("必须提供有效的预期群 ID")
+
+        with generation_mutex():
+            repo.init_db(self.settings)
+            repo.apply_db_settings(self.settings)
+            pipeline = DailyPipeline(settings=self.settings)
+            groups = self._load_enabled_groups()
+            expected = build_expected_groups(
+                groups,
+                datetime.fromisoformat(run_date).date(),
+                timezone=self.settings.app_timezone,
+                resolver=pipeline.period_resolver,
+            )
+            actual_ids = sorted(
+                int(row["group_id"])
+                for row in expected
+                if isinstance(row.get("group_id"), int)
+            )
+            if actual_ids != requested_ids:
+                raise RecoveryPlanChangedError(
+                    f"当前预期群已变化：expected={requested_ids} actual={actual_ids}"
+                )
+
+            state = self.state_store.load(run_date)
+            if state.get("state_status") == "corrupt":
+                raise RecoverySelectionError("调度状态损坏，只能人工复核")
+            if int(state.get("state_version") or 0) != expected_state_version:
+                raise RecoveryPlanChangedError("调度状态版本已变化，请重新确认")
+            if state.get("expected_groups") != [] or state.get("generation_status") != "not_run":
+                raise RecoverySelectionError("仅允许修复已完成的 no_groups 空清单")
+            if not state.get("generation_completed_at"):
+                raise RecoverySelectionError("原调度任务尚未形成可确认的完成终态")
+            if self.store.list_runs(run_date):
+                raise RecoverySelectionError("当天已存在群级运行记录，禁止重建空清单")
+
+            now = datetime.now().astimezone().isoformat()
+            history = list(state.get("empty_manifest_repair_history") or [])
+            history.append(
+                {
+                    "repaired_at": now,
+                    "previous_state_version": expected_state_version,
+                    "previous_manifest_created_at": str(state.get("manifest_created_at") or ""),
+                    "previous_generation_completed_at": str(
+                        state.get("generation_completed_at") or ""
+                    ),
+                    "previous_generation_status": str(state.get("generation_status") or ""),
+                }
+            )
+            fields = manifest_fields(expected)
+            fields.update(
+                manifest_source="manual_empty_manifest_repair_current_config",
+                empty_manifest_repair_history=history[-10:],
+                generation_started_at=now,
+                generation_completed_at=None,
+                generation_invocation_completed_at=None,
+                generation_resumed_at=None,
+                generation_recovered_at=None,
+                generation_status="running",
+                generation_results=[],
+                generation_hold=False,
+                generation_error="",
+                email_started_at=None,
+                email_completed_at=now,
+                email_status="skipped_by_recovery_request",
+                email_hold=False,
+                email_error="",
+                email_detail="空清单显式恢复仅补生成，未调用邮件",
+                manual_recovery_confirmed_at=now,
+                manual_recovery_generation_only=True,
+                manual_recovery_scheduled_send_allowed=True,
+            )
+            try:
+                repaired_state = self.state_store.compare_and_update(
+                    run_date,
+                    expected_state_version=expected_state_version,
+                    **fields,
+                )
+            except ScheduleStateVersionConflictError as exc:
+                raise RecoveryPlanChangedError("调度状态版本已变化，请重新确认") from exc
+
+            try:
+                results = pipeline.generate_all(
+                    run_date=run_date,
+                    group_ids=actual_ids,
+                    group_overrides={
+                        int(row["group_id"]): row
+                        for row in repaired_state.get("expected_groups", [])
+                        if isinstance(row, dict) and row.get("group_id") in actual_ids
+                    },
+                    acquire_lock=False,
+                )
+            except Exception as exc:
+                self.state_store.update(
+                    run_date,
+                    generation_status="interrupted",
+                    generation_hold=True,
+                    generation_error=str(exc)[:300],
+                    generation_invocation_completed_at=datetime.now().astimezone().isoformat(),
+                )
+                write_daily_status(self.store, run_date)
+                raise
+
+            generation_status = _generation_status(results)
+            completion_fields = {
+                "generation_status": generation_status,
+                "generation_results": _compact_results(results),
+                "generation_invocation_completed_at": datetime.now().astimezone().isoformat(),
+                "generation_hold": generation_status in {"blocked", "failed", "partial"},
+                "generation_error": "",
+                "manual_recovery_results": _compact_results(results),
+                "manual_recovery_status": generation_status,
+            }
+            if _generation_results_terminal(results):
+                completion_fields["generation_completed_at"] = (
+                    datetime.now().astimezone().isoformat()
+                )
+            self.state_store.update(run_date, **completion_fields)
+            write_daily_status(self.store, run_date)
+            return {
+                "status": generation_status,
+                "run_date": run_date,
+                "generation_only": True,
+                "send_invoked": False,
+                "scheduled_send_allowed": True,
+                "expected_group_ids": actual_ids,
+                "results": results,
+            }
 
     def _load_enabled_groups(self):
         from sqlmodel import Session

@@ -9,8 +9,8 @@ groups:
 
     enabled: true
 
-    # 统计周期规则：weekday_default（默认：周一=周五~周日，周六日不生成）
-    schedule_rule: "weekday_default"
+    # 统计周期规则：daily_previous_day（默认：每天生成前一自然日群报）
+    schedule_rule: "daily_previous_day"
 
     # 本群发送时间（每群独立）
     send_time: "08:30"

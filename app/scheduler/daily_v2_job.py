@@ -41,6 +41,10 @@ class ScheduleStateCorruptionError(RuntimeError):
     """已有 scheduler 状态损坏；禁止用新任务状态覆盖。"""
 
 
+class ScheduleStateVersionConflictError(RuntimeError):
+    """scheduler 状态版本与调用方确认的版本不一致。"""
+
+
 class DailyScheduleState:
     def __init__(self, output_root: Path | str):
         self.root = Path(output_root) / ".scheduler"
@@ -173,6 +177,36 @@ class DailyScheduleState:
             data["run_date"] = run_date
             data.setdefault("run_id", f"groupbrief:{run_date}:{uuid.uuid4().hex[:12]}")
             data["state_version"] = int(data.get("state_version") or 0) + 1
+            data["updated_at"] = _now_iso()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            temp = path.with_suffix(".json.tmp")
+            temp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+            os.replace(temp, path)
+            return data
+
+    def compare_and_update(
+        self,
+        run_date: str,
+        *,
+        expected_state_version: int,
+        **fields,
+    ) -> dict:
+        """在同一个文件锁内校验版本并原子更新，供显式恢复操作使用。"""
+
+        path = self.path(run_date)
+        with _run_mutex(path):
+            data = self.load(run_date)
+            if data.get("state_status") == "corrupt":
+                raise ScheduleStateCorruptionError("调度状态文件损坏，禁止自动覆盖")
+            current_version = int(data.get("state_version") or 0)
+            if current_version != expected_state_version:
+                raise ScheduleStateVersionConflictError(
+                    f"调度状态已变化：expected={expected_state_version} actual={current_version}"
+                )
+            data.update(fields)
+            data["run_date"] = run_date
+            data.setdefault("run_id", f"groupbrief:{run_date}:{uuid.uuid4().hex[:12]}")
+            data["state_version"] = current_version + 1
             data["updated_at"] = _now_iso()
             path.parent.mkdir(parents=True, exist_ok=True)
             temp = path.with_suffix(".json.tmp")

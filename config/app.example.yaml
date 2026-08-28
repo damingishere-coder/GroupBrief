@@ -11,7 +11,7 @@ app:
   timezone: "Asia/Shanghai"
 
   # 默认统计周期规则
-  default_schedule_rule: "weekday_default"
+  default_schedule_rule: "daily_previous_day"
 
 data_source:
   # WeChatDataAnalysis 本地 MCP 服务（本机回环地址）

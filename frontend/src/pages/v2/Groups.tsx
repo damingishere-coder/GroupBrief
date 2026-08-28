@@ -349,7 +349,7 @@ export default function Groups() {
                       <td data-label="启用状态">
                         <ToggleSwitch checked={group.enabled} label={`${group.display_name} 启用状态`} busy={toggleBusy === `${group.id}:enabled`} onChange={() => toggle(group, "enabled")} />
                       </td>
-                      <td data-label="统计规则"><span className="groups-muted-cell">{group.schedule_rule || "weekday_default"}</span></td>
+                      <td data-label="统计规则"><span className="groups-muted-cell">{group.schedule_rule || "daily_previous_day"}</span></td>
                       <td data-label="发送时间"><strong>{group.send_time || "—"}</strong></td>
                       <td data-label="排行榜配置">
                         <div className="groups-template-cell">

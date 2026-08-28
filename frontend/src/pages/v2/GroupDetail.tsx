@@ -55,7 +55,7 @@ const EMPTY_FORM: GroupPayload = {
   wechat_group_name: "",
   enabled: true,
   provider_preference: "",
-  schedule_rule: "weekday_default",
+  schedule_rule: "daily_previous_day",
   send_time: "08:30",
   summary_provider: "",
   prompt_provider: "",
@@ -85,7 +85,7 @@ function toForm(group: GroupV2): GroupPayload {
     wechat_group_name: group.wechat_group_name || "",
     enabled: group.enabled,
     provider_preference: group.provider_preference || "",
-    schedule_rule: group.schedule_rule || "weekday_default",
+    schedule_rule: group.schedule_rule || "daily_previous_day",
     send_time: group.send_time || "08:30",
     summary_provider: group.summary_provider || "",
     prompt_provider: group.prompt_provider || "",
@@ -401,12 +401,12 @@ export default function GroupDetail({ groupId, invalidGroupId }: GroupDetailProp
       </section>
 
       <section className="group-detail-card">
-        <div className="group-detail-section-heading"><div><h2>统计与规则</h2><p>V2 默认使用工作日规则：周一统计周五至周日，周末不生成。</p></div></div>
+        <div className="group-detail-section-heading"><div><h2>统计与规则</h2><p>默认每天生成前一自然日群报；也可为单个群显式选择工作日汇总。</p></div></div>
         <div className="group-detail-form-grid">
           <Field id="schedule-rule" label="统计周期规则">
             <select id="schedule-rule" value={form.schedule_rule} onChange={(event) => setField("schedule_rule", event.target.value)}>
-              <option value="weekday_default">工作日默认（周一=周五至周日）</option>
-              <option value="daily_previous_day">每日统计前一天</option>
+              <option value="daily_previous_day">每天统计前一天（默认）</option>
+              <option value="weekday_default">仅工作日（周一=周五至周日）</option>
             </select>
           </Field>
           <Field id="send-time" label="发送时间" required error={errors.send_time}>

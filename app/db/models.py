@@ -30,7 +30,7 @@ class Group(SQLModel, table=True):
     deleted_at: datetime | None = Field(default=None, index=True)
 
     # ---------- V2 扩展字段（P3 起使用，P7 pipeline 落地） ----------
-    schedule_rule: str = "weekday_default"  # 统计周期规则
+    schedule_rule: str = "daily_previous_day"  # 默认每天统计前一自然日
     send_time: str = "08:30"  # 本群独立发送时间 HH:MM
     summary_provider: str = ""  # 周报摘要 AI；空值继承全局
     prompt_provider: str = ""  # 日报 Prompt AI；空值继承全局

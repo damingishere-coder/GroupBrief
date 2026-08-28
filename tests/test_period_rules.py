@@ -35,6 +35,14 @@ def test_daily_previous_day_runs_on_weekend():
     assert [item.isoformat() for item in window.covered_dates] == ["2026-08-28"]
 
 
+def test_default_rule_runs_every_day_for_previous_day():
+    window = PeriodResolver().resolve(date(2026, 8, 29))
+
+    assert window.rule == "daily_previous_day"
+    assert window.should_run is True
+    assert [item.isoformat() for item in window.covered_dates] == ["2026-08-28"]
+
+
 def test_unknown_schedule_rule_is_rejected():
     with pytest.raises(NotImplementedError, match="暂不支持"):
         PeriodResolver().resolve(date(2026, 8, 27), schedule_rule="custom")

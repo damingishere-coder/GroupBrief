@@ -40,6 +40,7 @@ EXPECTED_V2_UI_OPERATIONS = {
     ("POST", "/api/v2/pipeline/resolve-manual-send", "pipeline_resolve_manual_send_api_v2_pipeline_resolve_manual_send_post"),
     ("GET", "/api/v2/recovery/backlog", "recovery_backlog_api_v2_recovery_backlog_get"),
     ("POST", "/api/v2/recovery/confirm", "confirm_recovery_api_v2_recovery_confirm_post"),
+    ("POST", "/api/v2/recovery/repair-empty-manifest", "repair_empty_manifest_api_v2_recovery_repair_empty_manifest_post"),
     ("GET", "/api/v2/weekly", "list_weekly_insights_api_v2_weekly_get"),
     ("GET", "/api/v2/weekly/{week_start}/{group_id}", "weekly_insight_detail_api_v2_weekly__week_start___group_id__get"),
     ("GET", "/api/v2/weekly/{week_start}/{group_id}/card", "weekly_insight_card_api_v2_weekly__week_start___group_id__card_get"),

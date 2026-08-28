@@ -26,6 +26,12 @@ class RecoveryConfirmBody(BaseModel):
     tasks: list[RecoverySelection] = Field(min_length=1, max_length=180)
 
 
+class EmptyManifestRepairBody(BaseModel):
+    run_date: str
+    expected_state_version: int = Field(ge=1)
+    expected_group_ids: list[int] = Field(min_length=1, max_length=100)
+
+
 @router.get("/backlog")
 def recovery_backlog(
     lookback_days: int = Query(default=30, ge=3, le=30),
@@ -43,6 +49,25 @@ def confirm_recovery(
         return RecoveryPlanner(settings).confirm_generation(
             [item.model_dump() for item in body.tasks],
             expected_version=body.expected_version,
+        )
+    except RecoveryPlanChangedError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except RecoverySelectionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except GenerationBusyError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post("/repair-empty-manifest")
+def repair_empty_manifest(
+    body: EmptyManifestRepairBody,
+    settings: Settings = Depends(get_settings),
+):
+    try:
+        return RecoveryPlanner(settings).repair_empty_manifest_and_generate(
+            body.run_date,
+            expected_state_version=body.expected_state_version,
+            expected_group_ids=body.expected_group_ids,
         )
     except RecoveryPlanChangedError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
