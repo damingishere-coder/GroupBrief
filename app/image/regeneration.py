@@ -193,11 +193,13 @@ def _promote_image(
     source: Path,
     *,
     recovery_status: str,
+    generator_detail: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    generator_meta = generator_detail if isinstance(generator_detail, dict) else {}
     prompt_path = store.prompt_path(group_name, run_date)
-    ok, detail = verify_image_contract(prompt_path, source)
+    ok, contract_detail = verify_image_contract(prompt_path, source)
     if not ok:
-        raise ValueError(detail)
+        raise ValueError(contract_detail)
     target = store.image_path(group_name, run_date)
     previous = store.previous_image_path(group_name, run_date)
     staging = store.regenerating_image_path(group_name, run_date)
@@ -229,6 +231,20 @@ def _promote_image(
         image_status="regenerated",
         image_error=None,
         image_recovery_status=recovery_status,
+        image_recovered_at=str(generator_meta.get("recovered_at") or ""),
+        image_receipt_source=str(generator_meta.get("receipt_source") or ""),
+        image_attempt_count=int(generator_meta.get("attempt_count") or 0),
+        image_attempts=generator_meta.get("attempts") or [],
+        image_fallback_level=int(generator_meta.get("fallback_level") or 0),
+        image_variant=str(generator_meta.get("image_variant") or "normal"),
+        image_fallback_reason=str(generator_meta.get("fallback_reason") or ""),
+        image_fallback_font=str(generator_meta.get("fallback_font") or ""),
+        image_safety_redactions=generator_meta.get("safety_redactions") or [],
+        image_force_local_fallback=False,
+        codex_thread_id=str(generator_meta.get("codex_thread_id") or ""),
+        codex_event_summary=generator_meta.get("codex_event_summary") or [],
+        codex_stderr_tail=str(generator_meta.get("codex_stderr_tail") or ""),
+        image_candidate_diagnostics=generator_meta.get("candidate_diagnostics") or [],
         image_size_bytes=target.stat().st_size,
         image_sha256=_sha256(target),
         **success_fields,
@@ -341,6 +357,9 @@ def _run_regeneration(
             "width": detail.get("width"),
             "height": detail.get("height"),
             "sha256": detail.get("sha256"),
+            "attempt_count": int(detail.get("attempt_count") or 0),
+            "receipt_source": str(detail.get("receipt_source") or ""),
+            "codex_thread_id": str(detail.get("codex_thread_id") or ""),
         }
         if not result.success:
             status = _failure_status(detail, candidates)
@@ -373,6 +392,7 @@ def _run_regeneration(
             run_date,
             temp_path,
             recovery_status="job_receipt_matched",
+            generator_detail=detail,
         )
         _merge_job(
             store,

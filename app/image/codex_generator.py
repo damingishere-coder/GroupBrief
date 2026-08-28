@@ -537,6 +537,27 @@ class CodexImageGenerator:
                 )
                 if recovered is not None:
                     return recovered
+                explicit_failure = self._structured_failure_detail(
+                    Path(str(previous.get("result_path") or "")),
+                    str(previous.get("job_id") or ""),
+                )
+                if explicit_failure:
+                    recovered_history.append(
+                        self._attempt_audit(
+                            previous,
+                            "explicit_failure",
+                            explicit_failure,
+                            diagnostics,
+                        )
+                    )
+                    return self._explicit_failure_result(
+                        previous,
+                        manifest_path,
+                        explicit_failure,
+                        attempt_number=previous_number,
+                        diagnostics=diagnostics,
+                        attempts=recovered_history,
+                    )
                 return ImageTaskResult(
                     False,
                     error="上次 Codex 生图已启动但结果未知，禁止自动重复生成",
@@ -703,6 +724,31 @@ class CodexImageGenerator:
                 manifest_path=manifest_path,
                 attempt=attempt,
             )
+            explicit_failure = (
+                self._structured_failure_detail(
+                    Path(str(attempt.get("result_path") or "")),
+                    str(attempt.get("job_id") or ""),
+                )
+                if source is None
+                else ""
+            )
+            if explicit_failure:
+                audit = self._attempt_audit(
+                    attempt,
+                    "explicit_failure",
+                    explicit_failure,
+                    diagnostics,
+                    exit_code,
+                )
+                history.append(audit)
+                return self._explicit_failure_result(
+                    attempt,
+                    manifest_path,
+                    explicit_failure,
+                    attempt_number=attempt_number,
+                    diagnostics=diagnostics,
+                    attempts=history,
+                )
             audit = self._attempt_audit(attempt, outcome, reason, diagnostics, exit_code)
             history.append(audit)
             if recovered is not None:
@@ -895,8 +941,10 @@ class CodexImageGenerator:
             "优先使用 1024×1536 像素的竖版 2:3 画布；"
             "只要图片完整可读，其他竖版尺寸也可以直接采用，不要为了匹配尺寸裁切或拉伸。"
             "不要读取、引用或复用任何已有图片，也不要复制或另存生成结果。"
-            "最终回复必须严格符合 output schema，在 job_id 中逐字返回本次任务 ID，并在 image_path 中返回 "
-            "ImageGen 产生的这张最终图片当前存在的绝对路径。"
+            "最终回复必须严格符合 output schema，并在 job_id 中逐字返回本次任务 ID。"
+            "生成成功时 status=success、image_path 返回 ImageGen 产生图片当前存在的绝对路径、error 为空；"
+            "生成失败时 status=failed、image_path 为空、error 返回简短失败原因。"
+            "禁止把错误说明伪装成 image_path。"
         )
 
     def _new_attempt(
@@ -1069,14 +1117,48 @@ class CodexImageGenerator:
         )
 
     @staticmethod
-    def _structured_result_path(result_path: Path, expected_job_id: str) -> Path | None:
+    def _structured_result(result_path: Path, expected_job_id: str) -> dict | None:
         try:
             parsed = json.loads(result_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return None
-        if not isinstance(parsed, dict) or set(parsed) != {"job_id", "image_path"}:
+        if not isinstance(parsed, dict):
             return None
         if str(parsed.get("job_id") or "") != expected_job_id:
+            return None
+
+        # 兼容升级前已经落盘的成功回执；新回执必须显式区分成功与失败，
+        # 避免把“connection failed”之类的错误文字误当成图片路径。
+        if set(parsed) == {"job_id", "image_path"}:
+            raw = parsed.get("image_path")
+            if not isinstance(raw, str):
+                return None
+            return {
+                "job_id": expected_job_id,
+                "status": "success",
+                "image_path": raw,
+                "error": "",
+            }
+        if set(parsed) != {"job_id", "status", "image_path", "error"}:
+            return None
+        if any(
+            not isinstance(parsed.get(key), str)
+            for key in ("job_id", "status", "image_path", "error")
+        ):
+            return None
+        if parsed["status"] not in {"success", "failed"}:
+            return None
+        if parsed["status"] == "success":
+            if not parsed["image_path"].strip() or parsed["error"].strip():
+                return None
+        elif parsed["image_path"].strip() or not parsed["error"].strip():
+            return None
+        return parsed
+
+    @classmethod
+    def _structured_result_path(cls, result_path: Path, expected_job_id: str) -> Path | None:
+        parsed = cls._structured_result(result_path, expected_job_id)
+        if parsed is None or parsed.get("status") != "success":
             return None
         raw = parsed.get("image_path")
         if not isinstance(raw, str) or not raw.strip():
@@ -1085,6 +1167,13 @@ class CodexImageGenerator:
         if not candidate.is_absolute():
             return None
         return candidate
+
+    @classmethod
+    def _structured_failure_detail(cls, result_path: Path, expected_job_id: str) -> str:
+        parsed = cls._structured_result(result_path, expected_job_id)
+        if parsed is None or parsed.get("status") != "failed":
+            return ""
+        return cls._sanitize_diagnostic(str(parsed.get("error") or ""), 500).strip()
 
     @staticmethod
     def _sha256(path: Path) -> str:
@@ -1215,6 +1304,42 @@ class CodexImageGenerator:
             "recovery_reason": reason,
             "candidate_count": len(diagnostics),
         }
+
+    def _explicit_failure_result(
+        self,
+        attempt: dict,
+        manifest_path: Path,
+        failure_detail: str,
+        *,
+        attempt_number: int,
+        diagnostics: list[dict],
+        attempts: list[dict],
+    ) -> ImageTaskResult:
+        reason = f"Codex ImageGen 明确失败：{failure_detail}"
+        attempt.update(
+            state="exhausted",
+            finished_at=datetime_now_iso(),
+            outcome="explicit_failure",
+            recovery_reason=reason,
+            attempt_history=list(attempts),
+            candidate_diagnostics=diagnostics,
+        )
+        self._write_attempt_manifest(manifest_path, attempt)
+        return ImageTaskResult(
+            False,
+            error=reason,
+            detail={
+                "stage": "exec",
+                "outcome_unknown": False,
+                "attempt_count": attempt_number,
+                "recovery_status": "explicit_generation_failure",
+                "codex_thread_id": str(attempt.get("codex_thread_id") or ""),
+                "codex_event_summary": list(attempt.get("codex_event_summary") or []),
+                "codex_stderr_tail": str(attempt.get("codex_stderr_tail") or ""),
+                "candidate_diagnostics": diagnostics,
+                "attempts": list(attempts),
+            },
+        )
 
     def _receipt_source(
         self,

@@ -63,6 +63,7 @@ from app.v2.constants import (
     FAILED,
     IMAGE_GENERATION_FAILED,
     IMAGE_READY,
+    PROMPT_FAILED,
     PROMPT_READY,
     READY_TO_SEND,
     RUN_STATE_CORRUPT,
@@ -1040,6 +1041,7 @@ class DailyPipeline:
         group_id: int,
         run_date: str,
         *,
+        allow_topic_reselection: bool = False,
         acquire_lock: bool = True,
     ) -> dict:
         """只从当天 messages.json 重建排行榜和 Prompt，不取数、不生图。"""
@@ -1048,6 +1050,7 @@ class DailyPipeline:
                 return self.rebuild_prompt_from_snapshot(
                     group_id,
                     run_date,
+                    allow_topic_reselection=allow_topic_reselection,
                     acquire_lock=False,
                 )
 
@@ -1081,23 +1084,35 @@ class DailyPipeline:
                 "error_type": "IMAGE_REGEN_BUSY",
                 "detail": "该运行正在生图，请完成后再重建 Prompt",
             }
-        current_prompt_meta = current.get("prompt_meta") if isinstance(current.get("prompt_meta"), dict) else {}
-        if not isinstance(current_prompt_meta.get("topic_selection"), dict):
+        current_prompt_meta = (
+            current.get("prompt_meta")
+            if isinstance(current.get("prompt_meta"), dict)
+            else {}
+        )
+        has_topic_selection = isinstance(current_prompt_meta.get("topic_selection"), dict)
+        if not has_topic_selection and not allow_topic_reselection:
             return {
                 "group_name": group_name,
                 "status": "failed",
                 "error_type": "TOPIC_SELECTION_SNAPSHOT_INVALID",
                 "detail": "run.json 缺少已校验选题总结；已停止且不会重新选题",
             }
+        reselect_topics = not has_topic_selection
 
         keep_sent = current.get("status") == SENT
+        current_hold_reason = str(current.get("send_hold_reason") or "")
+        preserved_user_hold_reason = (
+            current_hold_reason
+            if current_hold_reason.startswith("USER_REQUEST_NO_SEND_")
+            else ""
+        )
         self.store.update(
             group_name,
             run_date,
             prompt_rebuild_status="running",
             prompt_rebuild_error="",
             send_hold=True,
-            send_hold_reason="PROMPT_REBUILDING",
+            send_hold_reason=preserved_user_hold_reason or "PROMPT_REBUILDING",
             needs_manual_send=True,
         )
         window = self.period_resolver.resolve(
@@ -1110,19 +1125,32 @@ class DailyPipeline:
             run_date,
             force=True,
             refresh_messages=False,
-            reuse_persisted_topic_selection=True,
+            reuse_persisted_topic_selection=not reselect_topics,
         )
-        if result.get("status") == "failed":
+        rebuilt = self.store.load_run(group_name, run_date)
+        if result.get("status") == "failed" or bool(rebuilt.get("image_force_local_fallback")):
+            detail = str(
+                result.get("detail")
+                or result.get("error")
+                or rebuilt.get("prompt_original_error")
+                or "重建失败"
+            )[:500]
             self.store.update(
                 group_name,
                 run_date,
                 status=SENT if keep_sent else FAILED,
                 prompt_rebuild_status="failed",
-                prompt_rebuild_error=str(result.get("detail") or result.get("error") or "重建失败")[:500],
+                prompt_rebuild_error=detail,
+                prompt_topic_reselected=reselect_topics,
                 send_hold=True,
                 needs_manual_send=True,
             )
-            return result
+            return {
+                "group_name": group_name,
+                "status": "failed",
+                "error_type": str(result.get("error_type") or PROMPT_FAILED),
+                "detail": detail,
+            }
 
         self.store.update(
             group_name,
@@ -1132,14 +1160,21 @@ class DailyPipeline:
             prompt_rebuild_error="",
             image_regen_status="prompt_rebuilt",
             image_regen_error="",
+            prompt_topic_reselected=reselect_topics,
             send_hold=True,
-            send_hold_reason="PROMPT_REBUILT_REVIEW_REQUIRED",
+            send_hold_reason=(
+                preserved_user_hold_reason or "PROMPT_REBUILT_REVIEW_REQUIRED"
+            ),
             needs_manual_send=True,
         )
         return {
             "group_name": group_name,
             "status": "prompt_ready",
-            "detail": "已复用 run.json 中已校验选题和既定分镜重建 Prompt；未取数，未生图",
+            "detail": (
+                "已从保存的 messages.json 显式重新选题并重建 Prompt；未取数，未生图"
+                if reselect_topics
+                else "已复用 run.json 中已校验选题和既定分镜重建 Prompt；未取数，未生图"
+            ),
         }
 
     def rebuild_prompts_from_snapshots(

@@ -396,6 +396,10 @@ class RunStore:
             data.update(
                 status=PROMPT_READY,
                 prompt_meta=dict(result.get("meta") or {}),
+                prompt_fallback_level=0,
+                prompt_fallback_reason="",
+                prompt_original_error="",
+                image_force_local_fallback=False,
                 prompt_operation_status="succeeded",
                 prompt_operation_finished_at=datetime.now().astimezone().isoformat(),
                 prompt_operation_result=None,

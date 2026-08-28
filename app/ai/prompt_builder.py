@@ -203,6 +203,7 @@ class DeepSeekImagePromptBuilder:
             reset_usage = getattr(provider_instance, "reset_usage", None)
             if callable(reset_usage):
                 reset_usage()
+        meta: dict | None = None
         try:
             theme = resolve_image_theme(
                 data.image_theme,
@@ -247,7 +248,7 @@ class DeepSeekImagePromptBuilder:
                     raise ValueError("没有可提交给总结模型的聊天文本")
             elif not messages:
                 raise ValueError("messages.json 为空，无法回查已保存选题")
-            meta: dict = {
+            meta = {
                 "template": data.template,
                 "template_source": "group_override" if data.template_override else "global",
                 "api_model": api_model,
@@ -468,13 +469,23 @@ class DeepSeekImagePromptBuilder:
             return PromptOutput(success=True, prompt=text, model=api_model, meta=meta)
         except (ImagePromptTemplateError, ImageThemeError, LayoutPlanError, ValueError) as e:
             logger.warning("Prompt 模板错误：%s", e)
-            return PromptOutput(success=False, error=str(e)[:300], model=api_model)
+            return PromptOutput(
+                success=False,
+                error=str(e)[:300],
+                model=api_model,
+                meta=meta,
+            )
         except ExternalCallResultUnknownError:
             # Pipeline 需要把提交后断线/超时持久化为 result_unknown，不能降格成普通失败。
             raise
         except Exception as e:  # 主备模型调用失败等
             logger.exception("ImagePromptBuilder 生成失败")
-            return PromptOutput(success=False, error=str(e)[:300], model=api_model)
+            return PromptOutput(
+                success=False,
+                error=str(e)[:300],
+                model=api_model,
+                meta=meta,
+            )
 
     # ---------- 内部 ----------
 

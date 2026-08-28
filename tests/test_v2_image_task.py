@@ -333,9 +333,22 @@ def _attempt_paths(command: list[str]) -> tuple[Path, Path]:
     return staging_path, result_path
 
 
-def _write_receipt(result_path: Path, image_path: Path | str) -> None:
+def _write_receipt(
+    result_path: Path,
+    image_path: Path | str,
+    *,
+    legacy: bool = False,
+) -> None:
+    payload = {
+        "job_id": result_path.parent.name,
+        "status": "success",
+        "image_path": str(image_path),
+        "error": "",
+    }
+    if legacy:
+        payload = {"job_id": result_path.parent.name, "image_path": str(image_path)}
     result_path.write_text(
-        json.dumps({"job_id": result_path.parent.name, "image_path": str(image_path)}),
+        json.dumps(payload),
         encoding="utf-8",
     )
 
@@ -389,8 +402,74 @@ def test_codex_prompt_uses_stdin_and_explicit_output_contract(tmp_path, monkeypa
     assert "其他竖版尺寸也可以直接采用" in captured["input"]
     assert "不要为了匹配尺寸裁切或拉伸" in captured["input"]
     assert "绝对路径" in captured["input"]
+    assert "status=failed" in captured["input"]
+    assert "禁止把错误说明伪装成 image_path" in captured["input"]
     assert result.detail["attempt_count"] == 1
     assert result.detail["recovery_status"] == "completed"
+
+
+def test_codex_accepts_legacy_success_receipt(tmp_path, monkeypatch):
+    generator, prompt = _codex_test_generator(tmp_path, monkeypatch)
+
+    def fake_run(command, **kwargs):
+        _, result_path = _attempt_paths(command)
+        generated = tmp_path / "generated_images" / "legacy-success" / "final.png"
+        generated.parent.mkdir()
+        generated.write_bytes(_PNG_1PX)
+        _write_receipt(result_path, generated.resolve(), legacy=True)
+        return _Proc()
+
+    monkeypatch.setattr(codex_generator, "_run_codex_process", fake_run)
+    result = generator.generate(prompt, prompt.parent / "daily_image.png")
+
+    assert result.success is True
+    assert result.detail["receipt_source"] == "structured_receipt"
+
+
+def test_codex_explicit_failure_receipt_is_known_failure_without_retry(
+    tmp_path, monkeypatch
+):
+    generator, prompt = _codex_test_generator(tmp_path, monkeypatch)
+    calls = 0
+
+    def fake_run(command, **kwargs):
+        nonlocal calls
+        calls += 1
+        _, result_path = _attempt_paths(command)
+        result_path.write_text(
+            json.dumps(
+                {
+                    "job_id": result_path.parent.name,
+                    "status": "failed",
+                    "image_path": "",
+                    "error": "connection failed: remote reset",
+                }
+            ),
+            encoding="utf-8",
+        )
+        return _Proc()
+
+    monkeypatch.setattr(codex_generator, "_run_codex_process", fake_run)
+    job_id = "job-explicit-failure-001"
+    result = generator.generate(
+        prompt,
+        prompt.parent / "daily_image.png",
+        job_id=job_id,
+    )
+    manifest = json.loads(
+        (prompt.parent / ".imagegen-jobs" / job_id / "attempt.json").read_text(
+            encoding="utf-8"
+        )
+    )
+
+    assert result.success is False
+    assert calls == 1
+    assert "connection failed" in result.error
+    assert result.detail["outcome_unknown"] is False
+    assert result.detail["recovery_status"] == "explicit_generation_failure"
+    assert result.detail["candidate_diagnostics"] == []
+    assert manifest["state"] == "exhausted"
+    assert manifest["outcome"] == "explicit_failure"
 
 
 def test_codex_keeps_success_after_post_promote_smoke_write_failure(tmp_path, monkeypatch):

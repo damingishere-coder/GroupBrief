@@ -69,6 +69,14 @@ def _run(tmp_path, *, status="SENT"):
 
 def test_success_atomically_replaces_image_backs_up_old_and_holds_send(tmp_path):
     settings, store, group, run_date = _run(tmp_path)
+    store.update(
+        group,
+        run_date,
+        image_fallback_level=3,
+        image_fallback_reason="PROMPT_FAILED",
+        image_variant="pillow",
+        image_force_local_fallback=True,
+    )
 
     run = run_regeneration_now(settings, group, run_date, SuccessGenerator())
 
@@ -79,6 +87,10 @@ def test_success_atomically_replaces_image_backs_up_old_and_holds_send(tmp_path)
     assert run["send_hold"] is True
     assert run["needs_manual_send"] is True
     assert run["sent_at"] == "2026-08-21 09:00:00"
+    assert run["image_fallback_level"] == 0
+    assert run["image_fallback_reason"] == ""
+    assert run["image_variant"] == "normal"
+    assert run["image_force_local_fallback"] is False
 
 
 def test_cli_failure_keeps_old_image_and_fails_closed(tmp_path):

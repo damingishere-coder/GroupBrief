@@ -727,6 +727,12 @@ class GenerationStages:
                 )
                 self._record_prompt_timing(context, started_at)
                 if bool(context.group.image_enabled) and not context.reuse_persisted_topic_selection:
+                    fallback_meta = dict(prompt_out.meta or {})
+                    fallback_meta.update(
+                        mode="local_infographic",
+                        fallback_level=3,
+                        fallback_reason=PROMPT_FAILED,
+                    )
                     fallback_prompt = (
                         "【任务】\n"
                         "外部内容整理失败，仅使用当天 ranking.json 生成本地简化信息图。\n"
@@ -750,11 +756,7 @@ class GenerationStages:
                     )
                     return StageResult.proceed(
                         PromptStageOutput(
-                            prompt_meta={
-                                "mode": "local_infographic",
-                                "fallback_level": 3,
-                                "fallback_reason": PROMPT_FAILED,
-                            }
+                            prompt_meta=fallback_meta,
                         )
                     )
                 self.store.update(

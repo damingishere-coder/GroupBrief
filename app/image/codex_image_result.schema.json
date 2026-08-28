@@ -6,11 +6,17 @@
       "type": "string",
       "minLength": 8
     },
-    "image_path": {
+    "status": {
       "type": "string",
-      "minLength": 1
+      "enum": ["success", "failed"]
+    },
+    "image_path": {
+      "type": "string"
+    },
+    "error": {
+      "type": "string"
     }
   },
-  "required": ["job_id", "image_path"],
+  "required": ["job_id", "status", "image_path", "error"],
   "additionalProperties": false
 }

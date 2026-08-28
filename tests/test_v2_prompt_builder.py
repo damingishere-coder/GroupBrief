@@ -273,6 +273,23 @@ def test_long_grounded_quote_without_safe_boundary_is_rejected():
         parse_poster_copy(raw, source)
 
 
+def test_exact_full_source_quote_may_end_with_ellipsis():
+    raw, source = _long_quote_payload("我再想想……")
+
+    copy = parse_poster_copy(raw, source)
+
+    assert copy.panels[0].participants[0].quote == "我再想想……"
+
+
+def test_truncated_source_quote_may_not_end_with_ellipsis():
+    raw, source = _long_quote_payload("我再想想……然后再决定。")
+    payload = json.loads(raw)
+    payload["panels"][0]["participants"][0]["quote"] = "我再想想……"
+
+    with pytest.raises(PosterCopyError, match="悬空省略号"):
+        parse_poster_copy(json.dumps(payload, ensure_ascii=False), source)
+
+
 def test_ai_free_does_not_inject_daily_style_library():
     output = _builder().build(_input(image_theme="ai_free"))
     assert output.success

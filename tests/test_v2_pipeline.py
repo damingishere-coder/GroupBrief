@@ -107,8 +107,9 @@ class FakeSource(WeChatDataSource):
 
 
 class FakePrompt:
-    def __init__(self, fail=False):
+    def __init__(self, fail=False, failure_meta=None):
         self.fail = fail
+        self.failure_meta = failure_meta
         self.inputs = []
 
     def build(self, data):
@@ -116,7 +117,11 @@ class FakePrompt:
 
         self.inputs.append(data)
         if self.fail:
-            return PromptOutput(False, error="DeepSeek 失败")
+            return PromptOutput(
+                False,
+                error="DeepSeek 失败",
+                meta=self.failure_meta,
+            )
         topic_selection = data.persisted_topic_selection or {
             "topic_selection_version": "4.0",
             "selected_topic_ids": ["topic-01", "topic-02"],
@@ -453,6 +458,58 @@ def test_rebuild_failure_preserves_sent_status_and_sent_at(tmp_path):
     assert run["send_hold"] is True
 
 
+def test_rebuild_missing_topics_requires_explicit_reselection_and_preserves_user_hold(
+    tmp_path,
+):
+    pipeline, group = _make_pipeline(tmp_path)
+    pipeline.generate_all(run_date="2026-08-18")
+    sent_at = "2026-08-18T09:00:00+08:00"
+    pipeline.store.update(
+        "测试群",
+        "2026-08-18",
+        status=SENT,
+        sent_at=sent_at,
+        prompt_meta={"mode": "local_infographic", "fallback_level": 3},
+        send_hold=True,
+        send_hold_reason="USER_REQUEST_NO_SEND_2026_08_18",
+        needs_manual_send=True,
+        image_force_local_fallback=True,
+    )
+
+    source = FakeSource(fail=True)
+    prompt = FakePrompt()
+    generator = FakeGenerator()
+    pipeline2, _ = _make_pipeline(
+        tmp_path,
+        source=source,
+        prompt=prompt,
+        gen=generator,
+    )
+
+    blocked = pipeline2.rebuild_prompt_from_snapshot(group.id, "2026-08-18")
+    rebuilt = pipeline2.rebuild_prompt_from_snapshot(
+        group.id,
+        "2026-08-18",
+        allow_topic_reselection=True,
+    )
+    run = pipeline2.store.load_run("测试群", "2026-08-18")
+
+    assert blocked["error_type"] == "TOPIC_SELECTION_SNAPSHOT_INVALID"
+    assert rebuilt["status"] == "prompt_ready"
+    assert source.fetch_calls == 0
+    assert len(prompt.inputs) == 1
+    assert prompt.inputs[0].persisted_topic_selection is None
+    assert generator.calls == []
+    assert run["status"] == SENT
+    assert run["sent_at"] == sent_at
+    assert run["prompt_topic_reselected"] is True
+    assert run["prompt_meta"]["topic_selection"]["selected_count"] == 2
+    assert run["image_force_local_fallback"] is False
+    assert run["send_hold"] is True
+    assert run["needs_manual_send"] is True
+    assert run["send_hold_reason"] == "USER_REQUEST_NO_SEND_2026_08_18"
+
+
 def test_generate_corrupt_snapshot_fails_without_hidden_refetch(tmp_path):
     source = FakeSource()
     pipeline, _ = _make_pipeline(tmp_path, source=source)
@@ -678,7 +735,14 @@ def test_generate_data_failure_marks_failed(tmp_path):
 
 
 def test_generate_prompt_failure_uses_local_infographic(tmp_path):
-    pipeline, group = _make_pipeline(tmp_path, prompt=FakePrompt(fail=True))
+    preserved_meta = {
+        "topic_selection": {"selected_topic_ids": ["topic-01"]},
+        "layout_id": "split_focus",
+    }
+    pipeline, group = _make_pipeline(
+        tmp_path,
+        prompt=FakePrompt(fail=True, failure_meta=preserved_meta),
+    )
     results = pipeline.generate_all(run_date="2026-08-18")
     assert results[0]["status"] == "ready_to_send"
     run = pipeline.store.load_run("测试群", "2026-08-18")
@@ -686,6 +750,9 @@ def test_generate_prompt_failure_uses_local_infographic(tmp_path):
     assert run["prompt_fallback_level"] == 3
     assert run["image_fallback_level"] == 3
     assert run["image_variant"] == "pillow"
+    assert run["prompt_meta"]["topic_selection"] == preserved_meta["topic_selection"]
+    assert run["prompt_meta"]["layout_id"] == "split_focus"
+    assert run["prompt_meta"]["mode"] == "local_infographic"
     assert pipeline.store.image_path("测试群", "2026-08-18").is_file()
 
 

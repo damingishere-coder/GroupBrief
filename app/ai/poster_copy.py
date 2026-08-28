@@ -73,13 +73,19 @@ class DailyPosterCopy:
     footer_summary: str
 
 
-def _clean_text(value: object, *, maximum: int, label: str) -> str:
+def _clean_text(
+    value: object,
+    *,
+    maximum: int,
+    label: str,
+    allow_terminal_ellipsis: bool = False,
+) -> str:
     text = re.sub(r"\s+", " ", str(value or "")).strip()
     if not text:
         raise PosterCopyError(f"{label}不能为空")
     if len(text) > maximum:
         raise PosterCopyError(f"{label}超过 {maximum} 个字符")
-    if _ELLIPSIS_END_RE.search(text):
+    if _ELLIPSIS_END_RE.search(text) and not allow_terminal_ellipsis:
         raise PosterCopyError(f"{label}不能以悬空省略号结尾")
     return text
 
@@ -173,7 +179,8 @@ POSTER_EDITOR_SYSTEM = """你是「群报 GroupBrief」的漫画日报内容编�
 所有事实、姓名和对白必须来自对应 topic；不得改变金额、时间、地点和人物关系。
 每个 panel 必须对应一个 topic_id，顺序不得改变。优先使用 2～4 位 participant_options；
 每位人物都要写可绘制的动作、站位或反应。quote 只能逐字复制该 speaker 的 evidence_dialogue
-完整原消息或其中连续、语义完整的片段，不得改写，不得用悬空省略号截断。
+完整原消息或其中连续、语义完整的片段，不得改写，不得自行添加悬空省略号截断。
+如果完整原消息本身以省略号结尾，只能逐字引用整条原消息，不得截取其中一部分。
 有两名以上真实发言人时，优先为至少两人各选一条能形成接话关系的真实气泡。
 event_summary 与 fact_line 必须是完整句，只能概括 source_summary 和 evidence_dialogue。
 视觉笑点只能字面化或放大已有内容，不得伪装成群里真实发生的新事件。
@@ -237,6 +244,16 @@ def _quote_is_contiguous(quote: str, messages: Iterable[str]) -> bool:
     if not candidate:
         return False
     return any(candidate in message for message in messages)
+
+
+def _quote_is_full_message(quote: str, messages: Iterable[str]) -> bool:
+    candidate = re.sub(r"\s+", " ", quote).strip().strip("“”\"")
+    if not candidate:
+        return False
+    return any(
+        candidate == re.sub(r"\s+", " ", str(message)).strip().strip("“”\"")
+        for message in messages
+    )
 
 
 def _shorten_grounded_quote(quote: str, messages: Iterable[str]) -> str:
@@ -374,7 +391,15 @@ def parse_poster_copy(raw: str, source: dict[str, Any]) -> DailyPosterCopy:
                         raise PosterCopyError(
                             f"版面{index}真实气泡超过 {MAX_VISIBLE_QUOTE_CHARS} 个字符且无法安全缩短"
                         )
-                quote = _clean_text(quote, maximum=MAX_VISIBLE_QUOTE_CHARS, label=f"版面{index}真实气泡")
+                quote = _clean_text(
+                    quote,
+                    maximum=MAX_VISIBLE_QUOTE_CHARS,
+                    label=f"版面{index}真实气泡",
+                    allow_terminal_ellipsis=_quote_is_full_message(
+                        quote,
+                        dialogue.get(name, []),
+                    ),
+                )
                 quoted_speakers.add(name)
             participants.append(ParticipantCopy(name=name, action=action, quote=quote))
 
