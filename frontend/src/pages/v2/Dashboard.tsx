@@ -10,6 +10,7 @@ import {
 import {
   DashboardCard,
   getDashboard,
+  getRuntimeLogs,
   getSystemHealth,
   pipelineGenerate,
   pipelineSend,
@@ -36,6 +37,8 @@ import {
   INTERACTION_EXPLANATION,
   isTextPrimaryRanking,
 } from "./rankingPolicy";
+import { DashboardRuntimePanels } from "./DashboardRuntimePanels";
+import { runtimeRefreshDelay } from "./dashboardRuntime";
 
 const STATUS_META: Record<string, { label: string; tone: "success" | "warning" | "danger" | "info" | "neutral" }> = {
   PENDING: { label: "待生成", tone: "warning" },
@@ -182,6 +185,16 @@ export default function Dashboard() {
   const [runDate, setRunDate] = useState(shanghaiDateInputValue);
   const dashboard = useFetch(() => getDashboard(runDate), [runDate]);
   const health = useFetch(getSystemHealth);
+  const [logSource, setLogSource] = useState<"all" | "scheduler" | "app" | "provider" | "ai">("all");
+  const [logLevel, setLogLevel] = useState<"all" | "DEBUG" | "INFO" | "WARNING" | "ERROR" | "CRITICAL">("all");
+  const logs = useFetch(
+    () => getRuntimeLogs(runDate, {
+      tail: 100,
+      sources: logSource === "all" ? undefined : logSource,
+      levels: logLevel === "all" ? undefined : logLevel,
+    }),
+    [runDate, logSource, logLevel],
+  );
   const { msg, toast } = useToast();
   const [generatingId, setGeneratingId] = useState<number | null>(null);
   const [sendingId, setSendingId] = useState<number | null>(null);
@@ -192,6 +205,8 @@ export default function Dashboard() {
   const [manualResolution, setManualResolution] = useState<"all_sent" | "text_sent" | "not_sent">("all_sent");
   const [manualBusy, setManualBusy] = useState(false);
   const [healthOpen, setHealthOpen] = useState(false);
+  const [logPaused, setLogPaused] = useState(false);
+  const [pageVisible, setPageVisible] = useState(() => document.visibilityState !== "hidden");
   const manualDialogRef = useRef<HTMLElement>(null);
   const manualReturnFocusRef = useRef<HTMLElement | null>(null);
   const manualBusyRef = useRef(manualBusy);
@@ -232,8 +247,38 @@ export default function Dashboard() {
     };
   }, [manualCard]);
 
+  useEffect(() => {
+    const onVisibilityChange = () => {
+      const visible = document.visibilityState !== "hidden";
+      setPageVisible(visible);
+      if (visible && runDate === shanghaiDateInputValue()) {
+        dashboard.reload();
+        logs.reload();
+      }
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => document.removeEventListener("visibilitychange", onVisibilityChange);
+  }, [dashboard.reload, logs.reload, runDate]);
+
+  const runtimeStatus = dashboard.data?.runtime?.overall_status || "not_started";
+  const runtimeScheduledAt = dashboard.data?.runtime?.scheduler?.scheduled_at;
+  useEffect(() => {
+    const delay = runtimeRefreshDelay(runtimeStatus, {
+      isToday: runDate === shanghaiDateInputValue(),
+      visible: pageVisible,
+      scheduledAt: runtimeScheduledAt,
+    });
+    if (delay === null) return;
+    const timer = window.setTimeout(() => {
+      dashboard.reload();
+      logs.reload();
+    }, delay);
+    return () => window.clearTimeout(timer);
+  }, [dashboard.reload, logs.reload, pageVisible, runDate, runtimeScheduledAt, runtimeStatus]);
+
   const refresh = () => {
     dashboard.reload();
+    logs.reload();
     health.reload();
   };
 
@@ -365,9 +410,11 @@ export default function Dashboard() {
   const dailyStatusMeta = {
     not_started: { label: "今日未开始", tone: "neutral" as const },
     running: { label: "今日运行中", tone: "info" as const },
+    retry_pending: { label: "等待自动重试", tone: "warning" as const },
     complete: { label: "今日已完成", tone: "success" as const },
     partial: { label: "今日部分完成", tone: "warning" as const },
     blocked: { label: "今日已阻断", tone: "danger" as const },
+    failed: { label: "今日运行失败", tone: "danger" as const },
     needs_attention: { label: "今日待核对", tone: "danger" as const },
   }[data.daily_status?.overall_status || "not_started"];
 
@@ -445,6 +492,20 @@ export default function Dashboard() {
         {counts.failed > 0 || counts.held > 0 ? <WarningCircle size={20} aria-hidden="true" /> : <CheckCircle size={20} aria-hidden="true" />}
         <span>{counts.failed > 0 || counts.held > 0 ? `失败 ${counts.failed} 个，暂停待核对 ${counts.held} 个；请查看下方状态与错误信息。` : "当前没有失败或暂停任务。"}</span>
       </div>
+
+      <DashboardRuntimePanels
+        runtime={data.runtime}
+        logs={logs.data}
+        loading={logs.loading}
+        error={logs.error}
+        source={logSource}
+        level={logLevel}
+        paused={logPaused}
+        onSourceChange={setLogSource}
+        onLevelChange={setLogLevel}
+        onPausedChange={setLogPaused}
+        onRefresh={logs.reload}
+      />
 
       <div className="dashboard-main-grid">
         <section className="dashboard-panel dashboard-message-panel">

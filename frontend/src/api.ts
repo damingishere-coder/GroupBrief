@@ -158,6 +158,73 @@ export interface DashboardCard {
   updated_at: string;
 }
 
+export type RuntimeNodeStatus = "pending" | "running" | "success" | "retry_pending" | "held" | "failed";
+
+export interface RuntimeNode {
+  id: "scheduler" | "data" | "ranking" | "prompt" | "image" | "send";
+  label: string;
+  status: RuntimeNodeStatus;
+  completed_groups: number;
+  total_groups: number;
+}
+
+export interface RuntimeGroup {
+  group_id: string;
+  group_name: string;
+  run_status: string;
+  current_node: RuntimeNode["id"];
+  current_node_label: string;
+  node_status: RuntimeNodeStatus;
+  nodes: Pick<RuntimeNode, "id" | "label" | "status">[];
+  last_error_type: string;
+  last_error_summary: string;
+  updated_at: string;
+}
+
+export type RuntimeOverallStatus =
+  | "not_started"
+  | "running"
+  | "retry_pending"
+  | "complete"
+  | "partial"
+  | "blocked"
+  | "failed"
+  | "needs_attention";
+
+export interface DashboardRuntime {
+  schema_version: number;
+  run_date: string;
+  run_id: string;
+  updated_at: string;
+  overall_status: RuntimeOverallStatus;
+  scheduler: {
+    scheduled_at?: string;
+    generation_started_at?: string;
+    generation_completed_at?: string;
+    generation_status?: string;
+    state_status?: string;
+    generation_error?: string;
+  };
+  summary: Record<string, unknown>;
+  nodes: RuntimeNode[];
+  groups: RuntimeGroup[];
+}
+
+export interface RuntimeLogItem {
+  timestamp: string;
+  level: "DEBUG" | "INFO" | "WARNING" | "ERROR" | "CRITICAL";
+  source: "scheduler" | "app" | "provider" | "ai";
+  message: string;
+  redacted_or_truncated?: boolean;
+}
+
+export interface RuntimeLogsResponse {
+  run_date: string;
+  updated_at: string;
+  items: RuntimeLogItem[];
+  truncated: boolean;
+}
+
 export interface Dashboard {
   today: string;
   should_run: boolean;
@@ -167,10 +234,11 @@ export interface Dashboard {
   counts: { pending: number; generated: number; sent: number; failed: number; held: number };
   next_send: string;
   daily_status: {
-    overall_status: "not_started" | "running" | "complete" | "partial" | "blocked" | "needs_attention";
+    overall_status: RuntimeOverallStatus;
     updated_at?: string;
     summary: Record<string, unknown>;
   };
+  runtime: DashboardRuntime;
   cards: DashboardCard[];
 }
 
@@ -449,6 +517,18 @@ export const restoreGroup = (groupId: number) =>
 
 export const getDashboard = (runDate?: string) =>
   get<Dashboard>(`/v2/dashboard${runDate ? `?run_date=${encodeURIComponent(runDate)}` : ""}`);
+export const getRuntimeLogs = (
+  runDate: string,
+  options: { tail?: number; sources?: string; levels?: string } = {},
+) => {
+  const params = new URLSearchParams({
+    run_date: runDate,
+    tail: String(options.tail ?? 100),
+  });
+  if (options.sources) params.set("sources", options.sources);
+  if (options.levels) params.set("levels", options.levels);
+  return get<RuntimeLogsResponse>(`/v2/runtime/logs?${params.toString()}`);
+};
 export const getArchiveGroups = () => get<ArchiveGroupsResponse>("/v2/archive/groups");
 export const getRuns = (runDate?: string, options?: { includeFiles?: boolean }) => {
   const params = new URLSearchParams();

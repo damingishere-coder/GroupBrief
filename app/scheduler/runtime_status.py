@@ -6,8 +6,20 @@ import json
 import os
 from datetime import datetime
 from pathlib import Path
+from typing import Iterable
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from app.v2.constants import IMAGE_READY, READY_TO_SEND, SENT
+from app.v2.constants import (
+    CORRUPT,
+    EXECUTION_ACTIVE,
+    EXECUTION_COMPLETE,
+    EXECUTION_FAILED_FINAL,
+    EXECUTION_HOLD_MANUAL,
+    EXECUTION_WAIT_RETRY,
+    IMAGE_READY,
+    READY_TO_SEND,
+    SENT,
+)
 from app.v2.run_store import RunStore, validate_run_date
 
 _CHECKPOINT_ORDER = {
@@ -19,15 +31,47 @@ _CHECKPOINT_ORDER = {
     "SENT_CONFIRMED": 5,
 }
 
+_NODE_DEFINITIONS = (
+    ("scheduler", "调度启动", 0, ""),
+    ("data", "读取群消息", 1, "fetch"),
+    ("ranking", "生成排行榜", 2, "ranking"),
+    ("prompt", "摘要与提示词", 3, "prompt"),
+    ("image", "生成图片", 4, "image"),
+    ("send", "等待发送 / 发送完成", 5, "send"),
+)
 
-def _scheduler_snapshot(store: RunStore, run_date: str) -> dict:
-    path = store.root / ".scheduler" / f"{run_date}.json"
+_NODE_LABELS = {node_id: label for node_id, label, _, _ in _NODE_DEFINITIONS}
+_STAGE_NODE = {
+    "DATA": "data",
+    "RANKING": "ranking",
+    "PROMPT": "prompt",
+    "IMAGE": "image",
+    "SEND": "send",
+    "COMPLETE": "send",
+}
+_ACTIVE_SCHEDULER_STATUSES = {"running", "resuming"}
+
+
+def _scheduler_snapshot(output_root: Path, run_date: str) -> dict:
+    path = output_root / ".scheduler" / f"{run_date}.json"
     try:
         parsed = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError):
+        if path.exists():
+            return {
+                "state_status": "corrupt",
+                "error_type": "SCHEDULER_STATE_CORRUPT",
+                "state_error_reason": "read_or_json_invalid",
+                "generation_hold": True,
+            }
         return {}
     if not isinstance(parsed, dict) or parsed.get("run_date") != run_date:
-        return {}
+        return {
+            "state_status": "corrupt",
+            "error_type": "SCHEDULER_STATE_CORRUPT",
+            "state_error_reason": "run_date_or_root_invalid",
+            "generation_hold": True,
+        }
     return {
         key: parsed.get(key)
         for key in (
@@ -36,7 +80,6 @@ def _scheduler_snapshot(store: RunStore, run_date: str) -> dict:
             "generation_started_at",
             "generation_completed_at",
             "generation_invocation_completed_at",
-            "email_status",
             "last_invocation_status",
             "last_invocation_exit_code",
             "manifest_version",
@@ -44,6 +87,14 @@ def _scheduler_snapshot(store: RunStore, run_date: str) -> dict:
             "expected_group_count",
             "expected_groups",
             "state_version",
+            "state_status",
+            "error_type",
+            "state_error_reason",
+            "generation_hold",
+            "generation_error",
+            "email_started_at",
+            "email_completed_at",
+            "email_status",
         )
         if parsed.get(key) not in (None, "")
     }
@@ -54,48 +105,220 @@ def _step_status(run: dict, required_checkpoint: int, stage: str) -> str:
     if checkpoint >= required_checkpoint:
         return "success"
     failed_stage = str(run.get("failed_stage") or "").lower()
-    if failed_stage == stage:
-        execution = str(run.get("execution_state") or "")
-        if execution == "WAIT_RETRY":
-            return "retry_pending"
-        if execution == "HOLD_MANUAL":
-            return "held"
-        return "failed"
+    if failed_stage == stage or (stage == "fetch" and failed_stage == "data"):
+        return _failure_status(run)
     return "pending"
 
 
-def _group_snapshot(run: dict) -> dict:
+def _failure_status(run: dict) -> str:
+    execution = str(run.get("execution_state") or "")
+    send_state = str(run.get("send_state") or "")
+    if (
+        execution == EXECUTION_HOLD_MANUAL
+        or run.get("prompt_hold")
+        or run.get("send_hold")
+        or send_state in {"unknown", "failed_final"}
+        or str(run.get("status") or "") == CORRUPT
+    ):
+        return "held"
+    if execution == EXECUTION_WAIT_RETRY or run.get("next_retry_at") or run.get("send_next_retry_at"):
+        return "retry_pending"
+    return "failed"
+
+
+def _run_has_started(run: dict) -> bool:
+    return bool(
+        run.get("updated_at")
+        or run.get("group_task_id")
+        or run.get("period_start")
+        or run.get("prompt_operation_started_at")
+        or run.get("sent_at")
+    )
+
+
+def _current_node_id(run: dict) -> str:
+    failed_stage = str(run.get("failed_stage") or "").lower()
+    if failed_stage in {"data", "fetch"}:
+        return "data"
+    if failed_stage in {"ranking", "prompt", "image", "send"}:
+        return failed_stage
+    stage = str(run.get("stage") or "").upper()
+    if stage in _STAGE_NODE:
+        return _STAGE_NODE[stage]
+    status = str(run.get("status") or "PENDING")
+    return {
+        "PENDING": "data",
+        "DATA_READY": "ranking",
+        "RANKING_READY": "prompt",
+        "PROMPT_READY": "image",
+        "IMAGE_READY": "send",
+        "READY_TO_SEND": "send",
+        "SENT": "send",
+        "FAILED": failed_stage if failed_stage in _NODE_LABELS else "data",
+        "CORRUPT": "data",
+    }.get(status, "data")
+
+
+def _group_node_status(
+    run: dict,
+    node_id: str,
+    required_checkpoint: int,
+    stage: str,
+    *,
+    scheduler_active: bool,
+    scheduler_started: bool,
+) -> str:
+    if node_id == "scheduler":
+        return "success" if scheduler_started else "pending"
+
+    status = _step_status(run, required_checkpoint, stage)
+    if status != "pending":
+        return status
+
+    if node_id == "send":
+        send_state = str(run.get("send_state") or "")
+        if send_state in {"claimed", "sending_text", "sending_image"}:
+            return "running"
+        if send_state in {"unknown", "failed_final"} or run.get("send_hold"):
+            return "held"
+        if run.get("send_next_retry_at"):
+            return "retry_pending"
+
+    if _current_node_id(run) != node_id or not _run_has_started(run):
+        return "pending"
+    if node_id == "image":
+        image_job = run.get("image_job")
+        image_job_status = (
+            str(image_job.get("status") or "") if isinstance(image_job, dict) else ""
+        )
+        if image_job_status == "queued":
+            return "pending"
+        if image_job_status in {"running", "started"}:
+            return "running"
+    if node_id == "prompt" and str(run.get("prompt_operation_status") or "") == "started":
+        return "running"
+    if scheduler_active and str(run.get("execution_state") or EXECUTION_ACTIVE) == EXECUTION_ACTIVE:
+        return "running"
+    return "pending"
+
+
+def _aggregate_node_status(statuses: list[str]) -> str:
+    if not statuses:
+        return "pending"
+    for candidate in ("held", "failed", "retry_pending", "running"):
+        if candidate in statuses:
+            return candidate
+    if all(status == "success" for status in statuses):
+        return "success"
+    return "pending"
+
+
+def _scheduled_at(run_date: str, generate_time: str, timezone: str) -> str:
+    try:
+        hour, minute = (int(part) for part in generate_time.split(":", 1))
+        value = datetime.fromisoformat(run_date).replace(
+            hour=hour,
+            minute=minute,
+            second=0,
+            microsecond=0,
+            tzinfo=ZoneInfo(timezone),
+        )
+    except (TypeError, ValueError, ZoneInfoNotFoundError):
+        return ""
+    return value.isoformat()
+
+
+def _group_snapshot(
+    run: dict,
+    *,
+    scheduler_active: bool = False,
+    scheduler_started: bool = False,
+) -> dict:
     status = str(run.get("status") or "PENDING")
     send_state = str(run.get("send_state") or "")
     if status == SENT or run.get("sent_at"):
         send_status = "success"
-    elif send_state == "failed_final":
+    elif send_state in {"unknown", "failed_final"} or run.get("send_hold"):
         send_status = "held"
     elif run.get("send_next_retry_at"):
         send_status = "retry_pending"
+    elif send_state in {"claimed", "sending_text", "sending_image"}:
+        send_status = "running"
     else:
         send_status = _step_status(run, 5, "send")
+
+    node_items = [
+        {
+            "id": node_id,
+            "label": label,
+            "status": _group_node_status(
+                run,
+                node_id,
+                required_checkpoint,
+                stage,
+                scheduler_active=scheduler_active,
+                scheduler_started=scheduler_started,
+            ),
+        }
+        for node_id, label, required_checkpoint, stage in _NODE_DEFINITIONS
+    ]
+    current_node = _current_node_id(run)
+    current_status = next(
+        (item["status"] for item in node_items if item["id"] == current_node),
+        "pending",
+    )
+    execution = str(run.get("execution_state") or "")
+    if status == SENT or execution == EXECUTION_COMPLETE:
+        current_status = "success"
+    elif status == CORRUPT:
+        current_status = "held"
+    elif execution == EXECUTION_FAILED_FINAL:
+        current_status = "failed"
+    elif execution == EXECUTION_HOLD_MANUAL:
+        current_status = "held"
+    elif execution == EXECUTION_WAIT_RETRY:
+        current_status = "retry_pending"
+    if current_status in {"held", "failed", "retry_pending"}:
+        for item in node_items:
+            if item["id"] == current_node:
+                item["status"] = current_status
+                break
+
     return {
         "group_task_id": str(run.get("group_task_id") or ""),
         "group_id": str(run.get("group_id") or ""),
         "group_name": str(run.get("group_name") or ""),
         "run_status": status,
-        "execution_state": str(run.get("execution_state") or ""),
+        "execution_state": execution,
+        "has_started": _run_has_started(run),
+        "current_node": current_node,
+        "current_node_label": _NODE_LABELS.get(current_node, "读取群消息"),
+        "node_status": current_status,
+        "nodes": node_items,
         "last_successful_checkpoint": str(run.get("last_successful_checkpoint") or ""),
         "next_retry_at": str(run.get("next_retry_at") or ""),
         "retry_attempt_count": int(run.get("retry_attempt_count") or 0),
         "retry_budget": int(run.get("retry_budget") or 0),
-        "data": {"status": _step_status(run, 1, "fetch")},
-        "ranking": {"status": _step_status(run, 2, "ranking")},
+        "data": {
+            "status": next(item["status"] for item in node_items if item["id"] == "data")
+        },
+        "ranking": {
+            "status": next(item["status"] for item in node_items if item["id"] == "ranking")
+        },
         "summary": {
-            "status": _step_status(run, 3, "prompt"),
+            "status": next(item["status"] for item in node_items if item["id"] == "prompt"),
             "model": str((run.get("prompt_meta") or {}).get("api_model") or "")
             if isinstance(run.get("prompt_meta"), dict)
             else "",
         },
-        "prompt": {"status": _step_status(run, 3, "prompt")},
+        "prompt": {
+            "status": next(item["status"] for item in node_items if item["id"] == "prompt")
+        },
         "image": {
-            "status": _step_status(run, 4, "image"),
+            "status": next(item["status"] for item in node_items if item["id"] == "image"),
+            "job_status": str((run.get("image_job") or {}).get("status") or "")
+            if isinstance(run.get("image_job"), dict)
+            else "",
             "attempts": int(run.get("image_attempt_count") or 0),
             "fallback_level": int(run.get("image_fallback_level") or 0),
         },
@@ -108,21 +331,59 @@ def _group_snapshot(run: dict) -> dict:
             "retry_budget": int(run.get("send_retry_budget") or 0),
         },
         "last_error_type": str(
-            run.get("last_error_type") or run.get("error_type") or run.get("send_error_type") or ""
+            run.get("last_error_type")
+            or run.get("error_type")
+            or run.get("send_error_type")
+            or run.get("prompt_hold_reason")
+            or run.get("send_hold_reason")
+            or ""
         ),
         "last_error_summary": str(
-            run.get("last_error_summary") or run.get("error") or run.get("send_error") or ""
+            run.get("last_error_summary")
+            or run.get("error")
+            or run.get("send_error")
+            or run.get("prompt_operation_error")
+            or run.get("prompt_hold_reason")
+            or run.get("send_hold_reason")
+            or ""
         )[:300],
         "updated_at": str(run.get("updated_at") or ""),
     }
 
 
-def write_daily_status(store: RunStore, run_date: str) -> Path:
+def build_daily_status(
+    store: RunStore,
+    run_date: str,
+    *,
+    runs: Iterable[dict] | None = None,
+    output_root: Path | None = None,
+    schedule_generate_time: str = "00:15",
+    app_timezone: str = "Asia/Shanghai",
+) -> dict:
+    """只读构建每日运行投影；不会写回 scheduler 或 run.json。"""
+
     run_date = validate_run_date(run_date)
-    scheduler = _scheduler_snapshot(store, run_date)
-    groups = [_group_snapshot(run) for run in store.list_runs(run_date)]
+    resolved_output_root = Path(output_root) if output_root is not None else store.root
+    scheduler = _scheduler_snapshot(resolved_output_root, run_date)
+    scheduler_status = str(scheduler.get("generation_status") or "").lower()
+    scheduler_active = scheduler_status in _ACTIVE_SCHEDULER_STATUSES
+    scheduler_started = bool(
+        scheduler.get("generation_started_at")
+        or scheduler.get("generation_completed_at")
+        or scheduler_active
+    )
+    selected_runs = runs if runs is not None else store.list_runs(run_date)
+    raw_runs = [dict(run) for run in selected_runs if isinstance(run, dict)]
+    groups = [
+        _group_snapshot(
+            run,
+            scheduler_active=scheduler_active,
+            scheduler_started=scheduler_started,
+        )
+        for run in raw_runs
+    ]
     groups.sort(key=lambda item: (item["group_id"], item["group_name"]))
-    states = {item["execution_state"] for item in groups}
+    states = {item["execution_state"] for item in groups if item["has_started"]}
     expected_rows = scheduler.get("expected_groups")
     has_manifest = isinstance(expected_rows, list)
     expected_rows = expected_rows if has_manifest else []
@@ -131,7 +392,11 @@ def write_daily_status(store: RunStore, run_date: str) -> Path:
         for item in expected_rows
         if isinstance(item, dict) and item.get("group_id") is not None
     }
-    actual_by_id = {item["group_id"]: item for item in groups if item["group_id"]}
+    actual_by_id = {
+        item["group_id"]: item
+        for item in groups
+        if item["group_id"] and item["has_started"]
+    }
     missing_expected_ids = sorted(set(expected_by_id) - set(actual_by_id))
 
     def reached_expected(group_id: str, item: dict) -> bool:
@@ -154,32 +419,89 @@ def write_daily_status(store: RunStore, run_date: str) -> Path:
     )
     external_call_count = sum(
         int(item.get("external_call_count") or 0)
-        for item in store.list_runs(run_date)
-        if isinstance(item, dict)
+        for item in raw_runs
     )
     actual_providers = sorted(
         {
             str(item.get(field) or "").strip()
-            for item in store.list_runs(run_date)
-            if isinstance(item, dict)
+            for item in raw_runs
             for field in ("summary_provider_actual", "prompt_provider_actual")
             if str(item.get(field) or "").strip()
         }
     )
-    if not has_manifest and (groups or scheduler):
+    started_count = sum(1 for item in groups if item["has_started"])
+    failed_count = sum(
+        1
+        for item in groups
+        if item["execution_state"] == EXECUTION_FAILED_FINAL or item["node_status"] == "failed"
+    )
+    corrupt = scheduler.get("state_status") == "corrupt" or any(
+        item["run_status"] == CORRUPT for item in groups
+    )
+    any_group_running = any(item["node_status"] == "running" for item in groups)
+
+    if corrupt:
+        overall = "needs_attention"
+    elif scheduler_active or any_group_running:
+        overall = "running"
+    elif manual_count:
+        overall = "blocked"
+    elif retry_count or EXECUTION_WAIT_RETRY in states:
+        overall = "retry_pending"
+    elif failed_count:
+        overall = "failed"
+    elif not has_manifest and (started_count or scheduler_started):
         overall = "needs_attention"
     elif missing_expected_ids:
         overall = "needs_attention"
     elif expected_by_id and completed_count == len(expected_by_id):
         overall = "complete"
-    elif manual_count:
-        overall = "blocked"
-    elif completed_count and (retry_count or groups):
+    elif completed_count or (started_count and scheduler.get("generation_completed_at")):
         overall = "partial"
-    elif "WAIT_RETRY" in states or groups or expected_by_id:
+    elif started_count or scheduler_started:
         overall = "running"
     else:
         overall = "not_started"
+
+    configured_group_count = max(len(groups), len(expected_by_id))
+    scheduler_node_status = "pending"
+    if scheduler.get("state_status") == "corrupt" or scheduler.get("generation_hold"):
+        scheduler_node_status = "held"
+    elif scheduler_started:
+        scheduler_node_status = "running" if scheduler_active and not started_count else "success"
+
+    nodes = [
+        {
+            "id": "scheduler",
+            "label": _NODE_LABELS["scheduler"],
+            "status": scheduler_node_status,
+            "completed_groups": configured_group_count if scheduler_started else 0,
+            "total_groups": configured_group_count,
+        }
+    ]
+    for node_id, label, _, _ in _NODE_DEFINITIONS[1:]:
+        statuses = [
+            next(node["status"] for node in group["nodes"] if node["id"] == node_id)
+            for group in groups
+        ]
+        nodes.append(
+            {
+                "id": node_id,
+                "label": label,
+                "status": _aggregate_node_status(statuses),
+                "completed_groups": sum(1 for status in statuses if status == "success"),
+                "total_groups": configured_group_count,
+            }
+        )
+
+    scheduler = {
+        **scheduler,
+        "scheduled_at": _scheduled_at(
+            run_date,
+            schedule_generate_time,
+            app_timezone,
+        ),
+    }
     payload = {
         "schema_version": 2,
         "run_date": run_date,
@@ -190,6 +512,7 @@ def write_daily_status(store: RunStore, run_date: str) -> Path:
         "summary": {
             "expected_group_count": len(expected_by_id),
             "discovered_group_count": len(actual_by_id),
+            "configured_group_count": configured_group_count,
             "completed_group_count": completed_count,
             "retry_group_count": retry_count,
             "manual_group_count": manual_count,
@@ -198,8 +521,15 @@ def write_daily_status(store: RunStore, run_date: str) -> Path:
             "external_call_count": external_call_count,
             "actual_providers": actual_providers,
         },
+        "nodes": nodes,
         "groups": groups,
     }
+    return payload
+
+
+def write_daily_status(store: RunStore, run_date: str) -> Path:
+    run_date = validate_run_date(run_date)
+    payload = build_daily_status(store, run_date)
     runtime_root = store.root.parent / "runtime"
     path = runtime_root / run_date / "status.json"
     path.parent.mkdir(parents=True, exist_ok=True)

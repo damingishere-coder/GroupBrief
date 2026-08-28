@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { confirmRecovery, get, getDashboard, getRuns, pipelineGenerate, pipelineSend, readV2JsonFile, resolveManualSend, resolvePromptUnknown, resolveSendUnknown } from "./api";
+import { confirmRecovery, get, getDashboard, getRuns, getRuntimeLogs, pipelineGenerate, pipelineSend, readV2JsonFile, resolveManualSend, resolvePromptUnknown, resolveSendUnknown } from "./api";
 
 function response(body: unknown, options: { ok?: boolean; status?: number; raw?: string } = {}): Response {
   return {
@@ -132,6 +132,22 @@ describe("frontend API contract", () => {
 
     expect(fetchMock).toHaveBeenCalledWith(
       "/api/v2/dashboard?run_date=2026-08-25",
+      expect.any(Object),
+    );
+  });
+
+  it("requests safe structured runtime logs with explicit filters", async () => {
+    const fetchMock = vi.fn(async () => response({ items: [] }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await getRuntimeLogs("2026-08-25", {
+      tail: 100,
+      sources: "provider",
+      levels: "WARNING",
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v2/runtime/logs?run_date=2026-08-25&tail=100&sources=provider&levels=WARNING",
       expect.any(Object),
     );
   });

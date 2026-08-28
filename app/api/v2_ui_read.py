@@ -7,7 +7,7 @@ from datetime import date, datetime
 from pathlib import Path
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse
 from sqlmodel import Session
 
@@ -21,6 +21,8 @@ from app.api.v2_ui_common import (
 from app.config.settings import Settings, get_settings
 from app.db import repository as repo
 from app.scheduler.period import PeriodResolver
+from app.scheduler.runtime_status import build_daily_status
+from app.services.runtime_logs import read_runtime_logs
 from app.v2.constants import FILE_IMAGE
 from app.v2.run_store import validate_run_date
 
@@ -48,10 +50,15 @@ def dashboard(
     groups = repo.list_groups(session, only_enabled=True)
 
     cards: list[dict] = []
+    runtime_runs: list[dict] = []
     counts = {"pending": 0, "generated": 0, "sent": 0, "failed": 0, "held": 0}
     for group in groups:
         name = group.display_name or group.wechat_group_name
         run = store.load_run(name, selected_run_date)
+        runtime_run = dict(run)
+        runtime_run.setdefault("group_id", str(group.id or ""))
+        runtime_run.setdefault("group_name", name)
+        runtime_runs.append(runtime_run)
         status = run.get("status", "PENDING")
         image_path = store.image_path(name, selected_run_date)
         image_url = ""
@@ -166,20 +173,19 @@ def dashboard(
         earliest, name = min(upcoming, key=lambda item: item[0])
         next_send = f"{earliest.strftime('%H:%M')}（{name}）"
 
-    runtime_status = {"overall_status": "not_started", "summary": {}}
-    store_root = getattr(store, "root", None)
-    if isinstance(store_root, Path):
-        runtime_path = store_root.parent / "runtime" / selected_run_date / "status.json"
-        try:
-            value = json.loads(runtime_path.read_text(encoding="utf-8"))
-            if isinstance(value, dict):
-                runtime_status = {
-                    "overall_status": str(value.get("overall_status") or "needs_attention"),
-                    "summary": value.get("summary") if isinstance(value.get("summary"), dict) else {},
-                    "updated_at": str(value.get("updated_at") or ""),
-                }
-        except (OSError, UnicodeError, json.JSONDecodeError):
-            pass
+    runtime_status = build_daily_status(
+        store,
+        selected_run_date,
+        runs=runtime_runs,
+        output_root=settings.output_dir,
+        schedule_generate_time=settings.schedule_generate_time,
+        app_timezone=settings.app_timezone,
+    )
+    daily_status = {
+        "overall_status": runtime_status["overall_status"],
+        "summary": runtime_status["summary"],
+        "updated_at": runtime_status["updated_at"],
+    }
 
     return {
         "today": selected_run_date,
@@ -190,9 +196,32 @@ def dashboard(
         "enabled_groups": len(cards),
         "counts": counts,
         "next_send": next_send,
-        "daily_status": runtime_status,
+        "daily_status": daily_status,
+        "runtime": runtime_status,
         "cards": cards,
     }
+
+
+@router.get("/runtime/logs")
+def runtime_logs(
+    run_date: str,
+    tail: int = Query(default=100, ge=1, le=200),
+    sources: str | None = None,
+    levels: str | None = None,
+    settings: Settings = Depends(get_settings),
+):
+    selected_run_date = _validate_run_date(run_date)
+    try:
+        return read_runtime_logs(
+            settings.logs_dir,
+            selected_run_date,
+            tail=tail,
+            sources=sources,
+            levels=levels,
+            app_timezone=settings.app_timezone,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.get("/runs")

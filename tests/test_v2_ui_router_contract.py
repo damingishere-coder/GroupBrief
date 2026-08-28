@@ -10,6 +10,7 @@ from app.config.settings import Settings
 
 EXPECTED_V2_UI_OPERATIONS = {
     ("GET", "/api/v2/dashboard", "dashboard_api_v2_dashboard_get"),
+    ("GET", "/api/v2/runtime/logs", "runtime_logs_api_v2_runtime_logs_get"),
     ("GET", "/api/v2/runs", "list_runs_api_v2_runs_get"),
     ("GET", "/api/v2/archive/groups", "archive_groups_api_v2_archive_groups_get"),
     ("GET", "/api/v2/runs/{group}/{run_date}", "run_detail_api_v2_runs__group___run_date__get"),
@@ -224,6 +225,17 @@ def test_dashboard_accepts_run_date_and_returns_top_five_ranking_preview(
     )
 
     assert result["today"] == result["run_date"] == "2026-08-25"
+    assert result["runtime"]["overall_status"] == "needs_attention"
+    assert [node["id"] for node in result["runtime"]["nodes"]] == [
+        "scheduler",
+        "data",
+        "ranking",
+        "prompt",
+        "image",
+        "send",
+    ]
+    assert result["runtime"]["groups"][0]["current_node"] == "prompt"
+    assert result["daily_status"]["overall_status"] == result["runtime"]["overall_status"]
     assert len(result["cards"][0]["ranking_preview"]) == 5
     assert result["cards"][0]["ranking_preview"][0] == {
         "rank": 1,
