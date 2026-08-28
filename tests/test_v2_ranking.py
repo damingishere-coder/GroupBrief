@@ -10,10 +10,16 @@ from datetime import datetime
 
 from app.data_sources.base import V2Message
 from app.ranking.engine import RankingEngine
+from app.ranking.policies import uses_strict_image_fact_contract
 
 engine = RankingEngine()
 PERIOD_START = "2026-08-17 00:00:00"
 PERIOD_END = "2026-08-17 23:59:59"
+
+
+def test_strict_image_fact_contract_is_policy_driven_for_every_group():
+    assert uses_strict_image_fact_contract("text_primary_with_interactions") is True
+    assert uses_strict_image_fact_contract("all_messages") is False
 
 
 def _msg(

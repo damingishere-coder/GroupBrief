@@ -131,6 +131,38 @@ def test_render_text_primary_shows_text_and_interactions():
     assert text == "1.深圳-UI-白白【文字 1｜互动 2】"
 
 
+def test_text_interactions_template_appends_approved_explanation_once():
+    result = RankingResult(
+        group_name="测试群",
+        period_start="2026-08-28 00:00:00",
+        period_end="2026-08-28 23:59:59",
+        speaker_count=1,
+        message_count=3,
+        count_policy="text_primary_with_interactions",
+        text_message_count=1,
+        interaction_message_count=2,
+        text_speaker_count=1,
+        top_speakers=[
+            TopSpeaker(
+                rank=1,
+                name="群友",
+                count=1,
+                text_count=1,
+                interaction_count=2,
+                name_source="wechat_data_analysis",
+            )
+        ],
+    )
+
+    text = RankingRenderer().render(result, template_name="text_interactions")
+    explanation = "说明：互动指图片、表情、引用等非文字消息，仅展示活跃度，不影响排名。"
+
+    assert text.count(explanation) == 1
+    assert text.rstrip().endswith(explanation)
+    assert text.index("1.群友【文字 1｜互动 2】") < text.index(explanation)
+    assert explanation not in render_ranking(result, DEFAULT_RANKING_TEMPLATE)
+
+
 def test_render_top15_heading_and_lines():
     result = RankingResult(
         group_name="周末群",

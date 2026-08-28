@@ -2685,6 +2685,14 @@ textarea:focus-visible {
   white-space: nowrap;
 }
 
+.ranking-interaction-note,
+.dashboard-ranking-interaction-note {
+  margin: 10px 0 0;
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.55;
+}
+
 .ranking-text-block pre,
 .template-preview-box pre,
 .ai-images-prompt-card pre {
@@ -6350,6 +6358,11 @@ textarea:focus-visible {
 
 .dashboard-ranking-preview li em {
   font-style: normal;
+}
+
+.dashboard-ranking-interaction-note {
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
 }
 
 .dashboard-ranking-empty {

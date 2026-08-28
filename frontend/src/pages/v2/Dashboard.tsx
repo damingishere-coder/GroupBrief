@@ -31,6 +31,11 @@ import { useFetch, useToast } from "../../components/ui";
 import { navigateToHash } from "../../navigation";
 import { shanghaiDateInputValue } from "../../date";
 import { AnimatePresence, m, MOTION_EASE } from "../../components/motion";
+import {
+  formatRankingCount,
+  INTERACTION_EXPLANATION,
+  isTextPrimaryRanking,
+} from "./rankingPolicy";
 
 const STATUS_META: Record<string, { label: string; tone: "success" | "warning" | "danger" | "info" | "neutral" }> = {
   PENDING: { label: "待生成", tone: "warning" },
@@ -495,13 +500,16 @@ export default function Dashboard() {
                   <section className="dashboard-ranking-preview" aria-label={`${card.group_name} Top 5 排行榜`}>
                     <div className="dashboard-task-content-head"><strong>Top 5 排行榜</strong><span>{card.ranking_preview?.length ? "ranking.json" : "暂无排行"}</span></div>
                     {card.ranking_preview?.length ? (
-                      <ol>
-                        {(card.ranking_preview || []).map((speaker) => (
-                          <li key={`${speaker.rank}-${speaker.name}`}>
-                            <span>{speaker.rank}</span><strong>{speaker.name}</strong><em>{card.ranking_count_policy === "text_primary_with_interactions" ? `文字 ${speaker.text_count}｜互动 ${speaker.interaction_count}` : `${speaker.count} 条`}</em>
-                          </li>
-                        ))}
-                      </ol>
+                      <>
+                        <ol>
+                          {(card.ranking_preview || []).map((speaker) => (
+                            <li key={`${speaker.rank}-${speaker.name}`}>
+                              <span>{speaker.rank}</span><strong>{speaker.name}</strong><em>{formatRankingCount(card.ranking_count_policy, speaker)}</em>
+                            </li>
+                          ))}
+                        </ol>
+                        {isTextPrimaryRanking(card.ranking_count_policy) && <p className="dashboard-ranking-interaction-note">{INTERACTION_EXPLANATION}</p>}
+                      </>
                     ) : <div className="dashboard-ranking-empty">{card.ranking_error || "尚未生成结构化排行榜"}</div>}
                   </section>
                   <section className="dashboard-image-preview" aria-label={`${card.group_name} AI 图片`}>
