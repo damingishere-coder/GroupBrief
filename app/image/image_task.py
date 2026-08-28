@@ -106,27 +106,9 @@ def verify_image(path: Path) -> tuple[bool, str]:
 
 
 def verify_image_contract(prompt_file: Path, image_path: Path) -> tuple[bool, str]:
-    """固定漫画 Prompt 声明 1024×1536 时，拒绝用裁切或错尺寸图片补救。"""
-    ok, detail = verify_image(image_path)
-    if not ok:
-        return ok, detail
-    try:
-        prompt = prompt_file.read_text(encoding="utf-8")
-    except (OSError, UnicodeError):
-        prompt = ""
-    if "1024×1536" not in prompt and "1024x1536" not in prompt.lower():
-        return True, detail
-    try:
-        from PIL import Image
-
-        with Image.open(image_path) as image:
-            image.load()
-            width, height = image.size
-    except Exception as exc:
-        return False, f"无法读取图片尺寸：{exc}"
-    if (width, height) != (1024, 1536):
-        return False, f"图片尺寸必须为 1024×1536，实际为 {width}×{height}；禁止裁切补救"
-    return True, f"{detail}；尺寸 {width}×{height}"
+    """校验群报图片完整性；Prompt 中的画布尺寸仅作为生成偏好。"""
+    _ = prompt_file  # 保留参数以兼容现有调用方；不再把 Prompt 尺寸当作硬门槛。
+    return verify_image(image_path)
 
 
 def copy_generated_image(src: Path, dst: Path) -> None:

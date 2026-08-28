@@ -452,12 +452,6 @@ class CodexImageGenerator:
             prompt_text = prompt_file.read_text(encoding="utf-8")
         except (OSError, UnicodeError) as exc:
             return ImageTaskResult(False, error=f"无法读取 image_prompt.txt：{exc}", detail={"stage": "input"})
-        required_size = (
-            (1024, 1536)
-            if "1024×1536" in prompt_text or "1024x1536" in prompt_text.lower()
-            else None
-        )
-
         # 任务哈希按磁盘原始字节创建；Windows 的 read_text 会把 CRLF 规范化
         # 为 LF，不能再对解码后的文本计算哈希，否则内容未变也会被误判。
         actual_prompt_sha256 = hashlib.sha256(prompt_file.read_bytes()).hexdigest()
@@ -540,7 +534,6 @@ class CodexImageGenerator:
                     attempts=recovered_history,
                     manifest_path=manifest_path,
                     attempt=previous,
-                    required_size=required_size,
                 )
                 if recovered is not None:
                     return recovered
@@ -607,7 +600,6 @@ class CodexImageGenerator:
                     attempts=recovered_history,
                     manifest_path=manifest_path,
                     attempt=previous,
-                    required_size=required_size,
                 )
                 if recovered is not None:
                     return recovered
@@ -710,7 +702,6 @@ class CodexImageGenerator:
                 attempts=history,
                 manifest_path=manifest_path,
                 attempt=attempt,
-                required_size=required_size,
             )
             audit = self._attempt_audit(attempt, outcome, reason, diagnostics, exit_code)
             history.append(audit)
@@ -901,8 +892,8 @@ class CodexImageGenerator:
             "$imagegen " + prompt_text + "\n\n"
             f"本次生图任务 ID 是 {job_id}。"
             "只为本次任务调用一次 ImageGen，并只生成、选择一张最终图片。"
-            "最终图片的原始画布必须精确为 1024×1536 像素、严格 2:3 比例；"
-            "不得选择 9:19 超长手机截图比例或 864×1821 画布，不得依靠裁切补救。"
+            "优先使用 1024×1536 像素的竖版 2:3 画布；"
+            "只要图片完整可读，其他竖版尺寸也可以直接采用，不要为了匹配尺寸裁切或拉伸。"
             "不要读取、引用或复用任何已有图片，也不要复制或另存生成结果。"
             "最终回复必须严格符合 output schema，在 job_id 中逐字返回本次任务 ID，并在 image_path 中返回 "
             "ImageGen 产生的这张最终图片当前存在的绝对路径。"
@@ -1255,16 +1246,11 @@ class CodexImageGenerator:
         attempts: list[dict],
         manifest_path: Path,
         attempt: dict,
-        required_size: tuple[int, int] | None = None,
     ) -> ImageTaskResult | None:
         if source is None:
             return None
         try:
-            image_detail = self._promote_valid_image(
-                source,
-                output_path,
-                required_size=required_size,
-            )
+            image_detail = self._promote_valid_image(source, output_path)
         except Exception:
             logger.warning("候选图片验证失败，将按有限重试策略继续", exc_info=True)
             return None
@@ -1399,8 +1385,6 @@ class CodexImageGenerator:
     def _promote_valid_image(
         source: Path,
         output_path: Path,
-        *,
-        required_size: tuple[int, int] | None = None,
     ) -> dict:
         from PIL import Image
 
@@ -1414,11 +1398,6 @@ class CodexImageGenerator:
                 width, height = image.size
                 if width <= 0 or height <= 0:
                     raise ValueError(f"图片尺寸无效：{width}x{height}")
-                if required_size is not None and (width, height) != required_size:
-                    raise ValueError(
-                        f"图片尺寸必须为 {required_size[0]}×{required_size[1]}，"
-                        f"实际为 {width}×{height}；禁止裁切补救"
-                    )
                 image.convert("RGB").save(temp_path, format="PNG")
             ok, detail = verify_image(temp_path)
             if not ok:

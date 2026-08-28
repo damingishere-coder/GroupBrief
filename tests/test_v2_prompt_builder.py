@@ -278,8 +278,9 @@ def test_ai_free_does_not_inject_daily_style_library():
     assert output.success
     assert output.meta["style_intervention"] is False
     assert output.prompt.count("根据当天真实聊天内容自由选择统一视觉风格。") == 1
-    assert "原生画布比例严格为 2:3" in output.prompt
-    assert "不得生成 9:19" in output.prompt
+    assert "优先采用 1024×1536、2:3 画布" in output.prompt
+    assert "其他完整可读的竖版尺寸也可以采用" in output.prompt
+    assert "不要为了匹配尺寸裁切或拉伸" in output.prompt
     assert "本次手动视觉风格" not in output.prompt
     assert "daily-style-v3" not in output.prompt
 

@@ -19,7 +19,12 @@ from app.config.settings import Settings
 from app.core.logging import get_logger
 from app.image.codex_generator import CodexImageGenerator
 from app.image.image_task import ImageTaskResult, verify_image_contract
-from app.v2.constants import READY_TO_SEND, SENT
+from app.v2.constants import (
+    IMAGE_FILE_MISSING,
+    IMAGE_GENERATION_FAILED,
+    READY_TO_SEND,
+    SENT,
+)
 from app.v2.run_store import RunStore
 
 _EXECUTOR = ThreadPoolExecutor(max_workers=6, thread_name_prefix="groupbrief-image-regen")
@@ -207,6 +212,9 @@ def _promote_image(
     os.replace(staging, target)
     current = store.load_run(group_name, run_date)
     next_status = SENT if current.get("status") == SENT else READY_TO_SEND
+    success_fields: dict[str, Any] = {}
+    if str(current.get("error_type") or "") in {IMAGE_GENERATION_FAILED, IMAGE_FILE_MISSING}:
+        success_fields.update(error=None, error_type=None, failed_stage=None)
     store.update(
         group_name,
         run_date,
@@ -223,6 +231,7 @@ def _promote_image(
         image_recovery_status=recovery_status,
         image_size_bytes=target.stat().st_size,
         image_sha256=_sha256(target),
+        **success_fields,
     )
     return store.load_run(group_name, run_date)
 

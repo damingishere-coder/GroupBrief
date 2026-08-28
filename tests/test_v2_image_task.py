@@ -385,8 +385,9 @@ def test_codex_prompt_uses_stdin_and_explicit_output_contract(tmp_path, monkeypa
     assert "包含引号" in captured["input"]
     assert "复制到这个精确路径" not in captured["input"]
     assert "不要复制或另存" in captured["input"]
-    assert "严格 2:3 比例" in captured["input"]
-    assert "不得选择 9:19" in captured["input"]
+    assert "优先使用 1024×1536" in captured["input"]
+    assert "其他竖版尺寸也可以直接采用" in captured["input"]
+    assert "不要为了匹配尺寸裁切或拉伸" in captured["input"]
     assert "绝对路径" in captured["input"]
     assert result.detail["attempt_count"] == 1
     assert result.detail["recovery_status"] == "completed"
@@ -799,31 +800,34 @@ def test_codex_rejects_corrupt_image_without_overwriting_existing(tmp_path, monk
     assert output.read_bytes() == original
 
 
-def test_codex_holds_wrong_dimensions_without_second_generation(tmp_path, monkeypatch):
+def test_codex_accepts_valid_non_default_dimensions_without_second_generation(tmp_path, monkeypatch):
     generator, prompt = _codex_test_generator(tmp_path, monkeypatch)
-    prompt.write_text("生成 1024×1536 固定群聊漫画", encoding="utf-8")
+    prompt.write_text("优先生成 1024×1536 群聊漫画", encoding="utf-8")
     calls = 0
 
     def fake_run(command, **kwargs):
         nonlocal calls
         calls += 1
         _, result_path = _attempt_paths(command)
-        generated = tmp_path / "generated_images" / f"wrong-size-{calls}" / "final.png"
+        generated = tmp_path / "generated_images" / f"flexible-size-{calls}" / "final.png"
         generated.parent.mkdir()
-        generated.write_bytes(_PNG_1PX + bytes([calls]))
+        Image.new("RGB", (864, 1821), (30, 60, 90)).save(generated, format="PNG")
         _write_receipt(result_path, generated.resolve())
         return _Proc()
 
     monkeypatch.setattr(codex_generator, "_run_codex_process", fake_run)
     output = prompt.parent / "daily_image.png"
-    result = generator.generate(prompt, output, job_id="job-wrong-size-001")
+    result = generator.generate(prompt, output, job_id="job-flexible-size-001")
 
-    assert result.success is False
+    assert result.success is True
     assert calls == 1
-    assert not output.exists()
-    assert result.detail["outcome_unknown"] is True
-    assert result.detail["recovery_status"] == "invalid_candidate_hold"
-    assert "禁止自动重试" in result.error
+    assert output.exists()
+    with Image.open(output) as image:
+        image.load()
+        assert image.size == (864, 1821)
+    assert result.detail["recovery_status"] == "completed"
+    assert result.detail["width"] == 864
+    assert result.detail["height"] == 1821
 
 
 def test_codex_timeout_terminates_process_tree(monkeypatch):

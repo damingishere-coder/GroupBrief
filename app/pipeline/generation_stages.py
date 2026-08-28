@@ -730,7 +730,7 @@ class GenerationStages:
                     fallback_prompt = (
                         "【任务】\n"
                         "外部内容整理失败，仅使用当天 ranking.json 生成本地简化信息图。\n"
-                        "【画布】\n1024×1536\n"
+                        "【画布】\n优先 1024×1536；其他完整可读的竖版尺寸也可接受\n"
                     )
                     self.store.prompt_path(context.group_name, context.run_date).write_text(
                         fallback_prompt,

@@ -15,14 +15,18 @@ from app.image.regeneration import claim_regeneration_candidate, list_regenerati
 from app.v2.run_store import RunStore
 
 
-def _png_bytes(color: tuple[int, int, int, int]) -> bytes:
+def _png_bytes(
+    color: tuple[int, int, int, int],
+    size: tuple[int, int] = (2, 2),
+) -> bytes:
     buffer = BytesIO()
-    Image.new("RGBA", (2, 2), color).save(buffer, format="PNG")
+    Image.new("RGBA", size, color).save(buffer, format="PNG")
     return buffer.getvalue()
 
 
 OLD_PNG = _png_bytes((20, 40, 60, 255))
 NEW_PNG = _png_bytes((80, 100, 120, 255))
+FLEXIBLE_SIZE_PNG = _png_bytes((100, 120, 140, 255), (864, 1821))
 
 
 class SuccessGenerator:
@@ -158,7 +162,7 @@ def test_two_different_runs_can_regenerate_concurrently(tmp_path):
     assert states == ["ready_for_review", "ready_for_review"]
 
 
-def test_ambiguous_candidate_requires_explicit_job_and_hash_claim(tmp_path):
+def test_non_default_size_candidate_requires_exact_claim_and_keeps_send_hold(tmp_path):
     settings = SimpleNamespace(
         output_dir=tmp_path,
         codex_path="",
@@ -177,14 +181,20 @@ def test_ambiguous_candidate_requires_explicit_job_and_hash_claim(tmp_path):
             "sent_at": "2026-08-21 09:00:00",
             "group_id": 23,
             "wechat_group_id": "wx-group-23",
+            "failed_stage": "image",
+            "error": "旧的固定尺寸失败",
+            "error_type": "IMAGE_GENERATION_FAILED",
         },
     )
-    store.prompt_path(group, run_date).write_text("真实 Prompt", encoding="utf-8")
+    store.prompt_path(group, run_date).write_text(
+        "优先使用 1024×1536；其他完整可读的竖版尺寸也可接受",
+        encoding="utf-8",
+    )
     store.image_path(group, run_date).write_bytes(OLD_PNG)
     candidate = store.group_dir(group, run_date) / ".imagegen-jobs" / job_id / "candidate.png"
     candidate.parent.mkdir(parents=True)
-    candidate.write_bytes(NEW_PNG)
-    digest = hashlib.sha256(NEW_PNG).hexdigest().upper()
+    candidate.write_bytes(FLEXIBLE_SIZE_PNG)
+    digest = hashlib.sha256(FLEXIBLE_SIZE_PNG).hexdigest().upper()
     store.update(
         group,
         run_date,
@@ -199,7 +209,7 @@ def test_ambiguous_candidate_requires_explicit_job_and_hash_claim(tmp_path):
                 "sha256": digest,
                 "root": "task",
                 "relative_path": f".imagegen-jobs/{job_id}/candidate.png",
-                "size_bytes": len(NEW_PNG),
+                "size_bytes": len(FLEXIBLE_SIZE_PNG),
                 "sources": ["scan"],
             }],
         },
@@ -223,9 +233,18 @@ def test_ambiguous_candidate_requires_explicit_job_and_hash_claim(tmp_path):
         job_id=job_id,
         candidate_id=digest.lower(),
     )
-    assert store.image_path(group, run_date).read_bytes() == NEW_PNG
+    assert store.image_path(group, run_date).read_bytes() == FLEXIBLE_SIZE_PNG
     assert store.previous_image_path(group, run_date).read_bytes() == OLD_PNG
+    with Image.open(store.image_path(group, run_date)) as image:
+        image.load()
+        assert image.size == (864, 1821)
     assert run["status"] == "SENT"
     assert run["sent_at"] == "2026-08-21 09:00:00"
     assert run["image_regen_status"] == "ready_for_review"
     assert run["send_hold"] is True
+    assert run["needs_manual_send"] is True
+    assert run["failed_stage"] is None
+    assert run["error"] is None
+    assert run["error_type"] is None
+    assert run["image_regen_job"]["claimed_candidate"]["candidate_id"] == digest.lower()
+    assert run["image_regen_job"]["candidates"] == []
