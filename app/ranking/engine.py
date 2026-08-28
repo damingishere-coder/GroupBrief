@@ -55,7 +55,12 @@ class RankingEngine:
         normalized_name_source = normalize_sender_name_policy(name_source)
         countable_messages = [message for message in messages if self._countable(message)]
         speakers = build_speaker_stats(
-            (message.sender_id, message.sender_name) for message in countable_messages
+            (
+                message.sender_id,
+                message.sender_name,
+                message.sender_name_source == "contact",
+            )
+            for message in countable_messages
         )
         text_counts: Counter[tuple[str, str]] = Counter()
         interaction_counts: Counter[tuple[str, str]] = Counter()

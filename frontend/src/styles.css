@@ -2673,11 +2673,12 @@ textarea:focus-visible {
 }
 
 .ranking-top-list li strong {
-  overflow: hidden;
+  min-width: 0;
   color: var(--text);
   font-weight: 600;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 
 .ranking-top-list li > span:last-child {
@@ -6350,14 +6351,16 @@ textarea:focus-visible {
 }
 
 .dashboard-ranking-preview li strong {
-  overflow: hidden;
+  min-width: 0;
   color: var(--text);
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 
 .dashboard-ranking-preview li em {
   font-style: normal;
+  white-space: nowrap;
 }
 
 .dashboard-ranking-interaction-note {

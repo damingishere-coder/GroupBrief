@@ -175,6 +175,16 @@ def test_identity_uses_sender_id_and_counts_supported_forward_types():
     assert renamed.count == 2
 
 
+def test_trusted_contact_name_matching_sender_id_casefold_remains_visible():
+    message = _msg("EXALEX", i=1, sender_id="exalex")
+    message.sender_name_source = "contact"
+
+    result = engine.compute([message], "测试群", PERIOD_START, PERIOD_END)
+
+    assert result.speaker_count == 1
+    assert result.top_speakers[0].name == "EXALEX"
+
+
 def test_deterministic():
     messages = [_msg(f"用户{n}", i=n) for n in range(12)]
     r1 = engine.compute(messages, "测试群", PERIOD_START, PERIOD_END)

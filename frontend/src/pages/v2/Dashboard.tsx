@@ -504,7 +504,7 @@ export default function Dashboard() {
                         <ol>
                           {(card.ranking_preview || []).map((speaker) => (
                             <li key={`${speaker.rank}-${speaker.name}`}>
-                              <span>{speaker.rank}</span><strong>{speaker.name}</strong><em>{formatRankingCount(card.ranking_count_policy, speaker)}</em>
+                              <span>{speaker.rank}</span><strong title={speaker.name}>{speaker.name}</strong><em>{formatRankingCount(card.ranking_count_policy, speaker)}</em>
                             </li>
                           ))}
                         </ol>

@@ -47,7 +47,7 @@ def test_mcp_and_export_keep_same_sender_display_name():
     }
 
 
-def test_latest_valid_upstream_name_wins_and_contact_name_is_ignored():
+def test_contact_resolution_is_not_overwritten_by_upstream_name():
     older = _to_v2_message(
         _mcp_to_raw(
             {
@@ -78,8 +78,8 @@ def test_latest_valid_upstream_name_wins_and_contact_name_is_ignored():
 
     apply_sender_name_policy([older, newer], "wechat_data_analysis")
 
-    assert older.sender_name == newer.sender_name == "最新昵称"
-    assert older.sender_name_source == newer.sender_name_source == "wechat_data_analysis"
+    assert older.sender_name == newer.sender_name == "联系人备注"
+    assert older.sender_name_source == newer.sender_name_source == "contact"
 
 
 def test_missing_names_are_stable_and_same_names_are_disambiguated():
@@ -123,3 +123,25 @@ def test_missing_names_are_stable_and_same_names_are_disambiguated():
     assert messages[1].sender_name == "同名（同名 2）"
     assert messages[2].sender_name.startswith("未命名成员-")
     assert messages[2].sender_name_source == "anonymous"
+
+
+def test_trusted_contact_name_matching_sender_id_casefold_is_preserved():
+    message = _to_v2_message(
+        _mcp_to_raw(
+            {
+                "id": "m-contact",
+                "senderUsername": "exalex",
+                "senderDisplayName": "exalex",
+                "renderType": "text",
+            },
+            "group@chatroom",
+            NOW,
+        )
+    )
+    message.sender_name = "EXALEX"
+    message.sender_name_source = "contact"
+
+    apply_sender_name_policy([message], "wechat_data_analysis")
+
+    assert message.sender_name == "EXALEX"
+    assert message.sender_name_source == "contact"

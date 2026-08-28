@@ -52,17 +52,25 @@ def speaker_name_sort_key(name: str) -> tuple[str, str]:
     return ((visible_core or str(name or "")).casefold(), str(name or ""))
 
 
-def _usable_name(name: str, key: IdentityKey) -> bool:
+def _usable_name(name: str, key: IdentityKey, *, trusted: bool = False) -> bool:
     normalized = name.strip()
     if not normalized or normalized.casefold() in {"none", "null", "(未知)", "未知"}:
         return False
-    return key[0] != "id" or normalized.casefold() != key[1].casefold()
+    return trusted or key[0] != "id" or normalized.casefold() != key[1].casefold()
 
 
-def build_speaker_stats(records: Iterable[tuple[object, object]]) -> list[SpeakerStat]:
-    """按身份聚合记录，并为重名身份生成不重复的确定性展示名。"""
+def build_speaker_stats(
+    records: Iterable[tuple[object, object] | tuple[object, object, object]],
+) -> list[SpeakerStat]:
+    """按身份聚合记录，并为重名身份生成不重复的确定性展示名。
+
+    第三个可选值表示名称来自可信解析源。联系人名称即使仅与微信 ID
+    大小写不同也应保留；未提供该标志的旧调用继续执行原有匿名保护。
+    """
     aggregated: dict[IdentityKey, dict[str, object]] = {}
-    for index, (sender_id, sender_name) in enumerate(records):
+    for index, record in enumerate(records):
+        sender_id, sender_name = record[0], record[1]
+        trusted = bool(record[2]) if len(record) > 2 else False
         key = speaker_identity_key(sender_id, sender_name)
         if key is None:
             continue
@@ -77,7 +85,7 @@ def build_speaker_stats(records: Iterable[tuple[object, object]]) -> list[Speake
             aggregated[key] = current
         current["count"] = int(current["count"]) + 1
         name = str(sender_name or "").strip()
-        if _usable_name(name, key):
+        if _usable_name(name, key, trusted=trusted):
             names = current["names"]
             name_first_index = current["name_first_index"]
             assert isinstance(names, Counter)

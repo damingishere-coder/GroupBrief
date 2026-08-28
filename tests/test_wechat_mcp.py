@@ -504,6 +504,85 @@ def test_shared_wrong_upstream_name_uses_contact_mapping(monkeypatch):
     assert result.meta["sender_name_contact_count"] == 2
 
 
+def test_group_card_wins_for_owner_and_member_without_card_uses_contact(monkeypatch):
+    fake = FakeMCPClient().on(
+        "wechat.chat.get_messages_range",
+        lambda params: {
+            "messages": [
+                _msg("m1", 1786420000, "jiangzhema123", "鲁布斯"),
+                _msg("m2", 1786420100, "to1900", "鲁布斯"),
+            ],
+            "hasMore": False,
+        },
+    )
+    provider = _provider(fake)
+    monkeypatch.setattr(
+        provider._contacts,
+        "group_nicknames",
+        lambda group_id, sender_ids: {"jiangzhema123": "鲁布斯"},
+    )
+    monkeypatch.setattr(
+        provider._contacts,
+        "resolve_name",
+        lambda sender_id: {"jiangzhema123": "春夏秋冬", "to1900": "罗斯"}.get(
+            sender_id, ""
+        ),
+    )
+
+    result = provider.fetch_messages("tea@chatroom", WINDOW_START, WINDOW_END)
+
+    assert result.status == ProviderStatus.OK
+    assert [message.sender_name for message in result.messages] == ["鲁布斯", "罗斯"]
+    assert [message.sender_name_source for message in result.messages] == [
+        "wechat_data_analysis",
+        "contact",
+    ]
+
+
+def test_contact_name_equal_to_sender_id_casefold_is_trusted(monkeypatch):
+    fake = FakeMCPClient().on(
+        "wechat.chat.get_messages_range",
+        lambda params: {
+            "messages": [_msg("m1", 1786420000, "exalex", "EXALEX")],
+            "hasMore": False,
+        },
+    )
+    provider = _provider(fake)
+    monkeypatch.setattr(provider._contacts, "group_nicknames", lambda *_: {})
+    monkeypatch.setattr(provider._contacts, "resolve_name", lambda _: "EXALEX")
+
+    result = provider.fetch_messages("grok@chatroom", WINDOW_START, WINDOW_END)
+
+    assert result.status == ProviderStatus.OK
+    assert result.messages[0].sender_name == "EXALEX"
+    assert result.messages[0].sender_name_source == "contact"
+
+
+def test_system_event_text_is_not_accepted_as_sender_name(monkeypatch):
+    fake = FakeMCPClient().on(
+        "wechat.chat.get_messages_range",
+        lambda params: {
+            "messages": [
+                _msg("m1", 1786420000, "liang763621", "群主邀请了“景甜”进入群聊")
+            ],
+            "hasMore": False,
+        },
+    )
+    provider = _provider(fake)
+    monkeypatch.setattr(
+        provider._contacts,
+        "group_nicknames",
+        lambda *_: {"liang763621": "群主邀请了“景甜”进入群聊"},
+    )
+    monkeypatch.setattr(provider._contacts, "resolve_name", lambda _: "意念合一")
+
+    result = provider.fetch_messages("grok@chatroom", WINDOW_START, WINDOW_END)
+
+    assert result.status == ProviderStatus.OK
+    assert result.messages[0].sender_name == "意念合一"
+    assert result.messages[0].sender_name_source == "contact"
+
+
 def test_mcp_camel_case_message_types_are_normalized_but_unknown_types_remain_unknown():
     assert _mcp_message_type("redPacket") == "red_packet"
     assert _mcp_message_type("chatHistory") == "chat_history"

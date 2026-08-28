@@ -26,7 +26,7 @@ from pathlib import Path
 
 from app.config.settings import Settings, get_settings
 from app.core.logging import get_logger
-from app.providers.history.contact_resolver import ContactResolver
+from app.providers.history.contact_resolver import ContactResolver, is_plausible_group_card
 from app.providers.history.base import (
     ChatHistoryProvider,
     FetchResult,
@@ -289,7 +289,11 @@ class WeChatDataAnalysisProvider(ChatHistoryProvider):
 
         if not messages:
             return FetchResult(self.name, group_id, [], ProviderStatus.EMPTY_RESULT, "该时间段无消息")
-        return FetchResult(self.name, group_id, messages, ProviderStatus.OK)
+        messages.sort(key=lambda item: (item.timestamp, item.source_message_id))
+        stats: dict = {"read_strategy": "export"}
+        _resolve_sender_names(messages, self._contacts, group_id, stats)
+        stats["message_count"] = len(messages)
+        return FetchResult(self.name, group_id, messages, ProviderStatus.OK, meta=stats)
 
     def _fetch_messages_mcp(
         self,
@@ -359,7 +363,7 @@ class WeChatDataAnalysisProvider(ChatHistoryProvider):
             )
 
         messages.sort(key=lambda item: (item.timestamp, item.source_message_id))
-        _resolve_sender_names(messages, self._contacts, stats)
+        _resolve_sender_names(messages, self._contacts, group_id, stats)
         stats["fetch_elapsed_ms"] = round((perf_counter() - started_at) * 1000)
         stats["message_count"] = len(messages)
         if not messages:
@@ -602,7 +606,10 @@ def _sanitize_sender_name(value: object) -> str:
 
 
 def _usable_sender_name(name: str, sender_id: str) -> bool:
-    if not name or name.lower() in {"none", "null", "(未知)", "未知"}:
+    if (
+        not is_plausible_group_card(name)
+        or name.lower() in {"none", "null", "(未知)", "未知"}
+    ):
         return False
     return not sender_id or name.casefold() != sender_id.strip().casefold()
 
@@ -613,10 +620,19 @@ def _anonymous_sender_name(sender_id: str) -> str:
 
 
 def _resolve_sender_names(
-    messages: list[RawMessage], contacts: ContactResolver, stats: dict | None = None
+    messages: list[RawMessage],
+    contacts: ContactResolver,
+    group_id: str,
+    stats: dict | None = None,
 ) -> None:
-    """拆分上游错误共享昵称，并为所有身份生成唯一、稳定的展示名。"""
+    """群名片优先，异常上游名回退联系人，并稳定拆分真实同名。"""
     upstream_ids: dict[str, set[str]] = {}
+    sender_ids = {
+        (message.sender_id or "").strip()
+        for message in messages
+        if (message.sender_id or "").strip()
+    }
+    sender_ids_casefold = {sender_id.casefold() for sender_id in sender_ids}
     for message in messages:
         sender_id = (message.sender_id or "").strip()
         upstream_name = _sanitize_sender_name(message.sender_name)
@@ -630,26 +646,38 @@ def _resolve_sender_names(
     collision_names = {
         normalized_name for normalized_name, sender_ids in upstream_ids.items() if len(sender_ids) > 1
     }
+    group_nicknames = contacts.group_nicknames(group_id, sorted(sender_ids))
     contact_identities: set[str] = set()
     anonymous_identities: set[str] = set()
     for message in messages:
         sender_id = (message.sender_id or "").strip()
         upstream_name = _sanitize_sender_name(message.sender_name)
-        upstream_usable = _usable_sender_name(upstream_name, sender_id)
+        group_nickname = _sanitize_sender_name(group_nicknames.get(sender_id, ""))
+        group_nickname_usable = bool(
+            _usable_sender_name(group_nickname, sender_id)
+            and group_nickname.casefold() not in (sender_ids_casefold - {sender_id.casefold()})
+        )
+        upstream_usable = bool(
+            _usable_sender_name(upstream_name, sender_id)
+            and upstream_name.casefold() not in (sender_ids_casefold - {sender_id.casefold()})
+        )
         upstream_conflicted = bool(
             sender_id and upstream_usable and upstream_name.casefold() in collision_names
         )
-        resolved_name = ""
-        if sender_id and (upstream_conflicted or not upstream_usable):
-            resolved_name = _sanitize_sender_name(contacts.resolve_name(sender_id))
+        contact_name = ""
+        if sender_id and not group_nickname_usable and (upstream_conflicted or not upstream_usable):
+            contact_name = _sanitize_sender_name(contacts.resolve_name(sender_id))
 
-        if _usable_sender_name(resolved_name, sender_id):
-            message.sender_name = resolved_name
-            message.sender_name_source = "contact"
-            contact_identities.add(sender_id)
+        if group_nickname_usable:
+            message.sender_name = group_nickname
+            message.sender_name_source = "wechat_data_analysis"
         elif upstream_usable and not upstream_conflicted:
             message.sender_name = upstream_name
             message.sender_name_source = "wechat_data_analysis"
+        elif contact_name and contact_name.casefold() not in {"none", "null", "(未知)", "未知"}:
+            message.sender_name = contact_name
+            message.sender_name_source = "contact"
+            contact_identities.add(sender_id)
         else:
             message.sender_name = _anonymous_sender_name(sender_id or upstream_name)
             message.sender_name_source = "anonymous"
@@ -658,7 +686,14 @@ def _resolve_sender_names(
     # 即便 contact.db 中存在真实同名，最终展示也必须保持一身份一名称。
     labels = {
         item.key: item.name
-        for item in build_speaker_stats((message.sender_id, message.sender_name) for message in messages)
+        for item in build_speaker_stats(
+            (
+                message.sender_id,
+                message.sender_name,
+                message.sender_name_source == "contact",
+            )
+            for message in messages
+        )
     }
     for message in messages:
         key = speaker_identity_key(message.sender_id, message.sender_name)
