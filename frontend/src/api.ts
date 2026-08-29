@@ -562,6 +562,8 @@ export const pipelineSend = (body: { group_id: number; run_date?: string; confir
   post<{ result: { status: string; group_name?: string; error_type?: string; error?: string; detail?: string } }>("/v2/pipeline/send", body);
 export const resolveSendUnknown = (body: { group_id: number; run_date: string; resolution: "text_sent" | "not_sent"; expected_send_unknown_at: string }) =>
   post<{ result: { status: string; group_name: string; resolution: string; next_stage: string; detail: string } }>("/v2/pipeline/resolve-send-unknown", body);
+export const resetSendFailure = (body: { group_id: number; run_date: string; expected_updated_at: string; expected_state_version: number }) =>
+  post<{ result: { status: "prepared"; group_name: string; send_state: "ready"; run_status: string; updated_at: string; state_version: number; detail: string } }>("/v2/pipeline/reset-send-failure", body);
 export const resolvePromptUnknown = (body: { group_id: number; run_date: string; expected_operation_id: string }) =>
   post<{ result: { status: string; group_name: string; resolution: string; next_stage: string; detail: string } }>("/v2/pipeline/resolve-prompt-unknown", body);
 export const resolveManualSend = (body: { group_id: number; run_date: string; resolution: "all_sent" | "text_sent" | "not_sent"; expected_updated_at: string }) =>

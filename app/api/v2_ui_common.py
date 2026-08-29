@@ -54,6 +54,13 @@ class ResolvePromptUnknownBody(BaseModel):
     expected_operation_id: str = Field(min_length=8, max_length=80)
 
 
+class ResetSendFailureBody(BaseModel):
+    group_id: int
+    run_date: str
+    expected_updated_at: str = Field(min_length=10, max_length=80)
+    expected_state_version: int = Field(ge=1)
+
+
 class ResolveManualSendBody(BaseModel):
     group_id: int
     run_date: str

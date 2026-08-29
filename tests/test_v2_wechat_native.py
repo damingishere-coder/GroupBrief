@@ -83,6 +83,7 @@ def test_selected_header_allows_one_ocr_substitution_only_for_long_title():
     assert not _selected_header_matches("米游涩泛二次元同好摸鱼群32（422）", target)
     assert not _selected_header_matches("Grok张UED-4ä#", "Eason张UED-4群🤘")
     assert not _selected_header_matches("测试一（10）", "测试二")
+    assert not _selected_header_matches("Grok Web 交流群", "Grok App 交流群")
 
 
 def test_search_selects_only_group_section_match():
@@ -118,12 +119,13 @@ def test_search_rejects_similar_group_with_different_version_suffix():
 
 def test_search_allows_missing_second_version_digit_but_not_wrong_first_digit():
     target = "米游涩泛二次元同好摸鱼群1.1"
+    section = OcrLine("群聊", 137, 70, 50, 18)
     partial = OcrLine("米游涩泛二次元同好摸鱼群1。", 203, 125, 277, 21)
     wrong = OcrLine("米游涩泛二次元同好摸鱼群2。", 203, 125, 277, 21)
     boundary = OcrLine("聊天记录", 137, 200, 72, 17)
 
-    matched, detail = _select_group_search_match([partial, boundary], target)
-    rejected, _ = _select_group_search_match([wrong, boundary], target)
+    matched, detail = _select_group_search_match([section, partial, boundary], target)
+    rejected, _ = _select_group_search_match([section, wrong, boundary], target)
 
     assert detail == ""
     assert matched is partial
@@ -132,10 +134,11 @@ def test_search_allows_missing_second_version_digit_but_not_wrong_first_digit():
 
 def test_search_accepts_collapsed_version_digits_with_leading_ocr_noise():
     target = "米游涩泛二次元同好摸鱼群2.3"
+    section = OcrLine("群聊", 10, 50, 60, 24)
     noisy_group_result = OcrLine("孙睿 米游涩泛二次元同好摸鱼群23", 10, 95, 320, 24)
     boundary = OcrLine("聊天记录", 10, 150, 90, 24)
 
-    matched, detail = _select_group_search_match([noisy_group_result, boundary], target)
+    matched, detail = _select_group_search_match([section, noisy_group_result, boundary], target)
 
     assert matched == noisy_group_result
     assert detail == ""
@@ -143,10 +146,11 @@ def test_search_accepts_collapsed_version_digits_with_leading_ocr_noise():
 
 def test_search_rejects_different_collapsed_version_digits():
     target = "米游涩泛二次元同好摸鱼群2.3"
+    section = OcrLine("群聊", 10, 50, 60, 24)
     wrong_group_result = OcrLine("孙睿 米游涩泛二次元同好摸鱼群32", 10, 95, 320, 24)
     boundary = OcrLine("聊天记录", 10, 150, 90, 24)
 
-    matched, detail = _select_group_search_match([wrong_group_result, boundary], target)
+    matched, detail = _select_group_search_match([section, wrong_group_result, boundary], target)
 
     assert matched is None
     assert "匹配数 0" in detail
@@ -166,6 +170,7 @@ def test_search_does_not_fallback_to_chat_record_when_group_section_exists():
 
 def test_search_allows_bounded_ocr_errors_with_stable_ascii_anchor():
     lines = [
+        OcrLine("最常使用", 137, 56, 71, 17),
         OcrLine("Grok App 交 氵 充 君 丰", 204, 125, 164, 23),
         OcrLine("聊天记录", 137, 200, 72, 17),
     ]
@@ -173,7 +178,91 @@ def test_search_allows_bounded_ocr_errors_with_stable_ascii_anchor():
     matched, detail = _select_group_search_match(lines, "Grok App 交流群")
 
     assert detail == ""
-    assert matched is lines[0]
+    assert matched is lines[1]
+
+
+def test_search_selects_grok_only_from_real_trusted_section_layout():
+    target = "Grok App 交流群"
+    trusted_result = OcrLine("Grok App 交 氵 充 君 丰", 202, 124, 190, 24)
+    lines = [
+        OcrLine(target, 130, 8, 180, 20),
+        OcrLine("最常使用", 137, 56, 71, 17),
+        trusted_result,
+        OcrLine("聊天记录", 137, 190, 72, 17),
+        OcrLine(target, 202, 230, 190, 24),
+        OcrLine("搜索网络结果", 137, 310, 145, 18),
+        OcrLine(target, 202, 350, 190, 24),
+    ]
+
+    matched, detail = _select_group_search_match(lines, target)
+
+    assert detail == ""
+    assert matched is trusted_result
+
+
+def test_search_tolerates_one_ocr_substitution_in_most_used_section():
+    target = "Eason张UED-4群🤘"
+    trusted_result = OcrLine("Eason 张 UED-4 君 羊", 239, 158, 192, 24)
+    matched, detail = _select_group_search_match(
+        [
+            OcrLine("最 常 使 岸", 160, 78, 82, 20),
+            trusted_result,
+            OcrLine("聊 天 记 录", 160, 246, 84, 20),
+            OcrLine("Eason 张 UED-4ä*", 162, 308, 269, 24),
+            OcrLine("搜 索 网 络 结 果", 162, 574, 169, 21),
+        ],
+        target,
+    )
+
+    assert detail == ""
+    assert matched is trusted_result
+
+
+def test_search_accepts_live_grok_ocr_only_inside_trusted_section():
+    target = "Grok App 交流群"
+    trusted_result = OcrLine("Gr01< App 交 氵 充 君 羊", 238, 158, 192, 27)
+    matched, detail = _select_group_search_match(
+        [
+            OcrLine("最 常 使 岸", 160, 78, 82, 20),
+            trusted_result,
+            OcrLine("聊 天 记 录", 160, 246, 84, 20),
+            OcrLine("Gr01< App 交 氵 充 君 羊", 238, 308, 192, 27),
+        ],
+        target,
+    )
+
+    assert detail == ""
+    assert matched is trusted_result
+
+
+def test_search_rejects_wrong_english_token_even_in_trusted_section():
+    target = "Grok App 交流群"
+    matched, detail = _select_group_search_match(
+        [
+            OcrLine("最常使用", 160, 78, 82, 20),
+            OcrLine("Grok Web 交流群", 238, 158, 192, 27),
+            OcrLine("聊天记录", 160, 246, 84, 20),
+        ],
+        target,
+    )
+
+    assert matched is None
+    assert "匹配数 0" in detail
+
+
+def test_search_rejects_target_when_trusted_group_section_is_missing():
+    target = "Grok App 交流群"
+    matched, detail = _select_group_search_match(
+        [
+            OcrLine(target, 202, 124, 190, 24),
+            OcrLine("聊天记录", 137, 190, 72, 17),
+            OcrLine(target, 202, 230, 190, 24),
+        ],
+        target,
+    )
+
+    assert matched is None
+    assert "可信分区 0" in detail
 
 
 def test_search_selects_exact_recent_group_before_network_section():
@@ -358,6 +447,58 @@ def test_health_report_rejects_missing_chinese_ocr(tmp_path, monkeypatch):
     assert report["ok"] is False
     assert report["ocr"]["ok"] is False
     assert "中文" in report["ocr"]["detail"]
+
+
+def test_prepare_window_restores_only_one_existing_hidden_main_window(tmp_path, monkeypatch):
+    driver = WindowsWechatDriver(_settings(tmp_path))
+    visible = iter([[], [321]])
+    activated: list[int] = []
+    monkeypatch.setattr(driver, "_wechat_windows", lambda: next(visible))
+    monkeypatch.setattr(driver, "_hidden_wechat_windows", lambda: [321])
+    monkeypatch.setattr(driver, "_activate", lambda hwnd: activated.append(hwnd) or True)
+
+    ok, detail = driver._prepare_wechat_window()
+
+    assert ok is True
+    assert "已恢复" in detail
+    assert activated == [321]
+
+
+def test_prepare_window_rejects_multiple_hidden_candidates_without_activation(tmp_path, monkeypatch):
+    driver = WindowsWechatDriver(_settings(tmp_path))
+    activated: list[int] = []
+    monkeypatch.setattr(driver, "_wechat_windows", lambda: [])
+    monkeypatch.setattr(driver, "_hidden_wechat_windows", lambda: [321, 654])
+    monkeypatch.setattr(driver, "_activate", lambda hwnd: activated.append(hwnd) or True)
+
+    ok, detail = driver._prepare_wechat_window()
+
+    assert ok is False
+    assert "隐藏候选 2" in detail
+    assert activated == []
+
+
+def test_open_and_verify_never_restores_window_while_desktop_is_locked(tmp_path, monkeypatch):
+    driver = WindowsWechatDriver(_settings(tmp_path))
+    monkeypatch.setattr("app.sender.wechat_native.os.name", "nt")
+    monkeypatch.setattr(driver, "_desktop_unlocked", lambda: False)
+    monkeypatch.setattr(
+        driver,
+        "_prepare_wechat_window",
+        lambda: pytest.fail("桌面锁定时不得尝试恢复微信窗口"),
+    )
+
+    ok, detail = driver.open_and_verify("Grok App 交流群")
+
+    assert ok is False
+    assert "桌面已锁定" in detail
+
+
+def test_wechat_main_window_class_rejects_auxiliary_windows():
+    assert WindowsWechatDriver._wechat_main_window_class("Qt51514QWindowIcon")
+    assert WindowsWechatDriver._wechat_main_window_class("WeChatMainWndForPC")
+    assert not WindowsWechatDriver._wechat_main_window_class("Qt51514QWindowToolSaveBits")
+    assert not WindowsWechatDriver._wechat_main_window_class("Chrome_WidgetWin_1")
 
 
 def test_target_search_overwrites_stale_query_before_paste(tmp_path, monkeypatch):

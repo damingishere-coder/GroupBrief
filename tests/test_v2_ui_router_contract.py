@@ -36,6 +36,7 @@ EXPECTED_V2_UI_OPERATIONS = {
     ("POST", "/api/v2/pipeline/send-due", "pipeline_send_due_api_v2_pipeline_send_due_post"),
     ("POST", "/api/v2/pipeline/send", "pipeline_send_api_v2_pipeline_send_post"),
     ("POST", "/api/v2/pipeline/resolve-send-unknown", "pipeline_resolve_send_unknown_api_v2_pipeline_resolve_send_unknown_post"),
+    ("POST", "/api/v2/pipeline/reset-send-failure", "pipeline_reset_send_failure_api_v2_pipeline_reset_send_failure_post"),
     ("POST", "/api/v2/pipeline/resolve-prompt-unknown", "pipeline_resolve_prompt_unknown_api_v2_pipeline_resolve_prompt_unknown_post"),
     ("POST", "/api/v2/pipeline/resolve-manual-send", "pipeline_resolve_manual_send_api_v2_pipeline_resolve_manual_send_post"),
     ("GET", "/api/v2/recovery/backlog", "recovery_backlog_api_v2_recovery_backlog_get"),

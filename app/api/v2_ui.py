@@ -9,6 +9,7 @@ from app.api.v2_ui_common import (
     ImageThemeResolveBody,
     PipelineGenerateBody,
     PipelineSendBody,
+    ResetSendFailureBody,
     ResolveManualSendBody,
     ResolvePromptUnknownBody,
     ResolveSendUnknownBody,
@@ -361,6 +362,25 @@ def pipeline_resolve_send_unknown(body: ResolveSendUnknownBody):
         body.run_date,
         resolution=body.resolution,
         expected_send_unknown_at=body.expected_send_unknown_at,
+    )
+    if result.get("status") == "conflict":
+        raise HTTPException(status_code=409, detail=result)
+    if result.get("status") == "failed":
+        raise HTTPException(status_code=400, detail=result)
+    return {"result": result}
+
+
+@router.post("/pipeline/reset-send-failure")
+def pipeline_reset_send_failure(body: ResetSendFailureBody):
+    """解除明确未提交的最终失败；该接口不会调用微信 Sender。"""
+    from app.pipeline.daily_pipeline import DailyPipeline
+
+    _validate_run_date(body.run_date)
+    result = DailyPipeline(dry_run=False).reset_explicit_send_failure(
+        body.group_id,
+        body.run_date,
+        expected_updated_at=body.expected_updated_at,
+        expected_state_version=body.expected_state_version,
     )
     if result.get("status") == "conflict":
         raise HTTPException(status_code=409, detail=result)

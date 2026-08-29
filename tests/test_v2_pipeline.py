@@ -900,6 +900,141 @@ def test_explicit_text_failures_use_backoff_and_stop_after_send_retry_budget(tmp
     assert len(sender.text_calls) == 3
 
 
+def test_explicit_unsubmitted_final_failure_can_be_reset_without_sending(tmp_path):
+    pipeline = _ready_to_send(tmp_path, image_enabled=False)
+    sender = pipeline.sender
+    failed = pipeline.store.update(
+        "测试群",
+        "2026-08-18",
+        send_state="failed_final",
+        send_hold=True,
+        send_hold_reason="SEND_RETRY_EXHAUSTED",
+        needs_manual_send=True,
+        send_retry_attempt_count=3,
+        send_next_retry_at="",
+        send_last_failure_at="2026-08-18T08:38:00",
+        send_error="目标匹配数 0",
+        send_error_type="SEND_TEXT_FAILED",
+        send_failure_ledger=[{"attempt": 3, "error_type": "SEND_TEXT_FAILED"}],
+        text_attempt_started_at="2026-08-18T08:38:00",
+        text_attempt_finished_at="2026-08-18T08:38:01",
+        text_submitted_at="",
+        text_verified_at="",
+        text_sent_at="",
+        image_submitted_at="",
+        image_verified_at="",
+        image_sent_at="",
+    )
+    calls_before = (len(sender.text_calls), len(sender.image_calls))
+
+    reset = pipeline.reset_explicit_send_failure(
+        1,
+        "2026-08-18",
+        expected_updated_at=failed["updated_at"],
+        expected_state_version=failed["state_version"],
+    )
+    stale = pipeline.reset_explicit_send_failure(
+        1,
+        "2026-08-18",
+        expected_updated_at=failed["updated_at"],
+        expected_state_version=failed["state_version"],
+    )
+    run = pipeline.store.load_run("测试群", "2026-08-18")
+
+    assert reset["status"] == "prepared"
+    assert stale["status"] == "conflict"
+    assert stale["reason"] == "stale"
+    assert run["send_state"] == "ready"
+    assert run["send_hold"] is False
+    assert run["send_retry_attempt_count"] == 0
+    assert run["send_failure_ledger"] == failed["send_failure_ledger"]
+    assert run["send_retry_reset_history"][-1]["previous_attempt_count"] == 3
+    assert (len(sender.text_calls), len(sender.image_calls)) == calls_before
+
+
+@pytest.mark.parametrize(
+    "evidence_field",
+    [
+        "sent_at",
+        "send_unknown_at",
+        "text_submitted_at",
+        "text_verified_at",
+        "text_sent_at",
+        "image_submitted_at",
+        "image_verified_at",
+        "image_sent_at",
+    ],
+)
+def test_final_failure_reset_rejects_any_submission_or_delivery_evidence(
+    tmp_path, evidence_field
+):
+    pipeline = _ready_to_send(tmp_path, image_enabled=False)
+    failed = pipeline.store.update(
+        "测试群",
+        "2026-08-18",
+        send_state="failed_final",
+        send_hold=True,
+        send_hold_reason="SEND_RETRY_EXHAUSTED",
+        send_retry_attempt_count=3,
+        **{evidence_field: "2026-08-18T08:38:00"},
+    )
+
+    result = pipeline.reset_explicit_send_failure(
+        1,
+        "2026-08-18",
+        expected_updated_at=failed["updated_at"],
+        expected_state_version=failed["state_version"],
+    )
+
+    assert result["status"] == "conflict"
+    assert result["reason"] == "submission_evidence"
+
+
+def test_final_failure_reset_rejects_unknown_state(tmp_path):
+    pipeline = _ready_to_send(tmp_path, image_enabled=False)
+    unknown = pipeline.store.update(
+        "测试群",
+        "2026-08-18",
+        send_state="unknown",
+        send_hold=True,
+        send_hold_reason="SEND_RESULT_UNKNOWN",
+        send_unknown_at="2026-08-18T08:38:00",
+    )
+
+    result = pipeline.reset_explicit_send_failure(
+        1,
+        "2026-08-18",
+        expected_updated_at=unknown["updated_at"],
+        expected_state_version=unknown["state_version"],
+    )
+
+    assert result["status"] == "conflict"
+    assert result["reason"] == "not_explicit_failure"
+
+
+def test_final_failure_reset_rejects_non_exhausted_retry_budget(tmp_path):
+    pipeline = _ready_to_send(tmp_path, image_enabled=False)
+    inconsistent = pipeline.store.update(
+        "测试群",
+        "2026-08-18",
+        send_state="failed_final",
+        send_hold=True,
+        send_hold_reason="SEND_RETRY_EXHAUSTED",
+        send_retry_attempt_count=1,
+        send_retry_budget=3,
+    )
+
+    result = pipeline.reset_explicit_send_failure(
+        1,
+        "2026-08-18",
+        expected_updated_at=inconsistent["updated_at"],
+        expected_state_version=inconsistent["state_version"],
+    )
+
+    assert result["status"] == "conflict"
+    assert result["reason"] == "not_explicit_failure"
+
+
 def test_image_retry_preserves_confirmed_text_checkpoint(tmp_path):
     sender = FakeSender(fail_image=True)
     pipeline, _ = _make_pipeline(tmp_path, sender=sender, image_enabled=True)

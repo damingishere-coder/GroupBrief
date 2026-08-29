@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { confirmRecovery, get, getDashboard, getRuns, getRuntimeLogs, pipelineGenerate, pipelineSend, readV2JsonFile, resolveManualSend, resolvePromptUnknown, resolveSendUnknown } from "./api";
+import { confirmRecovery, get, getDashboard, getRuns, getRuntimeLogs, pipelineGenerate, pipelineSend, readV2JsonFile, resetSendFailure, resolveManualSend, resolvePromptUnknown, resolveSendUnknown } from "./api";
 
 function response(body: unknown, options: { ok?: boolean; status?: number; raw?: string } = {}): Response {
   return {
@@ -119,6 +119,31 @@ describe("frontend API contract", () => {
           group_id: 7,
           run_date: "2026-08-27",
           expected_operation_id: "operation-123",
+        }),
+      }),
+    );
+  });
+
+  it("resets only a CAS-matched explicit send failure without calling send", async () => {
+    const fetchMock = vi.fn(async () => response({ result: { status: "prepared" } }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await resetSendFailure({
+      group_id: 24,
+      run_date: "2026-08-29",
+      expected_updated_at: "2026-08-29 08:38:00",
+      expected_state_version: 17,
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v2/pipeline/reset-send-failure",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          group_id: 24,
+          run_date: "2026-08-29",
+          expected_updated_at: "2026-08-29 08:38:00",
+          expected_state_version: 17,
         }),
       }),
     );

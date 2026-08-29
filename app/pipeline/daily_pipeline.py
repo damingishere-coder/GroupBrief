@@ -920,6 +920,65 @@ class DailyPipeline:
             "detail": "已记录人工核对结论；本次操作没有发送任何微信内容",
         }
 
+    def reset_explicit_send_failure(
+        self,
+        group_id: int,
+        run_date: str,
+        *,
+        expected_updated_at: str,
+        expected_state_version: int,
+    ) -> dict:
+        """解除明确未提交的重试耗尽状态；不会调用微信 Sender。"""
+        parsed_run_date = parse_date(run_date)
+        if parsed_run_date is None:
+            return {
+                "status": "failed",
+                "error_type": "INVALID_RUN_DATE",
+                "detail": "run_date 必须是有效的 YYYY-MM-DD 日期",
+            }
+        group = self._get_group(group_id)
+        if group is None:
+            return {
+                "status": "failed",
+                "error_type": "GROUP_NOT_FOUND",
+                "detail": f"群不存在 {group_id}",
+            }
+        run_date = parsed_run_date.isoformat()
+        group_name = self._group_name(group)
+        reset, run, reason = self.store.reset_explicit_send_failure(
+            group_name,
+            run_date,
+            expected_updated_at=expected_updated_at,
+            expected_state_version=expected_state_version,
+            now=datetime.now(ZoneInfo(self.settings.app_timezone)),
+        )
+        if not reset:
+            messages = {
+                "state_corrupt": "运行状态损坏，禁止恢复发送",
+                "stale": "任务状态已变化，请刷新后重新核对",
+                "not_resolvable": "当前任务状态不能恢复发送",
+                "not_explicit_failure": "当前任务不是明确未提交的重试耗尽状态",
+                "active_claim": "当前任务仍有发送 claim，禁止并发恢复",
+                "unresolved_attempt": "存在未决发送动作，必须人工核对结果",
+                "submission_evidence": "已有提交、验证或发送证据，禁止自动重试",
+            }
+            return {
+                "group_name": group_name,
+                "status": "conflict",
+                "error_type": "SEND_FAILURE_RESET_CONFLICT",
+                "detail": messages.get(reason, "当前发送失败不能安全恢复"),
+                "reason": reason,
+            }
+        return {
+            "group_name": group_name,
+            "status": "prepared",
+            "send_state": run.get("send_state"),
+            "run_status": run.get("status"),
+            "updated_at": run.get("updated_at"),
+            "state_version": run.get("state_version"),
+            "detail": "已解除明确未提交的失败暂停；本次操作没有调用微信发送器",
+        }
+
     def resolve_manual_send(
         self,
         group_id: int,

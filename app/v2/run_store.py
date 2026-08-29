@@ -741,6 +741,95 @@ class RunStore:
             data.update(fields)
             return True, self.save_run(group_name, run_date, data), final
 
+    def reset_explicit_send_failure(
+        self,
+        group_name: str,
+        run_date: str,
+        *,
+        expected_updated_at: str,
+        expected_state_version: int,
+        now: datetime,
+    ) -> tuple[bool, dict, str]:
+        """解除明确未提交的最终发送失败；本方法绝不执行外部发送。
+
+        ``updated_at`` 与 ``state_version`` 组成 CAS。只接受重试预算耗尽、
+        且文字和图片均没有提交/验证/发送证据的任务；未知结果和已发送状态
+        必须继续人工核对，不能通过本入口重试。
+        """
+        path = self.run_path(group_name, run_date)
+        with _run_mutex(path):
+            data = self.load_run(group_name, run_date)
+            if self._is_corrupt(data):
+                return False, data, "state_corrupt"
+            try:
+                state_version = int(data.get("state_version") or 0)
+                attempts = max(int(data.get("send_retry_attempt_count") or 0), 0)
+                budget = max(int(data.get("send_retry_budget") or 3), 1)
+            except (TypeError, ValueError):
+                return False, data, "state_corrupt"
+            if (
+                str(data.get("updated_at") or "") != expected_updated_at
+                or state_version != expected_state_version
+            ):
+                return False, data, "stale"
+            if data.get("status") not in {IMAGE_READY, READY_TO_SEND}:
+                return False, data, "not_resolvable"
+            if (
+                data.get("send_state") != "failed_final"
+                or data.get("send_hold") is not True
+                or data.get("send_hold_reason") != "SEND_RETRY_EXHAUSTED"
+                or attempts < budget
+            ):
+                return False, data, "not_explicit_failure"
+            if data.get("send_claim_id"):
+                return False, data, "active_claim"
+            if _has_unresolved_send_attempt(data):
+                return False, data, "unresolved_attempt"
+
+            evidence_fields = (
+                "sent_at",
+                "send_unknown_at",
+                "text_submitted_at",
+                "text_verified_at",
+                "text_sent_at",
+                "image_submitted_at",
+                "image_verified_at",
+                "image_sent_at",
+            )
+            if any(str(data.get(field) or "").strip() for field in evidence_fields):
+                return False, data, "submission_evidence"
+
+            reset_at = now.isoformat()
+            history = list(data.get("send_retry_reset_history") or [])
+            history.append(
+                {
+                    "reset_at": reset_at,
+                    "expected_updated_at": expected_updated_at,
+                    "expected_state_version": expected_state_version,
+                    "previous_attempt_count": attempts,
+                    "previous_error_type": str(data.get("send_error_type") or ""),
+                    "previous_error": str(data.get("send_error") or "")[:300],
+                    "previous_last_failure_at": str(data.get("send_last_failure_at") or ""),
+                }
+            )
+            data.update(
+                send_state="ready",
+                send_hold=False,
+                send_hold_reason="",
+                needs_manual_send=False,
+                send_retry_attempt_count=0,
+                send_next_retry_at="",
+                send_last_failure_at="",
+                send_error="",
+                send_error_type="",
+                send_claim_id="",
+                send_claimed_at="",
+                send_claim_expires_at="",
+                send_retry_reset_history=history[-20:],
+                send_last_retry_reset_at=reset_at,
+            )
+            return True, self.save_run(group_name, run_date, data), "reset"
+
     def mark_send_result_unknown(
         self,
         group_name: str,

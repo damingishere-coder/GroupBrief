@@ -101,6 +101,8 @@ def _selected_header_matches(value: str, target: str) -> bool:
         return False
     if value_n[:3].casefold() != target_n[:3].casefold():
         return False
+    if not _ascii_token_identity_matches(value, target):
+        return False
 
     suffix_pattern = r"\d+(?:[._-]\d+)+$"
     target_suffix = re.search(suffix_pattern, target_n)
@@ -142,12 +144,36 @@ def _has_stable_ascii_anchor(value: str, target: str) -> bool:
     return any(len(re.sub(r"[^a-z0-9]", "", anchor)) >= 3 and anchor in value_n for anchor in anchors)
 
 
+def _ascii_identity_tokens(value: str) -> list[str]:
+    normalized = unicodedata.normalize("NFKC", value or "").casefold()
+    return [token for token in re.findall(r"[a-z0-9]+", normalized) if len(token) >= 3]
+
+
+def _ascii_token_identity_matches(value: str, target: str) -> bool:
+    """英文群名允许受限 OCR 错字，但每个稳定 token 都必须有对应项。"""
+
+    target_tokens = _ascii_identity_tokens(target)
+    if not target_tokens:
+        return True
+    value_tokens = _ascii_identity_tokens(value)
+    return all(
+        any(
+            _edit_distance(target_token, value_token)
+            <= 2
+            for value_token in value_tokens
+        )
+        for target_token in target_tokens
+    )
+
+
 def _search_title_score(value: str, target: str, *, max_distance: int | None = None) -> int | None:
     """返回受限 OCR 距离；版本号不同的相似群名永不匹配。"""
     value_n = _normalized_title(value)
     target_n = _normalized_title(target)
     if _title_matches(value_n, target_n):
         return 0
+    if not _ascii_token_identity_matches(value, target):
+        return None
     anchored = _has_stable_ascii_anchor(value_n, target_n)
     tolerance = max_distance if max_distance is not None else (4 if anchored else 3)
     if len(target_n) < 8 or abs(len(value_n) - len(target_n)) > tolerance:
@@ -181,6 +207,18 @@ def _section_label(value: str) -> str:
     return _normalized_title(value).strip("[]【】()（）<>《》")
 
 
+def _trusted_group_section(value: str) -> bool:
+    """微信搜索浮层中允许作为群聊候选上边界的分区。"""
+
+    label = _section_label(value)
+    if label == "群聊":
+        return True
+    # Windows OCR 在绿色标题上偶尔会把“用”识别成形近字（例如“岸”）。
+    # 仅对较长且固定的“最常使用”标题容忍一个替换；两字“群聊”仍须精确，
+    # 避免把普通聊天文本误当成可信分区。
+    return len(label) == len("最常使用") and _edit_distance(label, "最常使用") <= 1
+
+
 def _select_group_search_match(lines: list[OcrLine], target: str) -> tuple[OcrLine | None, str]:
     """只从搜索浮层的“群聊”分区选择目标。
 
@@ -191,29 +229,62 @@ def _select_group_search_match(lines: list[OcrLine], target: str) -> tuple[OcrLi
     """
     ordered = sorted(lines, key=lambda line: (line.top, line.left))
     chat_sections = [line for line in ordered if _section_label(line.text) == "聊天记录"]
+    trusted_sections = [line for line in ordered if _trusted_group_section(line.text)]
     candidates: list[OcrLine] = []
     if len(chat_sections) == 1:
         chat_top = chat_sections[0].top
-        candidates = [
-            line
-            for line in ordered
-            if line.top + line.height <= chat_top
-            and 0 <= chat_top - (line.top + line.height) <= max(line.height * 6.0, 120.0)
+        section_before_chat = [
+            line for line in trusted_sections if line.top + line.height <= chat_top
         ]
+        if section_before_chat:
+            section_bottom = max(line.top + line.height for line in section_before_chat)
+            candidates = [
+                line
+                for line in ordered
+                if line.top + line.height / 2 >= section_bottom
+                and line.top + line.height <= chat_top
+                and not _trusted_group_section(line.text)
+            ]
 
-    scored = [(score, line) for line in candidates if (score := _search_title_score(line.text, target)) is not None]
+    scored = [
+        (score, line)
+        for line in candidates
+        if (score := _search_title_score(line.text, target, max_distance=5)) is not None
+    ]
+    if not scored and _ascii_identity_tokens(target):
+        # 英文群名在绿色搜索项中可能同时出现多个 OCR 错字。只有处在可信
+        # 群聊分区、稳定英文 token 仍逐项对应、且最终聊天标题还会再次复核
+        # 时，才额外扩大搜索项的距离；中文群名不使用此兜底。
+        scored = [
+            (score, line)
+            for line in candidates
+            if (score := _search_title_score(line.text, target, max_distance=8)) is not None
+        ]
     if not scored and not chat_sections:
         # 新改名或很少在聊天中提及的群，搜索结果可能只有
         # “最常使用”中的群聊项，没有“聊天记录”分区。此时只允许
         # 选择“搜索网络结果”之前、且明显低于顶部输入框的唯一匹配。
         network_sections = [line for line in ordered if "搜索网络结果" in _section_label(line.text)]
-        if network_sections:
+        if network_sections and trusted_sections:
             network_top = min(line.top for line in network_sections)
             before_network = [
                 line
                 for line in ordered
                 if line.top >= 55.0 and line.top + line.height <= network_top
             ]
+            section_before_network = [
+                line for line in trusted_sections if line.top + line.height <= network_top
+            ]
+            if section_before_network:
+                section_bottom = max(line.top + line.height for line in section_before_network)
+                before_network = [
+                    line
+                    for line in before_network
+                    if line.top + line.height / 2 >= section_bottom
+                    and not _trusted_group_section(line.text)
+                ]
+            else:
+                before_network = []
             scored = [
                 (score, line)
                 for line in before_network
@@ -222,8 +293,17 @@ def _select_group_search_match(lines: list[OcrLine], target: str) -> tuple[OcrLi
                 # “V4.0”被识别成“V4℃”时产生的一个 OCR 距离。
                 if (score := _search_title_score(line.text, target, max_distance=5)) is not None
             ]
+            if not scored and _ascii_identity_tokens(target):
+                scored = [
+                    (score, line)
+                    for line in before_network
+                    if (score := _search_title_score(line.text, target, max_distance=8)) is not None
+                ]
     if not scored:
-        return None, "群聊分区未得到可验证的目标匹配（匹配数 0）"
+        return None, (
+            "群聊分区未得到可验证的目标匹配"
+            f"（匹配数 0；可信分区 {len(trusted_sections)}；聊天记录分区 {len(chat_sections)}）"
+        )
     best_score = min(score for score, _ in scored)
     best = [line for score, line in scored if score == best_score]
     if len(best) != 1:
@@ -360,6 +440,17 @@ class WindowsWechatDriver:
         target = (target or "").strip()
         if not target:
             return False, "发送目标为空"
+        if os.name != "nt":
+            return False, "Windows 原生微信发送器仅支持 Windows"
+        try:
+            self._imports()
+        except Exception as exc:
+            return False, f"Windows 微信发送依赖不可用：{exc}"
+        if not self._desktop_unlocked():
+            return False, "Windows 桌面已锁定，未尝试恢复或操作微信窗口"
+        prepared, prepare_detail = self._prepare_wechat_window()
+        if not prepared:
+            return False, prepare_detail
         ok, detail = self.health_check()
         if not ok:
             return False, detail
@@ -636,20 +727,131 @@ class WindowsWechatDriver:
         win32clipboard.CloseClipboard()
 
     @staticmethod
-    def _wechat_windows() -> list[int]:
+    def _window_process_name(hwnd: int) -> str:
+        """只读取窗口所属进程名；无法确认身份时返回空字符串。"""
+
+        if os.name != "nt":
+            return ""
+        kernel32 = ctypes.windll.kernel32
+        user32 = ctypes.windll.user32
+        open_process = kernel32.OpenProcess
+        open_process.argtypes = [ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong]
+        open_process.restype = ctypes.c_void_p
+        query_process_image = kernel32.QueryFullProcessImageNameW
+        query_process_image.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_ulong,
+            ctypes.c_wchar_p,
+            ctypes.POINTER(ctypes.c_ulong),
+        ]
+        query_process_image.restype = ctypes.c_int
+        close_handle = kernel32.CloseHandle
+        close_handle.argtypes = [ctypes.c_void_p]
+        close_handle.restype = ctypes.c_int
+        process_id = ctypes.c_ulong(0)
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(process_id))
+        if not process_id.value:
+            return ""
+        handle = open_process(0x1000, False, process_id.value)
+        if not handle:
+            return ""
+        try:
+            size = ctypes.c_ulong(32768)
+            buffer = ctypes.create_unicode_buffer(size.value)
+            if not query_process_image(handle, 0, buffer, ctypes.byref(size)):
+                return ""
+            return Path(buffer.value).name.casefold()
+        finally:
+            close_handle(handle)
+
+    @staticmethod
+    def _window_is_current_session(hwnd: int) -> bool:
+        """窗口进程必须与发送器处在同一 Windows 会话。"""
+
+        if os.name != "nt":
+            return False
+        kernel32 = ctypes.windll.kernel32
+        user32 = ctypes.windll.user32
+        process_id = ctypes.c_ulong(0)
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(process_id))
+        if not process_id.value:
+            return False
+        window_session = ctypes.c_ulong(0)
+        current_session = ctypes.c_ulong(0)
+        if not kernel32.ProcessIdToSessionId(process_id.value, ctypes.byref(window_session)):
+            return False
+        current_pid = kernel32.GetCurrentProcessId()
+        if not kernel32.ProcessIdToSessionId(current_pid, ctypes.byref(current_session)):
+            return False
+        return window_session.value == current_session.value
+
+    @staticmethod
+    def _wechat_main_window_class(value: str) -> bool:
+        normalized = (value or "").strip()
+        return normalized == "WeChatMainWndForPC" or bool(
+            re.fullmatch(r"Qt\d+QWindowIcon", normalized)
+        )
+
+    @classmethod
+    def _enumerate_wechat_windows(cls, *, visible: bool) -> list[int]:
+        import win32con
         import win32gui
 
         matches: list[int] = []
 
         def visit(hwnd, _):
-            if not win32gui.IsWindowVisible(hwnd):
+            if bool(win32gui.IsWindowVisible(hwnd)) is not visible:
                 return
             title = (win32gui.GetWindowText(hwnd) or "").strip()
-            if title in {"微信", "WeChat"}:
-                matches.append(hwnd)
+            if title not in {"微信", "WeChat"}:
+                return
+            if win32gui.GetParent(hwnd) or win32gui.GetWindow(hwnd, win32con.GW_OWNER):
+                return
+            if not cls._wechat_main_window_class(win32gui.GetClassName(hwnd)):
+                return
+            if cls._window_process_name(hwnd) not in {"weixin.exe", "wechat.exe"}:
+                return
+            if not cls._window_is_current_session(hwnd):
+                return
+            matches.append(hwnd)
 
         win32gui.EnumWindows(visit, None)
         return matches
+
+    @classmethod
+    def _wechat_windows(cls) -> list[int]:
+        return cls._enumerate_wechat_windows(visible=True)
+
+    @classmethod
+    def _hidden_wechat_windows(cls) -> list[int]:
+        return cls._enumerate_wechat_windows(visible=False)
+
+    def _prepare_wechat_window(self) -> tuple[bool, str]:
+        """恢复唯一、已存在的隐藏主窗口；绝不启动微信或处理登录。"""
+
+        visible = self._wechat_windows()
+        if len(visible) == 1:
+            return True, "找到唯一可见微信主窗口"
+        if len(visible) > 1:
+            return False, f"必须存在唯一可见微信主窗口，当前找到 {len(visible)} 个"
+
+        hidden = self._hidden_wechat_windows()
+        if len(hidden) != 1:
+            return False, (
+                "没有唯一可恢复的微信主窗口"
+                f"（可见 {len(visible)} 个，隐藏候选 {len(hidden)} 个）"
+            )
+        if not self._activate(hidden[0]):
+            return False, "唯一隐藏微信主窗口无法安全恢复"
+        deadline = time.monotonic() + max(self.stage_timeout, self.delay * 3)
+        while time.monotonic() < deadline:
+            visible = self._wechat_windows()
+            if len(visible) == 1 and visible[0] == hidden[0]:
+                return True, "已恢复唯一隐藏微信主窗口"
+            if len(visible) > 1:
+                return False, f"恢复后出现多个可见微信主窗口（{len(visible)} 个）"
+            time.sleep(self.poll_interval)
+        return False, "隐藏微信主窗口恢复后仍不可见"
 
     @staticmethod
     def _activate(hwnd: int) -> bool:
