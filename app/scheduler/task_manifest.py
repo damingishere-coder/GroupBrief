@@ -20,6 +20,7 @@ def build_expected_groups(
     run_date: date,
     *,
     timezone: str,
+    schedule_send_time: str = "08:30",
     resolver: PeriodResolver | None = None,
 ) -> list[dict]:
     resolver = resolver or PeriodResolver()
@@ -45,7 +46,7 @@ def build_expected_groups(
                 "summary_model": str(group.summary_model or ""),
                 "prompt_provider": str(getattr(group, "prompt_provider", "") or ""),
                 "prompt_model": str(group.prompt_model or ""),
-                "send_time": str(group.send_time or "08:30"),
+                "send_time": str(schedule_send_time or "08:30"),
                 "image_enabled": bool(group.image_enabled),
                 "ranking_template": str(group.ranking_template or "default"),
                 "ranking_count_policy": str(

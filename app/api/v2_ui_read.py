@@ -98,7 +98,7 @@ def dashboard(
             {
                 "group_id": group.id,
                 "group_name": name,
-                "send_time": group.send_time,
+                "send_time": settings.schedule_send_time,
                 "schedule_rule": group.schedule_rule,
                 "image_enabled": bool(group.image_enabled),
                 "wechat_send_enabled": bool(
@@ -149,29 +149,15 @@ def dashboard(
         else:
             counts["pending"] += 1
 
-    upcoming = []
-    for card in cards:
-        if selected_date != now.date() or card["status"] not in ("IMAGE_READY", "READY_TO_SEND"):
-            continue
-        if card["sent_at"]:
-            continue
-        if not card["wechat_send_enabled"] or card["send_hold"]:
-            continue
-        try:
-            hour, minute = card["send_time"].split(":")
-            send_at = now.replace(
-                hour=int(hour),
-                minute=int(minute),
-                second=0,
-                microsecond=0,
-            )
-        except Exception:
-            send_at = now.replace(hour=8, minute=30, second=0, microsecond=0)
-        upcoming.append((send_at, card["group_name"]))
     next_send = ""
-    if upcoming:
-        earliest, name = min(upcoming, key=lambda item: item[0])
-        next_send = f"{earliest.strftime('%H:%M')}（{name}）"
+    if selected_date == now.date() and any(
+        card["status"] in ("IMAGE_READY", "READY_TO_SEND")
+        and not card["sent_at"]
+        and card["wechat_send_enabled"]
+        and not card["send_hold"]
+        for card in cards
+    ):
+        next_send = f"{settings.schedule_send_time}（按群 ID 串行批次）"
 
     runtime_status = build_daily_status(
         store,
@@ -179,6 +165,7 @@ def dashboard(
         runs=runtime_runs,
         output_root=settings.output_dir,
         schedule_generate_time=settings.schedule_generate_time,
+        schedule_send_time=settings.schedule_send_time,
         app_timezone=settings.app_timezone,
     )
     daily_status = {

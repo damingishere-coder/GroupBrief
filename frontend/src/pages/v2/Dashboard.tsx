@@ -582,7 +582,7 @@ export default function Dashboard() {
                 <div className="dashboard-task-meta">
                   <span>消息 {Number(card.message_count || 0)}</span>
                   <span>发言 {Number(card.speaker_count || 0)}</span>
-                  <span>发送 {card.send_time || "—"}</span>
+                  <span>发送批次 {card.send_time || "08:30"}</span>
                 </div>
                 <TaskActions
                   card={card}

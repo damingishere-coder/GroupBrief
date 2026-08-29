@@ -147,6 +147,7 @@ def readiness(
         }
     else:
         from app.scheduler.heartbeat import load_scheduler_heartbeat
+        from app.scheduler.manager import get_scheduler
 
         heartbeat = load_scheduler_heartbeat(settings)
         try:
@@ -155,16 +156,31 @@ def readiness(
             age_seconds = max(0, int((now - beat_at).total_seconds()))
         except ValueError:
             age_seconds = -1
-        stale_seconds = max(int(getattr(settings, "scheduler_heartbeat_stale_seconds", 300)), 60)
-        heartbeat_ok = scheduler_active and 0 <= age_seconds <= stale_seconds
+        active_scheduler = get_scheduler()
+        scheduler_running = bool(
+            active_scheduler is not None
+            and getattr(active_scheduler, "running", False)
+        )
+        next_run_at = ""
+        if scheduler_running:
+            scheduled_times = [
+                job.next_run_time
+                for job in active_scheduler.get_jobs()
+                if getattr(job, "next_run_time", None) is not None
+            ]
+            if scheduled_times:
+                next_run_at = min(scheduled_times).isoformat()
+        heartbeat_ok = scheduler_active and scheduler_running
         checks["scheduler_heartbeat"] = {
             "ok": heartbeat_ok,
-            "status": "OK" if heartbeat_ok else "STALE",
+            "status": "OK" if heartbeat_ok else "STOPPED",
             "detail": (
-                f"last_job={heartbeat.get('last_job', '')} age={age_seconds}s"
-                if heartbeat
-                else "尚无 Scheduler heartbeat"
+                f"scheduler=running next_run_at={next_run_at or 'pending'} "
+                f"last_event={heartbeat.get('last_job', '')} age={age_seconds}s"
+                if heartbeat_ok
+                else "APScheduler 未运行"
             ),
+            "next_run_at": next_run_at,
             "last_beat_at": str(heartbeat.get("last_beat_at") or ""),
         }
 
@@ -176,12 +192,7 @@ def readiness(
             datetime.strptime(str(settings.schedule_generate_time), "%H:%M").time(),
             tzinfo=tz,
         )
-        grace = timedelta(
-            minutes=max(
-                30,
-                int(getattr(settings, "reliability_watchdog_interval_minutes", 10)) * 2,
-            )
-        )
+        grace = timedelta(minutes=30)
         state_path = settings.output_dir / ".scheduler" / f"{now.date().isoformat()}.json"
         try:
             daily_state = json.loads(state_path.read_text(encoding="utf-8"))
@@ -355,16 +366,18 @@ def status(session: Session = Depends(repo.get_session), settings: Settings = De
         tz = None
 
     window = get_report_window(now.date(), settings.app_timezone)
-    next_run = ""
-    if window.should_run:
-        from datetime import time
-
-        gen_time = settings.schedule_generate_time  # HH:MM
-        hour, minute = (int(x) for x in gen_time.split(":"))
+    def next_daily_at(value: str, fallback: str) -> str:
+        try:
+            hour, minute = (int(x) for x in str(value).split(":"))
+        except (TypeError, ValueError):
+            hour, minute = (int(x) for x in fallback.split(":"))
         next_dt = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
         if next_dt <= now:
-            next_dt = next_dt.replace(day=next_dt.day + 1)
-        next_run = next_dt.isoformat()
+            next_dt += timedelta(days=1)
+        return next_dt.isoformat()
+
+    next_generate_at = next_daily_at(settings.schedule_generate_time, "00:15")
+    next_send_at = next_daily_at(settings.schedule_send_time, "08:30")
 
     groups = repo.list_groups(session, only_enabled=True)
     return {
@@ -381,7 +394,8 @@ def status(session: Session = Depends(repo.get_session), settings: Settings = De
         "range_end": window.range_end.isoformat() if window.should_run else "",
         "should_run_today": window.should_run,
         "is_weekend_summary": window.is_weekend_summary,
-        "next_generate_at": next_run,
+        "next_generate_at": next_generate_at,
+        "next_send_at": next_send_at,
         "enabled_groups": len(groups),
         "total_groups": len(repo.list_groups(session)),
     }

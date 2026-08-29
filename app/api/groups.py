@@ -171,8 +171,28 @@ def _require_active_group(session: Session, group_id: int) -> Group:
     return group
 
 
+def _apply_global_send_time(
+    values: dict,
+    settings: Settings,
+    *,
+    explicitly_provided: bool,
+) -> dict:
+    configured = str(getattr(settings, "schedule_send_time", "08:30") or "08:30")
+    provided = str(values.get("send_time") or "")
+    if explicitly_provided and provided != configured:
+        raise HTTPException(
+            status_code=422,
+            detail=f"群聊不能单独设置发送时间；日报发送批次固定为 {configured}",
+        )
+    values["send_time"] = configured
+    return values
+
+
 @router.get("")
-def list_groups(session: Session = Depends(repo.get_session)):
+def list_groups(
+    session: Session = Depends(repo.get_session),
+    settings: Settings = Depends(get_settings),
+):
     groups = repo.list_groups(session)
     return [
         {
@@ -184,7 +204,9 @@ def list_groups(session: Session = Depends(repo.get_session)):
             "provider_preference": g.provider_preference,
             "history_provider_preference": g.provider_preference,
             "schedule_rule": g.schedule_rule,
-            "send_time": g.send_time,
+            "send_time": str(
+                getattr(settings, "schedule_send_time", "08:30") or "08:30"
+            ),
             "summary_provider": g.summary_provider,
             "prompt_provider": g.prompt_provider,
             "summary_model": g.summary_model,
@@ -214,8 +236,14 @@ def create_group(
     session: Session = Depends(repo.get_session),
     settings: Settings = Depends(get_settings),
 ):
+    raw_values = payload.model_dump()
+    values = _apply_global_send_time(
+        raw_values,
+        settings,
+        explicitly_provided="send_time" in payload.model_fields_set,
+    )
     try:
-        values = validate_group_provider_values(payload.model_dump(), settings)
+        values = validate_group_provider_values(values, settings)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     values["display_name"] = _validate_output_group_name(
@@ -254,9 +282,15 @@ def update_group(
     settings: Settings = Depends(get_settings),
 ):
     group = _require_active_group(session, group_id)
+    raw_updates = payload.model_dump(exclude_unset=True)
+    updates = _apply_global_send_time(
+        raw_updates,
+        settings,
+        explicitly_provided="send_time" in payload.model_fields_set,
+    )
     try:
         updates = validate_group_provider_values(
-            payload.model_dump(exclude_unset=True),
+            updates,
             settings,
             base=group,
         )

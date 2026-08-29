@@ -106,7 +106,7 @@ const SETTING_GROUPS = [
   {
     id: "legacy",
     title: "邮件与每日调度",
-    description: "每日生成时间用于 V2 前一日群报；各群发送时间仍在群聊配置中管理。邮件字段保留兼容。",
+    description: "每日 00:15 生成前一日群报，08:30 按稳定群 ID 串行发送；邮件字段保留兼容。",
     icon: Clock,
     keys: ["email_enabled", "email_recipient", "email_from", "email_smtp_host", "email_smtp_port", "email_smtp_user", "email_smtp_password", "email_use_ssl", "email_send_partial_report", "schedule_generate_time", "schedule_email_time"],
   },

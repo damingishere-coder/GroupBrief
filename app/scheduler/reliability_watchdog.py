@@ -1,4 +1,4 @@
-"""最近 48 小时无人值守欠账恢复。
+"""进程启动时执行一次的最近 48 小时欠账恢复。
 
 生成按日期从旧到新补跑。发送只处理现有 run.json 明确处于 READY 且未被
 hold 的任务，并继续复用 DeliveryStages 的 claim/unknown/目标预检合同。
@@ -76,7 +76,7 @@ def run_reliability_watchdog(
             )
             write_daily_status(RunStore(settings.output_dir), run_date)
         except Exception as exc:
-            logger.exception("Watchdog 任务清单投影失败：run_date=%s", run_date)
+            logger.exception("启动恢复任务清单投影失败：run_date=%s", run_date)
             generation_results.append(
                 {
                     "run_date": run_date,
@@ -95,7 +95,7 @@ def run_reliability_watchdog(
                 skip_email=True,
             )
         except Exception as exc:
-            logger.exception("Watchdog 生成补偿异常：run_date=%s", run_date)
+            logger.exception("启动恢复生成补偿异常：run_date=%s", run_date)
             result = {
                 "run_date": run_date,
                 "status": "failed",
@@ -110,7 +110,7 @@ def run_reliability_watchdog(
             [now.date().isoformat()], now=now, recovery=False
         )
     except Exception as exc:
-        logger.exception("Watchdog 历史发送扫描异常")
+        logger.exception("启动恢复发送检查异常")
         send_results = [
             {
                 "status": "failed",
@@ -132,7 +132,7 @@ def run_reliability_watchdog(
         "send": send_results,
     }
     logger.info(
-        "可靠性 Watchdog 完成：status=%s dates=%d generation=%d send=%d",
+        "启动恢复检查完成：status=%s dates=%d generation=%d send=%d",
         status,
         len(dates),
         len(generation_results),

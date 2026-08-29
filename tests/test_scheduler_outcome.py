@@ -63,6 +63,8 @@ def test_system_status_exposes_configured_owner_and_actual_scheduler_state(monke
 
     assert result["scheduler_owner"] == "external"
     assert result["scheduler_active"] is False
+    assert result["next_generate_at"]
+    assert result["next_send_at"]
 
 
 class _FakeStore:

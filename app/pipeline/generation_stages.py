@@ -306,7 +306,7 @@ class GenerationStages:
             **self._name_sync_audit(group),
             "period_start": context.period_start,
             "period_end": context.period_end,
-            "send_time": group.send_time,
+            "send_time": self.settings.schedule_send_time,
             "image_enabled": bool(group.image_enabled),
             "ranking_template": group.ranking_template,
             "ranking_count_policy": getattr(

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Iterable
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -213,9 +213,9 @@ def _aggregate_node_status(statuses: list[str]) -> str:
     return "pending"
 
 
-def _scheduled_at(run_date: str, generate_time: str, timezone: str) -> str:
+def _scheduled_at(run_date: str, clock_time: str, timezone: str) -> str:
     try:
-        hour, minute = (int(part) for part in generate_time.split(":", 1))
+        hour, minute = (int(part) for part in clock_time.split(":", 1))
         value = datetime.fromisoformat(run_date).replace(
             hour=hour,
             minute=minute,
@@ -223,6 +223,19 @@ def _scheduled_at(run_date: str, generate_time: str, timezone: str) -> str:
             microsecond=0,
             tzinfo=ZoneInfo(timezone),
         )
+    except (TypeError, ValueError, ZoneInfoNotFoundError):
+        return ""
+    return value.isoformat()
+
+
+def _next_scheduled_at(clock_time: str, timezone: str) -> str:
+    try:
+        tz = ZoneInfo(timezone)
+        now = datetime.now(tz)
+        hour, minute = (int(part) for part in clock_time.split(":", 1))
+        value = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if value <= now:
+            value += timedelta(days=1)
     except (TypeError, ValueError, ZoneInfoNotFoundError):
         return ""
     return value.isoformat()
@@ -358,6 +371,7 @@ def build_daily_status(
     runs: Iterable[dict] | None = None,
     output_root: Path | None = None,
     schedule_generate_time: str = "00:15",
+    schedule_send_time: str = "08:30",
     app_timezone: str = "Asia/Shanghai",
 ) -> dict:
     """只读构建每日运行投影；不会写回 scheduler 或 run.json。"""
@@ -499,6 +513,19 @@ def build_daily_status(
         "scheduled_at": _scheduled_at(
             run_date,
             schedule_generate_time,
+            app_timezone,
+        ),
+        "send_scheduled_at": _scheduled_at(
+            run_date,
+            schedule_send_time,
+            app_timezone,
+        ),
+        "next_generate_at": _next_scheduled_at(
+            schedule_generate_time,
+            app_timezone,
+        ),
+        "next_send_at": _next_scheduled_at(
+            schedule_send_time,
             app_timezone,
         ),
     }

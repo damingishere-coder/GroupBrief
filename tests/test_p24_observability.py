@@ -183,10 +183,11 @@ def test_readiness_degrades_when_required_wechat_dependency_failed(tmp_path):
     assert response.json()["checks"]["wechat_data"]["status"] == "UNAVAILABLE"
 
 
-def test_liveness_stays_ok_while_stale_scheduler_heartbeat_degrades_readiness(tmp_path):
+def test_idle_scheduler_stays_ready_even_when_last_event_is_old(tmp_path, monkeypatch):
     from datetime import datetime, timedelta
 
     from app.scheduler.heartbeat import record_scheduler_heartbeat
+    from app.scheduler import manager
 
     client, api = _readiness_client(tmp_path)
     settings = api.dependency_overrides[get_settings]()
@@ -196,10 +197,18 @@ def test_liveness_stays_ok_while_stale_scheduler_heartbeat_degrades_readiness(tm
     api.state.scheduler_active = True
     record_scheduler_heartbeat(
         settings,
-        job="send_due",
+        job="send_batch",
         status="success",
         now=datetime.now().astimezone() - timedelta(minutes=10),
     )
+
+    class RunningScheduler:
+        running = True
+
+        def get_jobs(self):
+            return []
+
+    monkeypatch.setattr(manager, "get_scheduler", lambda: RunningScheduler())
 
     with client:
         live = client.get("/api/system/health")
@@ -207,9 +216,9 @@ def test_liveness_stays_ok_while_stale_scheduler_heartbeat_degrades_readiness(tm
 
     assert live.status_code == 200
     assert live.json()["status"] == "ok"
-    assert ready.status_code == 503
-    assert ready.json()["status"] == "degraded"
-    assert ready.json()["checks"]["scheduler_heartbeat"]["status"] == "STALE"
+    assert ready.status_code == 200
+    assert ready.json()["status"] == "ready"
+    assert ready.json()["checks"]["scheduler_heartbeat"]["status"] == "OK"
 
 
 def test_startup_check_exception_is_preserved_as_explicit_failure(caplog):

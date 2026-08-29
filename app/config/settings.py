@@ -14,6 +14,7 @@ _ENVIRONMENT_ONLY_FIELDS = frozenset(
         "allow_test_providers",
         "legacy_v1_write_mode",
         "scheduler_owner",
+        "schedule_send_time",
         "reliability_watchdog_enabled",
         "reliability_lookback_days",
         "reliability_watchdog_interval_minutes",
@@ -166,14 +167,16 @@ class Settings(BaseSettings):
     # disabled：不注册任何自动任务。该字段只由环境配置，不通过设置 API 修改。
     scheduler_owner: Literal["fastapi", "external", "disabled"] = "fastapi"
     schedule_generate_time: str = "00:15"
+    # 日报微信发送采用唯一全局批次时间；群级 send_time 仅保留数据库兼容。
+    schedule_send_time: str = "08:30"
     schedule_email_time: str = "after_generate"
     schedule_startup_catchup_enabled: bool = True
-    # 无人值守恢复：定期扫描最近 N 天，按旧到新补生成和明确未提交的发送。
-    # 仅通过环境/部署配置修改，避免运行时改值却没有重建 APScheduler job。
+    # 无人值守恢复只在进程启动时检查一次，不再注册固定频率 Watchdog。
+    # 字段名保留一版以兼容既有部署环境。
     reliability_watchdog_enabled: bool = True
     # 自动恢复严格限制为当前日和前一日（48 小时产品边界）。更早任务只预览。
     reliability_lookback_days: int = 2
-    reliability_watchdog_interval_minutes: int = 10
+    reliability_watchdog_interval_minutes: int = 10  # 已弃用，仅兼容旧配置
     # 周报能力先部署、后灰度：14 天可靠性验收完成前保持关闭。
     weekly_insights_enabled: bool = False
     weekly_send_enabled: bool = False

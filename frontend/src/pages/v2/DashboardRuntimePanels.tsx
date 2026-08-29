@@ -41,7 +41,8 @@ function TaskNodes({ runtime }: { runtime: DashboardRuntime }) {
         <div>
           <h2>任务节点</h2>
           <p>
-            计划 {formatRuntimeTime(runtime.scheduler.scheduled_at)}
+            下次生成 {formatRuntimeTime(runtime.scheduler.next_generate_at)}
+            {` · 下次发送批次 ${formatRuntimeTime(runtime.scheduler.next_send_at)}`}
             {runtime.scheduler.generation_started_at
               ? ` · 启动 ${formatRuntimeTime(runtime.scheduler.generation_started_at)}`
               : " · 等待后台任务启动"}

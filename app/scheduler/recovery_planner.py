@@ -112,6 +112,7 @@ class RecoveryPlanner:
                     groups,
                     datetime.fromisoformat(run_date).date(),
                     timezone=self.settings.app_timezone,
+                    schedule_send_time=self.settings.schedule_send_time,
                 )
                 source = "current_config_preview"
             runs = {
@@ -204,6 +205,7 @@ class RecoveryPlanner:
                     selected_groups,
                     datetime.fromisoformat(run_date).date(),
                     timezone=self.settings.app_timezone,
+                    schedule_send_time=self.settings.schedule_send_time,
                     resolver=pipeline.period_resolver,
                 )
                 state = self.state_store.load(run_date)
@@ -267,6 +269,7 @@ class RecoveryPlanner:
                 groups,
                 datetime.fromisoformat(run_date).date(),
                 timezone=self.settings.app_timezone,
+                schedule_send_time=self.settings.schedule_send_time,
                 resolver=pipeline.period_resolver,
             )
             actual_ids = sorted(

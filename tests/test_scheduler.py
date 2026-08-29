@@ -8,7 +8,7 @@ import pytest
 
 from app.scheduler.manager import (
     _parse_generate_time,
-    _schedule_startup_catchup,
+    _schedule_startup_recovery,
     get_scheduler,
     start_scheduler,
     stop_scheduler,
@@ -25,7 +25,6 @@ def test_scheduler_jobs_configured():
     # 这里只验证 Cron 注册；禁止启动补偿在测试后台触发真实生成链路。
     settings = Settings(
         _env_file=None,
-        schedule_startup_catchup_enabled=False,
         reliability_watchdog_enabled=False,
     )
     start_scheduler(settings)
@@ -34,8 +33,9 @@ def test_scheduler_jobs_configured():
     jobs = scheduler.get_jobs()
     ids = [j.id for j in jobs]
     assert "daily_v2_generate_email" in ids
-    assert "send_wechat_due" in ids
+    assert "daily_wechat_send_batch" in ids
     assert "reliability_watchdog" not in ids
+    assert len(jobs) == 2
     assert "generate_daily" not in ids
     assert "send_daily_email" not in ids
     for job in jobs:
@@ -44,19 +44,22 @@ def test_scheduler_jobs_configured():
             fields = {field.name: str(field) for field in job.trigger.fields}
             assert fields["hour"] == "0"
             assert fields["minute"] == "15"
-        if job.id == "send_wechat_due":
-            assert job.name == "SendWechatDue"
+        if job.id == "daily_wechat_send_batch":
+            assert job.name == "DailyWechatSendBatch"
+            fields = {field.name: str(field) for field in job.trigger.fields}
+            assert fields["hour"] == "8"
+            assert fields["minute"] == "30"
+        assert job.trigger.__class__.__name__ == "CronTrigger"
     assert start_scheduler(settings) is scheduler
     stop_scheduler()
     assert get_scheduler() is None
 
 
-def test_scheduler_registers_reliability_watchdog():
+def test_scheduler_registers_only_one_startup_recovery_job():
     from app.config.settings import Settings
 
     settings = Settings(
         _env_file=None,
-        schedule_startup_catchup_enabled=False,
         reliability_watchdog_enabled=True,
         reliability_watchdog_interval_minutes=7,
     )
@@ -64,9 +67,10 @@ def test_scheduler_registers_reliability_watchdog():
     scheduler = get_scheduler()
     assert scheduler is not None
     jobs = {job.id: job for job in scheduler.get_jobs()}
-    assert "reliability_watchdog" in jobs
-    assert "reliability_watchdog_startup" in jobs
-    assert jobs["reliability_watchdog"].name == "ReliabilityWatchdog"
+    assert "reliability_watchdog" not in jobs
+    assert "startup_recovery" in jobs
+    assert jobs["startup_recovery"].name == "StartupRecovery"
+    assert jobs["startup_recovery"].trigger.__class__.__name__ == "DateTrigger"
     stop_scheduler()
 
 
@@ -778,53 +782,139 @@ def test_email_started_without_completion_remains_result_unknown(tmp_path, monke
     assert saved["email_hold"] is True
 
 
-def test_startup_catchup_is_added_only_when_today_is_incomplete(monkeypatch):
+def test_startup_recovery_is_single_date_trigger():
     from app.config.settings import Settings
-    from app.scheduler import manager
 
-    settings = Settings(_env_file=None, schedule_startup_catchup_enabled=True)
+    settings = Settings(_env_file=None, reliability_watchdog_enabled=True)
     captured = []
 
     class FakeScheduler:
         def add_job(self, *args, **kwargs):
             captured.append((args, kwargs))
 
-    class IncompleteState:
-        def __init__(self, output_root):
-            pass
-
-        def load(self, run_date):
-            return {"run_date": run_date}
-
-    monkeypatch.setattr(manager, "DailyScheduleState", IncompleteState)
     before = datetime(2026, 8, 21, 0, 14, 59, tzinfo=ZoneInfo("Asia/Shanghai"))
-    assert _schedule_startup_catchup(FakeScheduler(), settings, now=before) is False
-    assert captured == []
-
-    now = datetime(2026, 8, 21, 0, 15, tzinfo=ZoneInfo("Asia/Shanghai"))
-
-    added = _schedule_startup_catchup(FakeScheduler(), settings, now=now)
+    added = _schedule_startup_recovery(FakeScheduler(), settings, now=before)
 
     assert added is True
-    assert captured[0][1]["id"] == "daily_v2_startup_catchup"
-    assert captured[0][1]["kwargs"] == {"skip_email": True}
+    assert captured[0][1]["id"] == "startup_recovery"
+    assert captured[0][1]["name"] == "StartupRecovery"
+    assert captured[0][1]["trigger"].__class__.__name__ == "DateTrigger"
 
-    class CompletedState(IncompleteState):
-        def load(self, run_date):
-            return {"run_date": run_date, "generation_completed_at": "done"}
+    disabled = Settings(_env_file=None, reliability_watchdog_enabled=False)
+    assert _schedule_startup_recovery(FakeScheduler(), disabled, now=before) is False
+    assert len(captured) == 1
 
-    monkeypatch.setattr(manager, "DailyScheduleState", CompletedState)
-    assert _schedule_startup_catchup(FakeScheduler(), settings, now=now) is False
 
-    class CorruptState(IncompleteState):
-        def load(self, run_date):
-            return {
-                "run_date": run_date,
-                "state_status": "corrupt",
-                "error_type": "SCHEDULER_STATE_CORRUPT",
-            }
+def test_on_demand_ready_send_is_deduplicated_and_unknown_is_not_rescheduled(tmp_path):
+    from app.config.settings import Settings
+    from app.scheduler.manager import _schedule_on_demand_jobs
+    from app.v2.constants import READY_TO_SEND
+    from app.v2.run_store import RunStore
 
-    monkeypatch.setattr(manager, "DailyScheduleState", CorruptState)
-    captured.clear()
-    assert _schedule_startup_catchup(FakeScheduler(), settings, now=now) is False
-    assert captured == []
+    settings = Settings(_env_file=None, output_root_override=str(tmp_path / "output"))
+    store = RunStore(settings.output_dir)
+    run_date = "2026-08-29"
+    now = datetime(2026, 8, 29, 8, 40, tzinfo=ZoneInfo("Asia/Shanghai"))
+    store.save_run(
+        "群一",
+        run_date,
+        {
+            "group_id": "1",
+            "status": READY_TO_SEND,
+            "wechat_send_enabled": True,
+            "send_hold": False,
+        },
+    )
+
+    class FakeScheduler:
+        def __init__(self):
+            self.jobs = {}
+
+        def add_job(self, func, **kwargs):
+            self.jobs[kwargs["id"]] = (func, kwargs)
+
+    scheduler = FakeScheduler()
+    first = _schedule_on_demand_jobs(
+        scheduler,
+        settings,
+        now=now,
+        run_dates=[run_date],
+    )
+    second = _schedule_on_demand_jobs(
+        scheduler,
+        settings,
+        now=now,
+        run_dates=[run_date],
+    )
+
+    assert first == ["daily_send_once_20260829"]
+    assert second == first
+    assert list(scheduler.jobs) == ["daily_send_once_20260829"]
+    assert scheduler.jobs[first[0]][1]["trigger"].__class__.__name__ == "DateTrigger"
+
+    store.update(
+        "群一",
+        run_date,
+        send_hold=True,
+        send_state="unknown",
+        send_hold_reason="SEND_RESULT_UNKNOWN",
+    )
+    held_scheduler = FakeScheduler()
+    assert _schedule_on_demand_jobs(
+        held_scheduler,
+        settings,
+        now=now,
+        run_dates=[run_date],
+    ) == []
+    assert held_scheduler.jobs == {}
+
+
+def test_on_demand_rebuilds_only_persisted_generation_and_send_retries(tmp_path):
+    from app.config.settings import Settings
+    from app.scheduler.daily_v2_job import DailyScheduleState
+    from app.scheduler.manager import _schedule_on_demand_jobs
+    from app.v2.constants import READY_TO_SEND
+    from app.v2.run_store import RunStore
+
+    settings = Settings(_env_file=None, output_root_override=str(tmp_path / "output"))
+    state = DailyScheduleState(settings.output_dir)
+    store = RunStore(settings.output_dir)
+    now = datetime(2026, 8, 29, 8, 40, tzinfo=ZoneInfo("Asia/Shanghai"))
+    state.update(
+        "2026-08-28",
+        generation_started_at="2026-08-28T00:15:00+08:00",
+        generation_status="retry_pending",
+        next_retry_at="2026-08-29T08:45:00+08:00",
+    )
+    store.save_run(
+        "群二",
+        "2026-08-29",
+        {
+            "group_id": "2",
+            "status": READY_TO_SEND,
+            "wechat_send_enabled": True,
+            "send_next_retry_at": "2026-08-29T08:46:00+08:00",
+        },
+    )
+
+    class FakeScheduler:
+        def __init__(self):
+            self.jobs = {}
+
+        def add_job(self, func, **kwargs):
+            self.jobs[kwargs["id"]] = (func, kwargs)
+
+    scheduler = FakeScheduler()
+    scheduled = _schedule_on_demand_jobs(
+        scheduler,
+        settings,
+        now=now,
+        run_dates=["2026-08-28", "2026-08-29"],
+        include_newly_ready_send=False,
+    )
+
+    assert scheduled == ["daily_v2_retry_20260828", "daily_send_once_20260829"]
+    generation_at = scheduler.jobs[scheduled[0]][1]["trigger"].run_date
+    send_at = scheduler.jobs[scheduled[1]][1]["trigger"].run_date
+    assert generation_at.isoformat() == "2026-08-29T08:45:00+08:00"
+    assert send_at.isoformat() == "2026-08-29T08:46:00+08:00"

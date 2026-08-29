@@ -240,6 +240,8 @@ class SubmittedFailureTextSender(FakeSender):
 
 
 def _make_pipeline(tmp_path, source=None, prompt=None, gen=None, sender=None, image_enabled=True, send_time="08:30", image_theme="blue_white", image_theme_custom="", schedule_rule="daily_previous_day"):
+    from app.config.settings import get_settings
+
     source = source or FakeSource()
     prompt = prompt or FakePrompt()
     gen = gen or FakeGenerator()
@@ -277,6 +279,7 @@ def _make_pipeline(tmp_path, source=None, prompt=None, gen=None, sender=None, im
         group = repo.save_group(session, group)
 
     return DailyPipeline(
+        settings=get_settings().model_copy(deep=True),
         data_source=source,
         prompt_builder=prompt,
         image_generator=gen,
@@ -1213,7 +1216,21 @@ def test_send_due_uses_cached_name_when_live_sync_is_unavailable(tmp_path):
 
 
 def test_send_due_processes_same_time_groups_in_stable_order(tmp_path, monkeypatch):
-    sender = FakeSender()
+    class SerialGuardSender(FakeSender):
+        def __init__(self):
+            super().__init__()
+            self.active_calls = 0
+            self.max_active_calls = 0
+
+        def send_text(self, target: str, text: str):
+            self.active_calls += 1
+            self.max_active_calls = max(self.max_active_calls, self.active_calls)
+            try:
+                return super().send_text(target, text)
+            finally:
+                self.active_calls -= 1
+
+    sender = SerialGuardSender()
     pipeline, _ = _make_pipeline(tmp_path, sender=sender, image_enabled=False)
     groups = [
         Group(
@@ -1250,6 +1267,7 @@ def test_send_due_processes_same_time_groups_in_stable_order(tmp_path, monkeypat
 
     assert [result["group_name"] for result in results] == ["顺序群一", "顺序群二"]
     assert [target for target, _ in sender.text_calls] == ["目标一", "目标二"]
+    assert sender.max_active_calls == 1
 
 
 def test_send_due_isolates_one_group_pre_submit_exception(tmp_path, monkeypatch):
@@ -1330,6 +1348,28 @@ def test_send_due_aborts_batch_when_desktop_submission_state_is_unknown(tmp_path
     assert pipeline.store.load_run("不应继续群", "2026-08-18")["status"] == READY_TO_SEND
 
 
+def test_send_due_aborts_batch_when_sender_returns_unknown_result(tmp_path, monkeypatch):
+    sender = UnknownTextSender()
+    pipeline, _ = _make_pipeline(tmp_path, sender=sender, image_enabled=False)
+    groups = [
+        Group(id=131, display_name="未知返回群", wechat_group_name="未知返回群", send_target="目标一", send_time="08:30", image_enabled=False, wechat_send_enabled=True),
+        Group(id=132, display_name="后续禁止群", wechat_group_name="后续禁止群", send_target="目标二", send_time="08:30", image_enabled=False, wechat_send_enabled=True),
+    ]
+    monkeypatch.setattr(pipeline, "_load_groups", lambda group_ids=None: groups)
+    for group in groups:
+        pipeline.store.save_run(group.display_name, "2026-08-18", _ready_run_contract())
+        path = pipeline.store.ranking_txt_path(group.display_name, "2026-08-18")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("日报", encoding="utf-8")
+
+    results = pipeline.send_due(now=datetime(2026, 8, 18, 8, 30, 0))
+
+    assert len(results) == 1
+    assert results[0]["error_type"] == "SEND_RESULT_UNKNOWN"
+    assert [target for target, _ in sender.text_calls] == ["目标一"]
+    assert pipeline.store.load_run("后续禁止群", "2026-08-18")["status"] == READY_TO_SEND
+
+
 def test_send_due_uses_cached_groups_when_sync_itself_raises(tmp_path, monkeypatch):
     pipeline = _ready_to_send(tmp_path, image_enabled=False)
     monkeypatch.setattr(
@@ -1361,9 +1401,18 @@ def test_send_due_skips_group_when_wechat_send_is_not_enabled(tmp_path):
 
 def test_send_not_due_yet(tmp_path):
     pipeline = _ready_to_send(tmp_path, send_time="12:00")
+    pipeline.settings.schedule_send_time = "12:00"
     now = datetime(2026, 8, 18, 9, 0, 0)
     results = pipeline.send_due(now=now)
     assert results == []
+
+
+def test_group_send_time_is_ignored_in_favor_of_global_batch_time(tmp_path):
+    pipeline = _ready_to_send(tmp_path, send_time="12:00")
+
+    results = pipeline.send_due(now=datetime(2026, 8, 18, 8, 30, 0))
+
+    assert results[0]["status"] == "sent"
 
 
 def test_send_no_duplicate_after_sent(tmp_path):

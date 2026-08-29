@@ -86,7 +86,7 @@ function toForm(group: GroupV2): GroupPayload {
     enabled: group.enabled,
     provider_preference: group.provider_preference || "",
     schedule_rule: group.schedule_rule || "daily_previous_day",
-    send_time: group.send_time || "08:30",
+    send_time: "08:30",
     summary_provider: group.summary_provider || "",
     prompt_provider: group.prompt_provider || "",
     summary_model: group.summary_model || "",
@@ -246,7 +246,6 @@ export default function GroupDetail({ groupId, invalidGroupId }: GroupDetailProp
     const next: Record<string, string> = {};
     if (!form.display_name.trim()) next.display_name = "请填写展示名称";
     if (!form.wechat_group_id.trim()) next.wechat_group_id = "请绑定真实微信群 ID";
-    if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(form.send_time.trim())) next.send_time = "请输入 HH:mm 格式，例如 08:30";
     setErrors(next);
     return Object.keys(next).length === 0;
   };
@@ -260,7 +259,7 @@ export default function GroupDetail({ groupId, invalidGroupId }: GroupDetailProp
       wechat_group_id: form.wechat_group_id.trim(),
       wechat_group_name: form.wechat_group_name?.trim() || form.display_name.trim(),
       send_target: form.send_target.trim(),
-      send_time: form.send_time.trim(),
+      send_time: "08:30",
     };
     const request = groupId ? updateGroup(groupId, payload) : createGroup(payload);
     request
@@ -409,8 +408,11 @@ export default function GroupDetail({ groupId, invalidGroupId }: GroupDetailProp
               <option value="weekday_default">仅工作日（周一=周五至周日）</option>
             </select>
           </Field>
-          <Field id="send-time" label="发送时间" required error={errors.send_time}>
-            <input id="send-time" type="time" value={form.send_time} onChange={(event) => setField("send_time", event.target.value)} />
+          <Field id="send-batch-time" label="发送批次">
+            <div id="send-batch-time">
+              <strong>每天 08:30</strong>
+              <span className="group-detail-field-help">所有启用群按稳定群 ID 顺序串行发送，群聊不能单独修改时间。</span>
+            </div>
           </Field>
           <Field id="ranking-count-policy" label="排行榜统计口径">
             <select id="ranking-count-policy" value={form.ranking_count_policy} onChange={(event) => setField("ranking_count_policy", event.target.value as GroupPayload["ranking_count_policy"])}>

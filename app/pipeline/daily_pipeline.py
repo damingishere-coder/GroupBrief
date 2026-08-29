@@ -150,7 +150,7 @@ class DailyPipeline:
         if group_overrides:
             allowed_override_fields = {
                 "wechat_group_id", "wechat_group_name", "provider_preference",
-                "schedule_rule", "send_time", "summary_provider", "summary_model",
+                "schedule_rule", "summary_provider", "summary_model",
                 "prompt_provider", "prompt_model", "image_enabled", "ranking_template",
                 "ranking_count_policy", "sender_name_policy",
                 "image_prompt_template", "image_theme", "image_theme_custom",
@@ -215,7 +215,11 @@ class DailyPipeline:
             except Exception as exc:
                 logger.exception("群 %s worker 未捕获异常，已隔离", self._group_name(group))
                 result = self._record_group_failure(group, run_date_str, exc, "unexpected")
-            return [self._run_image_when_ready_safe(group, result, run_date_str, force)]
+            final_results = [
+                self._run_image_when_ready_safe(group, result, run_date_str, force)
+            ]
+            self._schedule_ready_send_once_safe(run_date_str)
+            return final_results
         else:
             with ThreadPoolExecutor(
                 max_workers=min(group_limit, len(groups)),
@@ -282,7 +286,28 @@ class DailyPipeline:
                         )
 
         # 生图按 Prompt 完成顺序启动，API 结果仍按群配置顺序返回。
-        return [results_by_index[index] for index in range(len(groups))]
+        final_results = [results_by_index[index] for index in range(len(groups))]
+        self._schedule_ready_send_once_safe(run_date_str)
+        return final_results
+
+    def _schedule_ready_send_once_safe(self, run_date: str) -> None:
+        """生成结束后若已进入发送窗口，去重注册一次性发送任务。"""
+        try:
+            from app.scheduler.manager import (
+                _schedule_on_demand_jobs,
+                get_scheduler,
+            )
+
+            scheduler = get_scheduler()
+            if scheduler is not None:
+                _schedule_on_demand_jobs(
+                    scheduler,
+                    self.settings,
+                    run_dates=[run_date],
+                )
+        except Exception:
+            # 调度投影失败不能改变已完成的生成结果；启动恢复会从 run.json 重建。
+            logger.exception("READY_TO_SEND 一次性任务注册失败：run_date=%s", run_date)
 
     @staticmethod
     def _group_name(group: Group) -> str:
@@ -568,7 +593,7 @@ class DailyPipeline:
     ) -> list[dict]:
         """扫描指定日报日期。
 
-        默认 ``send_due`` 仍只处理当天。Watchdog 才能传入历史日期；历史任务
+        默认 ``send_due`` 只处理当天。恢复入口可以显式传入历史日期；历史任务
         仍必须通过现有 claim、未知结果锁、目标预检和图片预检。
         """
         now = now or datetime.now(ZoneInfo(self.settings.app_timezone))
@@ -603,7 +628,7 @@ class DailyPipeline:
                     continue  # 已发送，绝不重复
                 if run.get("send_hold"):
                     continue  # unknown / 手工审核必须保持 fail-closed
-                send_time = parse_send_time(group.send_time or run.get("send_time", "08:30"))
+                send_time = parse_send_time(self.settings.schedule_send_time)
                 due_at = datetime.combine(report_date, send_time, tzinfo=now.tzinfo)
                 if now < due_at:
                     continue
@@ -682,6 +707,17 @@ class DailyPipeline:
                         return results
                     continue
                 results.append(result)
+                if (
+                    result.get("error_type") == "SEND_RESULT_UNKNOWN"
+                    or result.get("status") == "unknown"
+                ):
+                    logger.error(
+                        "微信发送结果未知，停止本批次后续群发送 date=%s group=%s",
+                        run_date,
+                        group_name,
+                    )
+                    self._write_runtime_status_safe(normalized_dates)
+                    return results
         self._write_runtime_status_safe(normalized_dates)
         return results
 
@@ -724,6 +760,24 @@ class DailyPipeline:
                 unresolved_stage = stage
                 break
         if not unresolved_stage:
+            try:
+                self.store.update(
+                    group_name,
+                    run_date,
+                    send_state="failed_final",
+                    send_hold=True,
+                    send_hold_reason="SEND_PRE_SUBMIT_EXCEPTION",
+                    needs_manual_send=True,
+                    send_error=detail,
+                    send_error_type="SEND_PRE_SUBMIT_FAILED",
+                    send_next_retry_at="",
+                )
+            except Exception:
+                logger.exception(
+                    "发送提交前异常状态写入失败：group=%s date=%s",
+                    group_name,
+                    run_date,
+                )
             return (
                 {
                     "group_name": group_name,
@@ -1419,7 +1473,7 @@ class DailyPipeline:
         if run.get("status") not in (IMAGE_READY, READY_TO_SEND) and not can_resend_review:
             return {"status": "failed", "error": f"状态 {run.get('status')} 不可发送"}
         scheduled_date = parse_date(run_date)
-        send_clock = parse_send_time(group.send_time or run.get("send_time", "08:30"))
+        send_clock = parse_send_time(self.settings.schedule_send_time)
         scheduled_at = datetime.combine(scheduled_date, send_clock, tzinfo=now.tzinfo)
         late_cutoff = scheduled_at + timedelta(
             minutes=max(int(self.settings.wechat_late_send_window_minutes), 0)
@@ -1537,7 +1591,7 @@ class DailyPipeline:
                 continue
             if run.get("sent_at") or run.get("send_hold"):
                 continue
-            send_time = parse_send_time(group.send_time or run.get("send_time", "08:30"))
+            send_time = parse_send_time(self.settings.schedule_send_time)
             due_at = datetime.combine(date.fromisoformat(run_date), send_time, tzinfo=now.tzinfo)
             if due_at <= now and (recovery or now <= due_at + late_window):
                 group_ids.append(int(group.id))

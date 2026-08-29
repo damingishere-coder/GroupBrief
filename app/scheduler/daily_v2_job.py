@@ -280,6 +280,7 @@ def _finalize_invocation(settings: Settings, run_date: str, result: dict) -> dic
         "last_invocation_status": finalized["outcome_status"],
         "last_invocation_exit_code": finalized["exit_code"],
         "last_invocation_completed_at": _now_iso(),
+        "next_retry_at": None,
     }
     if finalized["outcome_status"] == "already_running":
         busy_count = int(state.get("owner_busy_count") or 0) + 1
@@ -323,6 +324,7 @@ def ensure_daily_manifest(
         loader(),
         parsed,
         timezone=settings.app_timezone,
+        schedule_send_time=settings.schedule_send_time,
         resolver=resolver,
     )
     manifest = manifest_fields(expected)

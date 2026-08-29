@@ -154,3 +154,32 @@ def test_group_image_theme_roundtrip_and_validation():
             assert ordinary_update.status_code == 200
         finally:
             client.delete(f"/api/groups/{group_id}")
+
+
+def test_group_send_time_is_global_and_non_default_values_are_rejected():
+    display_name = "全局发送批次测试群"
+    with client:
+        created = client.post("/api/groups", json={"display_name": display_name})
+        assert created.status_code == 200
+        group_id = created.json()["id"]
+        try:
+            listed = next(
+                item for item in client.get("/api/groups").json()
+                if item["id"] == group_id
+            )
+            assert listed["send_time"] == "08:30"
+
+            rejected = client.put(
+                f"/api/groups/{group_id}",
+                json={"send_time": "09:15"},
+            )
+            assert rejected.status_code == 422
+            assert "固定为 08:30" in rejected.json()["detail"]
+
+            create_rejected = client.post(
+                "/api/groups",
+                json={"display_name": display_name + "-拒绝", "send_time": "07:00"},
+            )
+            assert create_rejected.status_code == 422
+        finally:
+            client.delete(f"/api/groups/{group_id}")

@@ -151,6 +151,9 @@ def test_build_daily_status_projects_live_nodes_without_writing_runtime_file(tmp
 
     assert payload["overall_status"] == "running"
     assert payload["scheduler"]["scheduled_at"].startswith("2026-08-27T00:15:00")
+    assert payload["scheduler"]["send_scheduled_at"].startswith("2026-08-27T08:30:00")
+    assert payload["scheduler"]["next_generate_at"]
+    assert payload["scheduler"]["next_send_at"]
     assert by_node["scheduler"]["status"] == "success"
     assert by_node["ranking"]["status"] == "running"
     assert by_group["群A"]["current_node"] == "ranking"

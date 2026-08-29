@@ -41,6 +41,7 @@ export interface SystemStatus {
   should_run_today: boolean;
   is_weekend_summary: boolean;
   next_generate_at: string;
+  next_send_at: string;
   enabled_groups: number;
   total_groups: number;
 }
@@ -199,6 +200,9 @@ export interface DashboardRuntime {
   overall_status: RuntimeOverallStatus;
   scheduler: {
     scheduled_at?: string;
+    send_scheduled_at?: string;
+    next_generate_at?: string;
+    next_send_at?: string;
     generation_started_at?: string;
     generation_completed_at?: string;
     generation_status?: string;
