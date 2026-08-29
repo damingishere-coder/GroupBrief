@@ -18,7 +18,7 @@ from app.ai.strict_prompt_contract import STRICT_IMAGE_FACT_MARKER
 
 FACT_REVIEW_FILE = "image_fact_review.json"
 _NUMERIC_FACT_RE = re.compile(
-    r"(?<![A-Za-z0-9])\d+(?:[.,]\d+)?(?:\s*(?:%|％|kg|KG|公斤|斤|元|万元|万|W|w|天|℃|°C|岁|厘米|cm|米|m|小时|分钟))?"
+    r"(?<![A-Za-z0-9])\d+(?:[.,]\d+)?(?:[^\S\r\n]*(?:%|％|kg|KG|公斤|斤|元|万元|万|W|w|天|℃|°C|岁|厘米|cm|米|m|小时|分钟))?"
 )
 _FACTUAL_TEXT_MARKERS = (
     "bmi",

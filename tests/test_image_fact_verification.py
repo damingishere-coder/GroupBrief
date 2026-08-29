@@ -81,6 +81,19 @@ def test_allows_ocr_fragments_of_known_numbers_and_ignores_name_garble(tmp_path)
     assert review.unknown_text == ()
 
 
+def test_numeric_units_do_not_join_across_ocr_lines(tmp_path):
+    prompt, image = _evidence(tmp_path)
+
+    review = review_image_facts(
+        prompt,
+        image,
+        ocr_text="0\n米游涩泛二次元同好摸鱼群",
+    )
+
+    assert review.ok
+    assert review.unknown_numeric == ()
+
+
 def test_strict_contract_removes_bmi_display_instructions():
     prompt = """【版面4】
 手指一路猜到BMI
