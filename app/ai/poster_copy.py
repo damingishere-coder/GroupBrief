@@ -10,7 +10,7 @@ from typing import Any, Iterable
 from app.ai.layouts import LayoutPlan, SHOT_LABELS
 
 
-POSTER_COPY_VERSION = "fixed-chat-comic-v1"
+POSTER_COPY_VERSION = "fixed-chat-comic-v2"
 MAX_VISIBLE_PARTICIPANTS = 4
 MAX_VISIBLE_QUOTE_CHARS = 48
 _GENERIC_COPY = ("信息量拉满", "一天顶一周", "比过山车还刺激")
@@ -21,6 +21,7 @@ _FORBIDDEN_RENDERED_TERMS = (
     "storyboard_plan",
     "participant_options",
     "evidence_dialogue",
+    "speaker_bindings",
 )
 _ELLIPSIS_END_RE = re.compile(r"(?:\.{3}|…)$")
 _SENTENCE_SEGMENT_RE = re.compile(r"[^。！？!?]+[。！？!?]?")
@@ -49,6 +50,8 @@ class PosterCopyError(ValueError):
 
 @dataclass(frozen=True)
 class ParticipantCopy:
+    message_id: str
+    sender_id: str
     name: str
     action: str
     quote: str = ""
@@ -113,40 +116,32 @@ def build_poster_editor_source(
     topics: list[dict[str, Any]] = []
     for item in ordered:
         topic_id = str(item.get("topic_id") or "")
-        visible = item.get("visible_participants")
-        if not isinstance(visible, list):
-            visible = []
         dialogue = item.get("evidence_dialogue")
         if not isinstance(dialogue, list):
             dialogue = []
-        evidence_speakers = {
-            str(entry.get("speaker") or "").strip()
-            for entry in dialogue
-            if isinstance(entry, dict) and str(entry.get("text") or "").strip()
-        }
-        participant_pool = [
-            *visible,
-            *(item.get("participants") or [] if isinstance(item.get("participants"), list) else []),
-        ]
-        participants: list[str] = []
-        for value in participant_pool:
-            name = str(value).strip()
-            if not name or name in participants or name not in evidence_speakers:
-                continue
-            participants.append(name)
-            if len(participants) >= MAX_VISIBLE_PARTICIPANTS:
-                break
         evidence_dialogue = [
             {
                 "message_id": str(entry.get("message_id") or ""),
+                "sender_id": str(entry.get("sender_id") or ""),
                 "speaker": str(entry.get("speaker") or "").strip(),
                 "text": str(entry.get("text") or "").strip(),
+                "original_text": str(
+                    entry.get("original_text") or entry.get("text") or ""
+                ).strip(),
             }
             for entry in dialogue
             if isinstance(entry, dict)
-            and str(entry.get("speaker") or "").strip() in participants
+            and str(entry.get("message_id") or "").strip()
+            and str(entry.get("speaker") or "").strip()
             and str(entry.get("text") or "").strip()
         ]
+        # 署名是 message-scoped：同一 sender_id 当天改名时，两条绑定都保留，
+        # Poster 模型选择哪条 message_id，程序就使用那条消息当时的显示名。
+        participants: list[str] = []
+        for entry in evidence_dialogue:
+            name = entry["speaker"]
+            if name not in participants:
+                participants.append(name)
         beat = beats.get(topic_id)
         topics.append(
             {
@@ -156,6 +151,7 @@ def build_poster_editor_source(
                 "source_visual_gag": str(item.get("visual_gag") or "").strip(),
                 "participant_options": participants,
                 "evidence_dialogue": evidence_dialogue,
+                "speaker_bindings": evidence_dialogue,
                 "shot_hints": [
                     SHOT_LABELS.get(shot, shot)
                     for shot in (beat.shots if beat is not None else ())
@@ -178,8 +174,10 @@ POSTER_EDITOR_SYSTEM = """你是「群报 GroupBrief」的漫画日报内容编�
 你只能根据给定的 evidence package 写一个 JSON 对象，不得输出 Markdown 或解释。
 所有事实、姓名和对白必须来自对应 topic；不得改变金额、时间、地点和人物关系。
 每个 panel 必须对应一个 topic_id，顺序不得改变。优先使用 2～4 位 participant_options；
-每位人物都要写可绘制的动作、站位或反应。quote 只能逐字复制该 speaker 的 evidence_dialogue
-完整原消息或其中连续、语义完整的片段，不得改写，不得自行添加悬空省略号截断。
+每位人物都要从 speaker_bindings 选择一个真实 message_id，并写可绘制的动作、站位或反应。
+不得输出或改写人物姓名；程序会从 message_id 绑定中填入姓名。quote 只能逐字复制同一
+message_id 的完整原消息或其中连续、语义完整的片段，不得跨消息拼接，不得改写，
+不得自行添加悬空省略号截断。
 如果完整原消息本身以省略号结尾，只能逐字引用整条原消息，不得截取其中一部分。
 有两名以上真实发言人时，优先为至少两人各选一条能形成接话关系的真实气泡。
 event_summary 与 fact_line 必须是完整句，只能概括 source_summary 和 evidence_dialogue。
@@ -201,7 +199,7 @@ event_summary 与 fact_line 必须是完整句，只能概括 source_summary 和
       "event_summary": "一至两句完整背景",
       "composition": "格子大小、景别、人物相对站位",
       "participants": [
-        {"name": "真实昵称", "action": "动作、站位或反应", "quote": "可选真实原话"}
+        {"message_id": "speaker_bindings 中的真实消息ID", "action": "动作、站位或反应", "quote": "该消息的可选真实原话"}
       ],
       "visual_gag": "不改变事实的视觉笑点",
       "fact_line": "完整简短事实说明"
@@ -212,10 +210,26 @@ event_summary 与 fact_line 必须是完整句，只能概括 source_summary 和
 
 
 def build_poster_editor_prompt(source: dict[str, Any]) -> str:
+    # 完整原文只用于程序侧 message_id 校验与 provenance 落盘。编辑模型只需
+    # 看到受控短片段，避免超长消息扩大 Prompt 或诱导它重写无关内容。
+    model_source = dict(source)
+    model_topics: list[dict[str, Any]] = []
+    for topic in source.get("topics") or []:
+        if not isinstance(topic, dict):
+            continue
+        model_topic = dict(topic)
+        for field in ("evidence_dialogue", "speaker_bindings"):
+            model_topic[field] = [
+                {key: value for key, value in entry.items() if key != "original_text"}
+                for entry in topic.get(field) or []
+                if isinstance(entry, dict)
+            ]
+        model_topics.append(model_topic)
+    model_source["topics"] = model_topics
     return (
         "请把以下已证据校验的群聊主题内化成固定群聊漫画编辑稿。"
         "只返回 JSON；内部字段稍后由程序移除，不会交给图片模型。\n\n"
-        + json.dumps(source, ensure_ascii=False, separators=(",", ":"))
+        + json.dumps(model_source, ensure_ascii=False, separators=(",", ":"))
     )
 
 
@@ -227,15 +241,27 @@ def _strip_json_fence(raw: str) -> str:
     return text.strip()
 
 
-def _dialogue_by_speaker(topic: dict[str, Any]) -> dict[str, list[str]]:
-    result: dict[str, list[str]] = {}
-    for entry in topic.get("evidence_dialogue") or []:
+def _bindings_by_message_id(topic: dict[str, Any]) -> dict[str, dict[str, str]]:
+    result: dict[str, dict[str, str]] = {}
+    for entry in topic.get("speaker_bindings") or []:
         if not isinstance(entry, dict):
             continue
+        message_id = str(entry.get("message_id") or "").strip()
+        sender_id = str(entry.get("sender_id") or "").strip()
         speaker = str(entry.get("speaker") or "").strip()
-        text = re.sub(r"\s+", " ", str(entry.get("text") or "")).strip()
-        if speaker and text:
-            result.setdefault(speaker, []).append(text)
+        text = re.sub(
+            r"\s+",
+            " ",
+            str(entry.get("original_text") or entry.get("text") or ""),
+        ).strip()
+        if not message_id or not speaker or not text or message_id in result:
+            continue
+        result[message_id] = {
+            "message_id": message_id,
+            "sender_id": sender_id,
+            "speaker": speaker,
+            "text": text,
+        }
     return result
 
 
@@ -362,31 +388,47 @@ def parse_poster_copy(raw: str, source: dict[str, Any]) -> DailyPosterCopy:
         _assert_text_grounded(fact_line, topic_evidence, f"版面{index}事实说明")
 
         participant_options = [str(value).strip() for value in topic.get("participant_options") or [] if str(value).strip()]
-        dialogue = _dialogue_by_speaker(topic)
+        bindings = _bindings_by_message_id(topic)
+        available_identities = {
+            ("id", binding["sender_id"].casefold())
+            if binding["sender_id"]
+            else ("name", binding["speaker"])
+            for binding in bindings.values()
+        }
         raw_participants = raw_panel.get("participants")
         if not isinstance(raw_participants, list):
             raise PosterCopyError(f"版面{index}缺少 participants")
-        minimum = 2 if len(participant_options) >= 2 else 1
-        if not (minimum <= len(raw_participants) <= min(MAX_VISIBLE_PARTICIPANTS, len(participant_options))):
-            raise PosterCopyError(f"版面{index}应使用 {minimum}～{min(MAX_VISIBLE_PARTICIPANTS, len(participant_options))} 位真实参与者")
+        minimum = 2 if len(available_identities) >= 2 else 1
+        maximum = min(MAX_VISIBLE_PARTICIPANTS, len(available_identities))
+        if not bindings or not (minimum <= len(raw_participants) <= maximum):
+            raise PosterCopyError(f"版面{index}应使用 {minimum}～{maximum} 位真实参与者")
 
         participants: list[ParticipantCopy] = []
-        names: set[str] = set()
-        quoted_speakers: set[str] = set()
+        identities: set[tuple[str, str]] = set()
+        quoted_speakers: set[tuple[str, str]] = set()
         for person_index, raw_person in enumerate(raw_participants, start=1):
             if not isinstance(raw_person, dict):
                 raise PosterCopyError(f"版面{index}第{person_index}位人物格式无效")
-            name = str(raw_person.get("name") or "").strip()
-            if name not in participant_options or name in names:
-                raise PosterCopyError(f"版面{index}包含未授权或重复的群友姓名：{name or '空'}")
-            names.add(name)
+            if str(raw_person.get("name") or "").strip():
+                raise PosterCopyError(f"版面{index}第{person_index}位人物不得由模型提供姓名")
+            message_id = str(raw_person.get("message_id") or "").strip()
+            binding = bindings.get(message_id)
+            if binding is None:
+                raise PosterCopyError(f"版面{index}包含未授权的消息ID：{message_id or '空'}")
+            name = binding["speaker"]
+            sender_id = binding["sender_id"]
+            identity = ("id", sender_id.casefold()) if sender_id else ("name", name)
+            if name not in participant_options or identity in identities:
+                raise PosterCopyError(f"版面{index}包含未授权或重复的群友身份：{name}")
+            identities.add(identity)
             action = _clean_text(raw_person.get("action"), maximum=120, label=f"版面{index}人物动作")
             quote = re.sub(r"\s+", " ", str(raw_person.get("quote") or "")).strip().strip("“”\"")
             if quote:
-                if not _quote_is_contiguous(quote, dialogue.get(name, [])):
-                    raise PosterCopyError(f"版面{index}中“{name}”的气泡无法回查原消息")
+                source_messages = [binding["text"]]
+                if not _quote_is_contiguous(quote, source_messages):
+                    raise PosterCopyError(f"版面{index}中“{name}”的气泡无法回查绑定消息")
                 if len(quote) > MAX_VISIBLE_QUOTE_CHARS:
-                    quote = _shorten_grounded_quote(quote, dialogue.get(name, []))
+                    quote = _shorten_grounded_quote(quote, source_messages)
                     if not quote:
                         raise PosterCopyError(
                             f"版面{index}真实气泡超过 {MAX_VISIBLE_QUOTE_CHARS} 个字符且无法安全缩短"
@@ -397,14 +439,21 @@ def parse_poster_copy(raw: str, source: dict[str, Any]) -> DailyPosterCopy:
                     label=f"版面{index}真实气泡",
                     allow_terminal_ellipsis=_quote_is_full_message(
                         quote,
-                        dialogue.get(name, []),
+                        source_messages,
                     ),
                 )
-                quoted_speakers.add(name)
-            participants.append(ParticipantCopy(name=name, action=action, quote=quote))
+                quoted_speakers.add(identity)
+            participants.append(
+                ParticipantCopy(
+                    message_id=message_id,
+                    sender_id=sender_id,
+                    name=name,
+                    action=action,
+                    quote=quote,
+                )
+            )
 
-        available_quoted_speakers = {name for name in participant_options if dialogue.get(name)}
-        required_quotes = 2 if len(available_quoted_speakers) >= 2 and len(participants) >= 2 else 1
+        required_quotes = 2 if len(available_identities) >= 2 and len(participants) >= 2 else 1
         if len(quoted_speakers) < required_quotes:
             raise PosterCopyError(f"版面{index}缺少足够的真实多人对白")
 
@@ -461,11 +510,16 @@ def _overall_visual(style_text: str, *, explicit_style: bool) -> str:
 def _render_panel(index: int, panel: PanelCopy) -> str:
     paragraphs = [f"【版面{index}】", panel.title, panel.event_summary, panel.composition]
     for participant in panel.participants:
-        paragraphs.append(
-            f"{participant.name}{participant.action}。人物旁清晰标注“{participant.name}”。"
-        )
         if participant.quote:
-            paragraphs.append(f"该群友说：\n\n“{participant.quote}”")
+            paragraphs.append(
+                f"{participant.name}{participant.action}。人物旁清晰标注“{participant.name}”；"
+                f"与此人物不可拆分的真实聊天气泡写“{participant.quote}”。"
+                "姓名牌、人物和该气泡必须处于同一局部区域，不得与其他人物交换。"
+            )
+        else:
+            paragraphs.append(
+                f"{participant.name}{participant.action}。人物旁清晰标注“{participant.name}”。"
+            )
     paragraphs.extend(
         (
             panel.visual_gag,

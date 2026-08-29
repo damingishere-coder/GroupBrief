@@ -27,6 +27,7 @@ from zoneinfo import ZoneInfo
 from app.ai.concurrency import normalized_limit
 from app.ai.prompt_builder import GroupSummaryImagePromptBuilder
 from app.ai.prompt_builder_types import PromptInput
+from app.ai.speaker_attribution import build_attribution_contract
 from app.config.settings import Settings, get_settings
 from app.core.logging import get_logger
 from app.data_sources.base import V2Message, WeChatDataSource
@@ -1150,14 +1151,65 @@ class DailyPipeline:
             else {}
         )
         has_topic_selection = isinstance(current_prompt_meta.get("topic_selection"), dict)
-        if not has_topic_selection and not allow_topic_reselection:
+        try:
+            snapshot_messages = self._load_message_snapshot(snapshot_path)
+            attribution = build_attribution_contract(snapshot_messages)
+        except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
+            return {
+                "group_name": group_name,
+                "status": "failed",
+                "error_type": "MESSAGE_SNAPSHOT_INVALID",
+                "detail": f"messages.json 无法建立说话人归属契约：{exc}",
+            }
+        stored_snapshot = str(
+            current_prompt_meta.get("message_snapshot_sha256") or ""
+        )
+        stored_speakers = str(current_prompt_meta.get("speaker_fingerprint") or "")
+        stored_selection = (
+            current_prompt_meta.get("topic_selection")
+            if isinstance(current_prompt_meta.get("topic_selection"), dict)
+            else {}
+        )
+        attribution_matches = bool(
+            stored_snapshot
+            and stored_speakers
+            and stored_snapshot == attribution.message_snapshot_sha256
+            and stored_speakers == attribution.speaker_fingerprint
+            and str(stored_selection.get("message_snapshot_sha256") or "")
+            == attribution.message_snapshot_sha256
+            and str(stored_selection.get("speaker_fingerprint") or "")
+            == attribution.speaker_fingerprint
+        )
+        persisted_selection_valid = has_topic_selection and attribution_matches
+        if not persisted_selection_valid and not allow_topic_reselection:
+            current_hold_reason = str(current.get("send_hold_reason") or "")
+            preserved_user_hold_reason = (
+                current_hold_reason
+                if current_hold_reason.startswith("USER_REQUEST_NO_SEND_")
+                else ""
+            )
+            self.store.update(
+                group_name,
+                run_date,
+                prompt_rebuild_status="required",
+                prompt_rebuild_error="消息快照或说话人指纹与旧选题不一致",
+                prompt_stale=True,
+                image_stale=True,
+                artifact_stale_reason="TOPIC_SELECTION_SNAPSHOT_INVALID",
+                send_hold=True,
+                send_hold_reason=(
+                    preserved_user_hold_reason
+                    or "TOPIC_SELECTION_SNAPSHOT_INVALID"
+                ),
+                needs_manual_send=True,
+            )
             return {
                 "group_name": group_name,
                 "status": "failed",
                 "error_type": "TOPIC_SELECTION_SNAPSHOT_INVALID",
-                "detail": "run.json 缺少已校验选题总结；已停止且不会重新选题",
+                "detail": "旧选题缺少匹配的消息快照/说话人指纹；已停止且不会隐式重新选题",
             }
-        reselect_topics = not has_topic_selection
+        reselect_topics = not persisted_selection_valid
 
         keep_sent = current.get("status") == SENT
         current_hold_reason = str(current.get("send_hold_reason") or "")
@@ -1530,6 +1582,7 @@ class DailyPipeline:
             raise ValueError("messages.json 必须是非空数组")
 
         messages: list[V2Message] = []
+        seen_message_ids: set[str] = set()
         for index, item in enumerate(payload, start=1):
             if not isinstance(item, dict):
                 raise ValueError(f"第 {index} 条消息不是对象")
@@ -1542,6 +1595,9 @@ class DailyPipeline:
             group_id = str(item.get("group_id") or "").strip()
             if not message_id or not group_id:
                 raise ValueError(f"第 {index} 条消息缺少 message_id/group_id")
+            if message_id in seen_message_ids:
+                raise ValueError(f"第 {index} 条消息的 message_id 重复：{message_id}")
+            seen_message_ids.add(message_id)
             messages.append(
                 V2Message(
                     message_id=message_id,
@@ -1554,7 +1610,9 @@ class DailyPipeline:
                     content=str(item.get("content") or ""),
                     upstream_sender_name=str(item.get("upstream_sender_name") or ""),
                     sender_name_source=str(
-                        item.get("sender_name_source") or "snapshot"
+                        item.get("sender_name_source")
+                        if "sender_name_source" in item
+                        else "snapshot"
                     ),
                 )
             )

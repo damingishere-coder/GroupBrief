@@ -9,7 +9,14 @@ import re
 import pytest
 
 from app.ai.image_themes import STYLE_FAMILY_KEYS
-from app.ai.poster_copy import PosterCopyError, parse_poster_copy, validate_fixed_prompt_contract
+from app.ai.layouts import LayoutPlan, PanelBeat
+from app.ai.poster_copy import (
+    PosterCopyError,
+    build_poster_editor_prompt,
+    build_poster_editor_source,
+    parse_poster_copy,
+    validate_fixed_prompt_contract,
+)
 from app.ai.prompt_builder import DeepSeekImagePromptBuilder
 from app.ai.prompt_builder_types import PromptInput
 from app.ai.prompt_templates import DEFAULT_IMAGE_PROMPT_TEMPLATE, ImagePromptTemplateService
@@ -73,21 +80,22 @@ class FakeSummaryProvider:
         system = messages[0]["content"]
         user = messages[1]["content"]
         self.calls.append((system, user))
-        if '"copy_version":"fixed-chat-comic-v1"' in user:
+        if '"copy_version":"fixed-chat-comic-v2"' in user:
             source = _raw_json_from_user(user)
             panels = []
             for topic in source["topics"]:
                 options = topic["participant_options"]
-                dialogue = topic["evidence_dialogue"]
-                dialogue_by_name = {}
-                for entry in dialogue:
-                    dialogue_by_name.setdefault(entry["speaker"], entry["text"])
+                bindings = topic["speaker_bindings"]
+                binding_by_name = {}
+                for entry in bindings:
+                    binding_by_name.setdefault(entry["speaker"], entry)
                 participants = []
                 for name in options[:4]:
+                    binding = binding_by_name[name]
                     participants.append({
-                        "name": name,
+                        "message_id": binding["message_id"],
                         "action": "站在同一张桌边接话并看向其他群友",
-                        "quote": dialogue_by_name.get(name, ""),
+                        "quote": binding["text"],
                     })
                 panels.append({
                     "topic_id": topic["topic_id"],
@@ -184,6 +192,14 @@ def test_build_renders_only_fixed_sections_and_real_multi_person_dialogue():
     assert "每个话题先作为一个独立漫画框" in output.prompt
     assert "示例交流群 A（实时名）" in output.prompt
     assert "2026-08-17 00:00:00 ~ 2026-08-17 23:59:59" in output.prompt
+    assert (
+        output.meta["topic_selection"]["message_snapshot_sha256"]
+        == output.meta["message_snapshot_sha256"]
+    )
+    assert (
+        output.meta["topic_selection"]["speaker_fingerprint"]
+        == output.meta["speaker_fingerprint"]
+    )
     assert output.prompt.count("人物旁清晰标注“张三”") == 2
     assert output.prompt.count("人物旁清晰标注“李四”") == 2
     for quote in ("今天群里聊了票房", "《牛来》破500万了", "那就把票房画成火箭", "我在下面接着"):
@@ -223,7 +239,20 @@ def _long_quote_payload(quote: str) -> tuple[str, dict]:
                 "source_visual_gag": "把发布流程画成接力跑",
                 "participant_options": ["张三"],
                 "evidence_dialogue": [
-                    {"message_id": "m-long", "speaker": "张三", "text": quote}
+                    {
+                        "message_id": "m-long",
+                        "sender_id": "wxid-zhangsan",
+                        "speaker": "张三",
+                        "text": quote,
+                    }
+                ],
+                "speaker_bindings": [
+                    {
+                        "message_id": "m-long",
+                        "sender_id": "wxid-zhangsan",
+                        "speaker": "张三",
+                        "text": quote,
+                    }
                 ],
                 "shot_hints": ["对白"],
             }
@@ -239,7 +268,11 @@ def _long_quote_payload(quote: str) -> tuple[str, dict]:
                 "event_summary": "张三分享部署复盘。",
                 "composition": "张三站在流程图旁讲解",
                 "participants": [
-                    {"name": "张三", "action": "指向发布流程图", "quote": quote}
+                    {
+                        "message_id": "m-long",
+                        "action": "指向发布流程图",
+                        "quote": quote,
+                    }
                 ],
                 "visual_gag": "把发布流程画成接力跑",
                 "fact_line": "张三分享部署复盘。",
@@ -332,6 +365,153 @@ def test_persisted_topics_and_layout_only_call_editor_once():
     assert rebuilt.meta["layout_reused"] is True
     assert rebuilt.meta["api_call_count"] == 1
     assert len(provider.calls) == 1
+
+
+def test_persisted_topics_without_snapshot_contract_are_rejected():
+    first = _builder().build(_input())
+    stale_meta = dict(first.meta)
+    stale_meta.pop("message_snapshot_sha256")
+    stale_meta.pop("speaker_fingerprint")
+    rebuilt_input = _input(
+        persisted_theme_meta=stale_meta,
+        persisted_topic_selection=first.meta["topic_selection"],
+    )
+
+    rebuilt = _builder().build(rebuilt_input)
+
+    assert rebuilt.success is False
+    assert "缺少消息快照指纹" in rebuilt.error
+
+
+def test_persisted_selection_without_its_own_snapshot_contract_is_rejected():
+    first = _builder().build(_input())
+    stale_selection = dict(first.meta["topic_selection"])
+    stale_selection.pop("message_snapshot_sha256")
+    stale_selection.pop("speaker_fingerprint")
+    rebuilt_input = _input(
+        persisted_theme_meta=first.meta,
+        persisted_topic_selection=stale_selection,
+    )
+
+    rebuilt = _builder().build(rebuilt_input)
+
+    assert rebuilt.success is False
+    assert "选题缺少匹配的消息快照指纹" in rebuilt.error
+
+
+def test_persisted_topics_are_rejected_when_same_message_id_changes_text():
+    first = _builder().build(_input())
+    changed = _input(
+        persisted_theme_meta=first.meta,
+        persisted_topic_selection=first.meta["topic_selection"],
+    )
+    changed.messages[0].content = "同一个 ID 但原文已经变化"
+
+    rebuilt = _builder().build(changed)
+
+    assert rebuilt.success is False
+    assert "旧选题证据已过期" in rebuilt.error
+
+
+def test_poster_name_is_derived_from_message_id_when_quotes_are_identical():
+    source = {
+        "topics": [
+            {
+                "topic_id": "topic-same-quote",
+                "source_title": "同句接话",
+                "source_summary": "甲和乙先后说了同一句话。",
+                "source_visual_gag": "两人举起相同文字牌",
+                "participant_options": ["甲", "乙"],
+                "evidence_dialogue": [
+                    {"message_id": "m-a", "sender_id": "wxid-a", "speaker": "甲", "text": "收到"},
+                    {"message_id": "m-b", "sender_id": "wxid-b", "speaker": "乙", "text": "收到"},
+                ],
+                "speaker_bindings": [
+                    {"message_id": "m-a", "sender_id": "wxid-a", "speaker": "甲", "text": "收到"},
+                    {"message_id": "m-b", "sender_id": "wxid-b", "speaker": "乙", "text": "收到"},
+                ],
+                "shot_hints": ["对白"],
+            }
+        ]
+    }
+    payload = {
+        "title": "同句接话",
+        "subtitle": "两位群友先后回应",
+        "panels": [
+            {
+                "topic_id": "topic-same-quote",
+                "title": "同句接话",
+                "event_summary": "甲和乙先后说了同一句话。",
+                "composition": "两人分别站在画面左右两侧",
+                "participants": [
+                    {"message_id": "m-b", "action": "站在右侧举手", "quote": "收到"},
+                    {"message_id": "m-a", "action": "站在左侧点头", "quote": "收到"},
+                ],
+                "visual_gag": "两人举起相同文字牌",
+                "fact_line": "甲和乙先后说了同一句话。",
+            }
+        ],
+        "footer_summary": "同一句回应由两位群友先后说出",
+    }
+
+    copy = parse_poster_copy(json.dumps(payload, ensure_ascii=False), source)
+
+    assert [(item.message_id, item.name) for item in copy.panels[0].participants] == [
+        ("m-b", "乙"),
+        ("m-a", "甲"),
+    ]
+
+
+def test_poster_source_keeps_each_message_scoped_name_for_same_sender():
+    selection = {
+        "candidates": [
+            {
+                "topic_id": "topic-rename",
+                "selected": True,
+                "title": "当天改名",
+                "summary": "同一位群友当天使用了两个显示名。",
+                "visual_gag": "两张连续姓名牌",
+                "visible_participants": ["早些时候的名字"],
+                "participants": ["早些时候的名字"],
+                "evidence_dialogue": [
+                    {
+                        "message_id": "m-old",
+                        "sender_id": "WXID-A",
+                        "speaker": "早些时候的名字",
+                        "text": "第一条原话",
+                        "original_text": "第一条原话的完整内容",
+                    },
+                    {
+                        "message_id": "m-new",
+                        "sender_id": "wxid-a",
+                        "speaker": "后来改的名字",
+                        "text": "第二条原话",
+                        "original_text": "第二条原话的完整内容",
+                    },
+                ],
+            }
+        ]
+    }
+    layout = LayoutPlan(
+        layout_id="split_focus",
+        layout_name="双焦点",
+        structure_mode="dual_rhythm",
+        featured_topic_ids=("topic-rename",),
+        topic_order=("topic-rename",),
+        panel_beats=(PanelBeat("topic-rename", ("dialogue",)),),
+        comedy_device="回环",
+        layout_reason="测试消息级署名",
+    )
+
+    source = build_poster_editor_source(selection, layout)
+    bindings = source["topics"][0]["speaker_bindings"]
+
+    assert [(item["message_id"], item["speaker"]) for item in bindings] == [
+        ("m-old", "早些时候的名字"),
+        ("m-new", "后来改的名字"),
+    ]
+    assert bindings[0]["original_text"] == "第一条原话的完整内容"
+    assert '"original_text"' not in build_poster_editor_prompt(source)
 
 
 def test_fixed_validator_rejects_conflicting_header_footer_rule():

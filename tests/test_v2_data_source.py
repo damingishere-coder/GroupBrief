@@ -12,6 +12,7 @@ import pytest
 
 from app.config.settings import Settings
 from app.data_sources.base import DataSourceStatus
+from app.data_sources.history_provider import _message as adapt_history_message
 from app.data_sources.wechat_data_analysis import WeChatDataAnalysisSource
 from app.providers.history.base import (
     FetchResult,
@@ -134,6 +135,20 @@ def test_fetch_message_id_fallback_to_hash():
     result = _make_source(fake).fetch_messages("g1@chatroom", datetime(2026, 8, 17), datetime(2026, 8, 17))
     assert len(result.messages) == 1
     assert result.messages[0].message_id  # 非空（确定性 hash）
+
+
+def test_history_provider_adapter_preserves_sender_name_provenance():
+    message = adapt_history_message(
+        _raw(
+            sender_name="联系人解析名",
+            upstream_sender_name="消息当时显示名",
+            sender_name_source="upstream_sender_name",
+        )
+    )
+
+    assert message.sender_name == "联系人解析名"
+    assert message.upstream_sender_name == "消息当时显示名"
+    assert message.sender_name_source == "upstream_sender_name"
 
 
 # ---------- 错误类型 ----------

@@ -152,7 +152,7 @@ def test_selected_topics_json_contains_only_selected_candidates():
     assert '"evidence_dialogue"' in payload
 
 
-def test_fabricated_quote_is_replaced_with_exact_evidence_text():
+def test_model_supplied_quotes_are_ignored_and_rebuilt_from_message_ids():
     candidates = [_candidate(1, ["m0"]), _candidate(2, ["m1"])]
     candidates[0]["quotes"] = ["这句根本没有出现在聊天里"]
     candidates[1]["quotes"] = ["消息，1！"]
@@ -161,10 +161,29 @@ def test_fabricated_quote_is_replaced_with_exact_evidence_text():
 
     assert by_id["topic-01"]["quotes"] == ["消息0"]
     assert by_id["topic-01"]["evidence_dialogue"] == [
-        {"message_id": "m0", "speaker": "成员0", "text": "消息0"}
+        {
+            "message_id": "m0",
+            "sender_id": "wxid-0",
+            "speaker": "成员0",
+            "text": "消息0",
+            "original_text": "消息0",
+        }
     ]
-    assert by_id["topic-02"]["quotes"] == ["消息，1！"]
+    assert by_id["topic-02"]["quotes"] == ["消息1"]
     assert by_id["topic-02"]["people"] == ["成员1"]
+
+
+def test_candidate_prompt_requires_message_ids_not_model_supplied_names_or_quotes():
+    from app.ai.topic_selection import TOPIC_CANDIDATE_SYSTEM, build_direct_candidate_prompt
+    from app.ai.conversation_segments import ConversationChunk
+
+    prompt = build_direct_candidate_prompt(
+        ConversationChunk("聊天内容", ("m1",), "开始", "结束", 4)
+    )
+
+    assert "不得输出 people、quotes 或任何人物姓名" in TOPIC_CANDIDATE_SYSTEM
+    assert '"people"' not in prompt
+    assert '"quotes"' not in prompt
 
 
 def test_visible_participants_are_derived_from_evidence_and_names_are_not_truncated():
@@ -228,6 +247,25 @@ def test_same_display_name_with_different_ids_keeps_all_participant_fields_consi
     assert "等 2 人" not in first["participant_label"]
 
 
+def test_sender_id_case_variants_are_one_identity_in_topic_stats():
+    start = datetime(2026, 8, 21, 9, 0)
+    messages = [
+        PromptMessage("m0", start, "同一人", "第一条", "WXID-A"),
+        PromptMessage("m1", start + timedelta(minutes=1), "同一人", "第二条", "wxid-a"),
+        PromptMessage("m2", start + timedelta(minutes=2), "另一人", "第三条", "wxid-b"),
+    ]
+    selection = score_and_select_topics(
+        [_candidate(1, ["m0", "m1"]), _candidate(2, ["m2"])],
+        messages,
+    )
+    first = next(
+        item for item in selection["candidates"] if item["topic_id"] == "topic-01"
+    )
+
+    assert first["participant_count"] == 1
+    assert first["participants"] == ["同一人"]
+
+
 def test_unresolved_participant_uses_explicit_fallback_instead_of_fake_name():
     messages = [
         PromptMessage("m0", datetime(2026, 8, 21, 9, 0), "(未知)", "发言", "wxid-a"),
@@ -241,3 +279,20 @@ def test_unresolved_participant_uses_explicit_fallback_instead_of_fake_name():
         item["participant_label"] == "群友（昵称未识别）"
         for item in selection["candidates"]
     )
+
+
+def test_duplicate_message_id_is_rejected_instead_of_overwriting_evidence():
+    messages = _messages(2)
+    messages[1] = PromptMessage(
+        "m0",
+        messages[1].timestamp,
+        "另一成员",
+        "另一条消息",
+        "wxid-other",
+    )
+
+    with pytest.raises(TopicSelectionError, match="重复 message_id"):
+        score_and_select_topics(
+            [_candidate(1, ["m0"]), _candidate(2, ["m0"])],
+            messages,
+        )

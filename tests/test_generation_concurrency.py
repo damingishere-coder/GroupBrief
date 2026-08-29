@@ -87,7 +87,9 @@ class DelayedPrompt:
         self.barrier_slots = barrier_participants
         self.barrier_guard = threading.Lock()
 
-    def build(self, _data):
+    def build(self, data):
+        from app.ai.speaker_attribution import build_attribution_contract
+
         with bounded_slot("deepseek_request", self.settings.ai_request_concurrency):
             with self.lock:
                 self.active += 1
@@ -102,7 +104,19 @@ class DelayedPrompt:
                 time.sleep(0.06)
             with self.lock:
                 self.active -= 1
-        return PromptOutput(True, "完整 Prompt", meta={"api_call_count": 1, "chunk_count": 1})
+        contract = build_attribution_contract(data.messages)
+        snapshot_hash = data.message_snapshot_sha256 or contract.message_snapshot_sha256
+        speaker_fingerprint = data.speaker_fingerprint or contract.speaker_fingerprint
+        return PromptOutput(
+            True,
+            "完整 Prompt",
+            meta={
+                "api_call_count": 1,
+                "chunk_count": 1,
+                "message_snapshot_sha256": snapshot_hash,
+                "speaker_fingerprint": speaker_fingerprint,
+            },
+        )
 
 
 class PromptReadyOrder:
@@ -114,13 +128,24 @@ class PromptReadyOrder:
         self.slow_saw_image_start = False
 
     def build(self, data):
+        from app.ai.speaker_attribution import build_attribution_contract
+
+        contract = build_attribution_contract(data.messages)
+        meta = {
+            "api_call_count": 1,
+            "chunk_count": 1,
+            "message_snapshot_sha256": (
+                data.message_snapshot_sha256 or contract.message_snapshot_sha256
+            ),
+            "speaker_fingerprint": data.speaker_fingerprint or contract.speaker_fingerprint,
+        }
         if data.group_name == "快群":
             self.fast_prompt_ready.set()
-            return PromptOutput(True, "Prompt 快群", meta={"api_call_count": 1, "chunk_count": 1})
+            return PromptOutput(True, "Prompt 快群", meta=meta)
 
         assert self.fast_prompt_ready.wait(timeout=1)
         self.slow_saw_image_start = self.image_started.wait(timeout=2)
-        return PromptOutput(True, "Prompt 慢群", meta={"api_call_count": 1, "chunk_count": 1})
+        return PromptOutput(True, "Prompt 慢群", meta=meta)
 
 
 class ImmediateFakeImageGenerator:

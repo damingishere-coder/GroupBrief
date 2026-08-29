@@ -23,6 +23,8 @@ class PromptInput:
     template: str = "default"
     group_id: str = ""
     run_date: str = ""
+    message_snapshot_sha256: str = ""
+    speaker_fingerprint: str = ""
     visible_group_name: str = ""
     image_theme: str = "ai_free"
     image_theme_custom: str = ""

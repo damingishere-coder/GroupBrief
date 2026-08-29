@@ -86,5 +86,7 @@ def _message(item: RawMessage) -> V2Message:
         timestamp=item.timestamp,
         message_type=item.message_type,
         content=item.content,
+        upstream_sender_name=item.upstream_sender_name or item.sender_name or "",
+        sender_name_source=item.sender_name_source or "history_provider",
         raw={"source": item.source or "history_provider"},
     )

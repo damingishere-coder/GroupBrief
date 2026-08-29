@@ -114,6 +114,7 @@ class FakePrompt:
 
     def build(self, data):
         from app.ai.prompt_builder_types import PromptOutput
+        from app.ai.speaker_attribution import build_attribution_contract
 
         self.inputs.append(data)
         if self.fail:
@@ -139,12 +140,21 @@ class FakePrompt:
                 },
             ],
         }
+        attribution = build_attribution_contract(data.messages)
+        snapshot_hash = data.message_snapshot_sha256 or attribution.message_snapshot_sha256
+        speaker_fingerprint = data.speaker_fingerprint or attribution.speaker_fingerprint
+        topic_selection = dict(topic_selection)
+        topic_selection.setdefault("message_snapshot_sha256", snapshot_hash)
+        topic_selection.setdefault("speaker_fingerprint", speaker_fingerprint)
         return PromptOutput(
             True,
             "【任务】\n生成图片\n【主标题】今天热聊",
             meta={
                 "mode": "persisted_topic_selection" if data.persisted_topic_selection else "single",
                 "topic_selection": topic_selection,
+                "message_snapshot_sha256": snapshot_hash,
+                "speaker_fingerprint": speaker_fingerprint,
+                "speaker_bindings": [],
                 "layout_catalog_version": "comic-panels-v3",
                 "layout_id": "split_focus",
                 "structure_mode": "dual_rhythm",
@@ -377,7 +387,60 @@ def test_generate_explicit_refresh_replaces_saved_snapshot(tmp_path):
     assert run["speaker_count"] == ranking["speaker_count"] == 1
     assert run["prompt_meta"] == prompt_meta_before
     assert run["prompt_rebuild_status"] == "required"
+    assert run["prompt_stale"] is True
+    assert run["image_stale"] is True
+    assert run["artifact_stale_reason"] == "MESSAGE_SNAPSHOT_REFRESHED"
+    assert run["message_snapshot_sha256"] != prompt_meta_before["message_snapshot_sha256"]
+    assert run["speaker_fingerprint"] != prompt_meta_before["speaker_fingerprint"]
     assert run["send_hold"] is True
+
+
+def test_refresh_blocks_stale_selection_until_explicit_reselection(tmp_path):
+    pipeline, group = _make_pipeline(tmp_path)
+    pipeline.generate_all(run_date="2026-08-18")
+
+    changed_first = _msg("王五", "同一个 message_id 已更换说话人和原文", i=1)
+    changed_first.upstream_sender_name = "聊天时-王五"
+    refreshed = FakeSource(
+        messages=[
+            changed_first,
+            _msg("李四", "第二条消息仍可从当前快照回查", i=2),
+        ]
+    )
+    prompt = FakePrompt()
+    generator = FakeGenerator()
+    pipeline2, _ = _make_pipeline(
+        tmp_path,
+        source=refreshed,
+        prompt=prompt,
+        gen=generator,
+    )
+
+    refresh_result = pipeline2.generate_all(
+        run_date="2026-08-18",
+        refresh_messages=True,
+    )
+    blocked = pipeline2.rebuild_prompt_from_snapshot(group.id, "2026-08-18")
+    rebuilt = pipeline2.rebuild_prompt_from_snapshot(
+        group.id,
+        "2026-08-18",
+        allow_topic_reselection=True,
+    )
+    run = pipeline2.store.load_run("测试群", "2026-08-18")
+
+    assert refresh_result[0]["status"] == "data_ready"
+    assert blocked["error_type"] == "TOPIC_SELECTION_SNAPSHOT_INVALID"
+    assert rebuilt["status"] == "prompt_ready"
+    assert refreshed.fetch_calls == 1
+    assert len(prompt.inputs) == 1
+    assert prompt.inputs[0].persisted_topic_selection is None
+    assert generator.calls == []
+    assert run["prompt_topic_reselected"] is True
+    assert run["prompt_stale"] is False
+    assert run["image_stale"] is True
+    assert run["send_hold"] is True
+    assert run["message_snapshot_sha256"] == run["prompt_meta"]["message_snapshot_sha256"]
+    assert run["speaker_fingerprint"] == run["prompt_meta"]["speaker_fingerprint"]
 
 
 def test_refresh_preserves_sent_status_and_sent_at_without_prompt_image_or_send(tmp_path):
@@ -725,6 +788,20 @@ def test_image_success_clears_stale_failure_fields(tmp_path):
     assert run["image_error"] is None
 
 
+def test_image_job_refuses_stale_prompt_contract(tmp_path):
+    pipeline, group = _make_pipeline(tmp_path)
+    pipeline.generate_all(run_date="2026-08-18")
+    pipeline.store.update(
+        "测试群",
+        "2026-08-18",
+        prompt_stale=True,
+        artifact_stale_reason="MESSAGE_SNAPSHOT_REFRESHED",
+    )
+
+    with pytest.raises(ValueError, match="归属契约不一致"):
+        pipeline._make_image_job(group, "2026-08-18", force=True)
+
+
 def test_generate_data_failure_marks_failed(tmp_path):
     source = FakeSource(fail=True, error_type="WECHAT_DATA_UNAVAILABLE")
     pipeline, group = _make_pipeline(tmp_path, source=source)
@@ -837,6 +914,23 @@ def _ready_to_send(tmp_path, image_enabled=True, send_time="08:30") -> DailyPipe
     pipeline, _ = _make_pipeline(tmp_path, image_enabled=image_enabled, send_time=send_time)
     pipeline.generate_all(run_date="2026-08-18")
     return pipeline
+
+
+def _ready_run_contract(*, image_enabled: bool = False) -> dict:
+    snapshot_hash = "a" * 64
+    speaker_fingerprint = "b" * 64
+    return {
+        "status": READY_TO_SEND,
+        "image_enabled": image_enabled,
+        "message_snapshot_sha256": snapshot_hash,
+        "speaker_fingerprint": speaker_fingerprint,
+        "prompt_meta": {
+            "message_snapshot_sha256": snapshot_hash,
+            "speaker_fingerprint": speaker_fingerprint,
+        },
+        "prompt_stale": False,
+        "image_stale": False,
+    }
 
 
 def test_send_due_sends_text_then_image(tmp_path):
@@ -1143,7 +1237,11 @@ def test_send_due_processes_same_time_groups_in_stable_order(tmp_path, monkeypat
     ]
     monkeypatch.setattr(pipeline, "_load_groups", lambda group_ids=None: groups)
     for group in groups:
-        pipeline.store.save_run(group.display_name, "2026-08-18", {"status": READY_TO_SEND})
+        pipeline.store.save_run(
+            group.display_name,
+            "2026-08-18",
+            _ready_run_contract(),
+        )
         ranking_path = pipeline.store.ranking_txt_path(group.display_name, "2026-08-18")
         ranking_path.parent.mkdir(parents=True, exist_ok=True)
         ranking_path.write_text(f"{group.display_name}总结", encoding="utf-8")
@@ -1163,7 +1261,11 @@ def test_send_due_isolates_one_group_pre_submit_exception(tmp_path, monkeypatch)
     ]
     monkeypatch.setattr(pipeline, "_load_groups", lambda group_ids=None: groups)
     for group in groups:
-        pipeline.store.save_run(group.display_name, "2026-08-18", {"status": READY_TO_SEND})
+        pipeline.store.save_run(
+            group.display_name,
+            "2026-08-18",
+            _ready_run_contract(),
+        )
         path = pipeline.store.ranking_txt_path(group.display_name, "2026-08-18")
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("日报", encoding="utf-8")
@@ -1190,7 +1292,11 @@ def test_send_due_aborts_batch_when_desktop_submission_state_is_unknown(tmp_path
     ]
     monkeypatch.setattr(pipeline, "_load_groups", lambda group_ids=None: groups)
     for group in groups:
-        pipeline.store.save_run(group.display_name, "2026-08-18", {"status": READY_TO_SEND})
+        pipeline.store.save_run(
+            group.display_name,
+            "2026-08-18",
+            _ready_run_contract(),
+        )
         path = pipeline.store.ranking_txt_path(group.display_name, "2026-08-18")
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("日报", encoding="utf-8")
@@ -1675,7 +1781,7 @@ def test_manual_partial_resolutions_update_only_run_state(
 
 def test_run_store_send_claim_prevents_duplicate_and_marks_expired_attempt_unknown(tmp_path):
     store = RunStore(tmp_path / "output")
-    store.save_run("测试群", "2026-08-18", {"status": READY_TO_SEND})
+    store.save_run("测试群", "2026-08-18", _ready_run_contract())
     now = datetime(2026, 8, 18, 8, 30, 0)
 
     claim_id, _, reason = store.claim_send(
@@ -1700,3 +1806,18 @@ def test_run_store_send_claim_prevents_duplicate_and_marks_expired_attempt_unkno
     assert recovered is None
     assert recovered_reason == "result_unknown"
     assert run["send_state"] == "unknown"
+
+
+def test_run_store_send_claim_treats_legacy_artifact_without_contract_as_stale(tmp_path):
+    store = RunStore(tmp_path / "output")
+    store.save_run("测试群", "2026-08-18", {"status": READY_TO_SEND})
+
+    claim_id, _, reason = store.claim_send(
+        "测试群",
+        "2026-08-18",
+        now=datetime(2026, 8, 18, 8, 30, 0),
+        lease_seconds=60,
+    )
+
+    assert claim_id is None
+    assert reason == "artifact_stale"

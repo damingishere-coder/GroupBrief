@@ -601,6 +601,25 @@ class RunStore:
                 return None, data, "failed_final"
             if data.get("send_hold") and not allow_hold:
                 return None, data, "send_hold"
+            prompt_meta = (
+                data.get("prompt_meta")
+                if isinstance(data.get("prompt_meta"), dict)
+                else {}
+            )
+            snapshot_hash = str(data.get("message_snapshot_sha256") or "")
+            speaker_fingerprint = str(data.get("speaker_fingerprint") or "")
+            image_contract_required = bool(data.get("image_enabled", True))
+            if (
+                data.get("prompt_stale") is not False
+                or (image_contract_required and data.get("image_stale") is not False)
+                or not snapshot_hash
+                or not speaker_fingerprint
+                or str(prompt_meta.get("message_snapshot_sha256") or "")
+                != snapshot_hash
+                or str(prompt_meta.get("speaker_fingerprint") or "")
+                != speaker_fingerprint
+            ):
+                return None, data, "artifact_stale"
             retry_at = _parse_timestamp(data.get("send_next_retry_at"), now)
             if retry_at and retry_at > now:
                 return None, data, "retry_not_due"

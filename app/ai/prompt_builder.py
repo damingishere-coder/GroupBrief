@@ -36,6 +36,10 @@ from app.ai.poster_copy import (
 )
 from app.ai.prompt_builder_types import PromptInput, PromptOutput
 from app.ai.prompt_safety import enforce_prompt_budget, sanitize_prompt_text
+from app.ai.speaker_attribution import (
+    AttributionName,
+    build_attribution_contract,
+)
 from app.ai.image_themes import ImageThemeError, resolve_image_theme
 from app.ai.layouts import (
     IMAGE_LAYOUT_DEFINITIONS,
@@ -105,7 +109,14 @@ def _strip_html_comments(text: str) -> str:
     return _HTML_COMMENT_RE.sub("", text).strip()
 
 
-def _validated_persisted_selection(selection: object, messages: list[PromptMessage]) -> dict:
+def _validated_persisted_selection(
+    selection: object,
+    messages: list[PromptMessage],
+    persisted_meta: object,
+    *,
+    message_snapshot_sha256: str,
+    speaker_fingerprint: str,
+) -> dict:
     """验证已落盘选题仍完整且能回查快照；不重新调用模型选题。"""
     if not isinstance(selection, dict) or not isinstance(selection.get("candidates"), list):
         raise ValueError("已保存的选题总结缺少 candidates，已停止重建")
@@ -117,7 +128,28 @@ def _validated_persisted_selection(selection: object, messages: list[PromptMessa
         raise ValueError("已保存的选题 ID 与入选标记不一致，已停止重建")
     if not selected_ids or len(selected_ids) != len(set(selected_ids)):
         raise ValueError("已保存的选题 ID 为空或重复，已停止重建")
-    allowed_message_ids = {message.message_id for message in messages}
+    if not isinstance(persisted_meta, dict):
+        raise ValueError("已保存的 Prompt 元数据缺少消息快照指纹，已停止重建")
+    stored_snapshot = str(persisted_meta.get("message_snapshot_sha256") or "")
+    stored_speakers = str(persisted_meta.get("speaker_fingerprint") or "")
+    if not stored_snapshot or not stored_speakers:
+        raise ValueError("已保存的 Prompt 元数据缺少消息快照指纹，已停止重建")
+    if stored_snapshot != message_snapshot_sha256 or stored_speakers != speaker_fingerprint:
+        raise ValueError("messages.json 已变化，旧选题证据已过期，必须重新选题")
+    if (
+        str(result.get("message_snapshot_sha256") or "") != message_snapshot_sha256
+        or str(result.get("speaker_fingerprint") or "") != speaker_fingerprint
+    ):
+        raise ValueError("已保存的选题缺少匹配的消息快照指纹，必须重新选题")
+
+    evidence_by_id: dict[str, PromptMessage] = {}
+    for message in messages:
+        if not message.message_id:
+            continue
+        if message.message_id in evidence_by_id:
+            raise ValueError("messages.json 包含重复 message_id，已停止重建")
+        evidence_by_id[message.message_id] = message
+    allowed_message_ids = set(evidence_by_id)
     for item in selected:
         if not str(item.get("title") or "").strip() or not str(item.get("summary") or "").strip():
             raise ValueError("已保存的入选主题缺少标题或总结，已停止重建")
@@ -130,6 +162,29 @@ def _validated_persisted_selection(selection: object, messages: list[PromptMessa
         visible_people = item.get("visible_participants") if isinstance(item.get("visible_participants"), list) else []
         if not any(str(value).strip() for value in visible_people) and not str(item.get("participant_label") or "").strip():
             raise ValueError("已保存的入选主题缺少可见人物，已停止重建")
+        dialogue = item.get("evidence_dialogue")
+        if not isinstance(dialogue, list) or not dialogue:
+            raise ValueError("已保存的入选主题缺少结构化说话人证据，已停止重建")
+        for entry in dialogue:
+            if not isinstance(entry, dict):
+                raise ValueError("已保存的说话人证据格式无效，已停止重建")
+            message_id = str(entry.get("message_id") or "")
+            current = evidence_by_id.get(message_id)
+            if current is None:
+                raise ValueError("已保存的说话人证据无法从 messages.json 回查，已停止重建")
+            if str(entry.get("sender_id") or "") != current.sender_id:
+                raise ValueError("已保存的说话人身份与 messages.json 不一致，必须重新选题")
+            if str(entry.get("speaker") or "").strip() != current.sender_name:
+                raise ValueError("已保存的说话人姓名与 messages.json 不一致，必须重新选题")
+            stored_text = re.sub(r"\s+", " ", str(entry.get("text") or "")).strip()
+            current_text = re.sub(r"\s+", " ", current.text or "").strip()
+            if not stored_text or stored_text not in current_text:
+                raise ValueError("已保存的说话人原文与 messages.json 不一致，必须重新选题")
+            stored_original = re.sub(
+                r"\s+", " ", str(entry.get("original_text") or "")
+            ).strip()
+            if stored_original and stored_original != current_text:
+                raise ValueError("已保存的说话人完整原文与 messages.json 不一致，必须重新选题")
     selected_topics_json(result)
     return result
 
@@ -231,7 +286,19 @@ class DeepSeekImagePromptBuilder:
             message_line = f"{data.message_count} 条消息"
             speaker_line = f"{data.speaker_count} 人发言"
 
-            messages = [self._to_prompt_message(message, index) for index, message in enumerate(data.messages, start=1)]
+            attribution = build_attribution_contract(data.messages)
+            message_snapshot_sha256 = (
+                str(data.message_snapshot_sha256 or "").strip()
+                or attribution.message_snapshot_sha256
+            )
+            speaker_fingerprint = (
+                str(data.speaker_fingerprint or "").strip()
+                or attribution.speaker_fingerprint
+            )
+            messages = [
+                self._to_prompt_message(message, index, attribution.names[index - 1])
+                for index, message in enumerate(data.messages, start=1)
+            ]
             messages = [message for message in messages if message.text]
             direct_chars = max(1_000, int(self.settings.max_context_chars or 50_000))
             chunks: list[ConversationChunk] = []
@@ -263,12 +330,20 @@ class DeepSeekImagePromptBuilder:
                 "chunk_count": len(chunks),
                 "generated_at": datetime.now().isoformat(),
                 "report_date": report_date,
+                "message_snapshot_sha256": message_snapshot_sha256,
+                "speaker_fingerprint": speaker_fingerprint,
             }
             meta.update(theme.to_meta())
             meta["style_intervention"] = theme.has_explicit_style
 
             if data.persisted_topic_selection is not None:
-                selection = _validated_persisted_selection(data.persisted_topic_selection, messages)
+                selection = _validated_persisted_selection(
+                    data.persisted_topic_selection,
+                    messages,
+                    data.persisted_theme_meta,
+                    message_snapshot_sha256=message_snapshot_sha256,
+                    speaker_fingerprint=speaker_fingerprint,
+                )
                 meta["mode"] = "persisted_topic_selection"
                 meta["topic_selection_reused"] = True
                 meta["reuse_source"] = "run.prompt_meta"
@@ -317,6 +392,8 @@ class DeepSeekImagePromptBuilder:
             if data.persisted_topic_selection is None:
                 selection = score_and_select_topics(candidates, messages)
                 meta["topic_selection_reused"] = False
+                selection["message_snapshot_sha256"] = message_snapshot_sha256
+                selection["speaker_fingerprint"] = speaker_fingerprint
             meta["topic_selection_version"] = selection["topic_selection_version"]
             meta["topic_selection"] = selection
             selected_payload = selected_topics_json(selection)
@@ -368,6 +445,13 @@ class DeepSeekImagePromptBuilder:
             ]
 
             editor_source = build_poster_editor_source(selection, layout)
+            meta["speaker_bindings"] = [
+                {"topic_id": str(topic.get("topic_id") or ""), **dict(binding)}
+                for topic in editor_source.get("topics", [])
+                if isinstance(topic, dict)
+                for binding in topic.get("speaker_bindings", [])
+                if isinstance(binding, dict)
+            ]
             final_user_prompt = build_poster_editor_prompt(editor_source)
             text = ""
             final_calls = 0
@@ -489,15 +573,30 @@ class DeepSeekImagePromptBuilder:
 
     # ---------- 内部 ----------
 
-    def _to_prompt_message(self, message, index: int) -> PromptMessage:
+    def _to_prompt_message(
+        self,
+        message,
+        index: int,
+        attribution: AttributionName | None = None,
+    ) -> PromptMessage:
         timestamp = message.timestamp if hasattr(message.timestamp, "strftime") else None
         message_id = (
             getattr(message, "message_id", "")
             or getattr(message, "content_hash", "")
             or f"v2-{index}"
         )
+        if attribution is None:
+            attribution = build_attribution_contract([message]).names[0]
         safe_sender, _ = sanitize_prompt_text(
-            message.sender_name or "(未知)",
+            attribution.display_name or "(未知)",
+            allow_newlines=False,
+        )
+        resolved_sender, _ = sanitize_prompt_text(
+            getattr(message, "sender_name", "") or "",
+            allow_newlines=False,
+        )
+        upstream_sender, _ = sanitize_prompt_text(
+            getattr(message, "upstream_sender_name", "") or "",
             allow_newlines=False,
         )
         safe_text, _ = sanitize_prompt_text(_to_ai_text(message))
@@ -507,6 +606,9 @@ class DeepSeekImagePromptBuilder:
             sender_name=safe_sender or "(未知)",
             text=safe_text,
             sender_id=str(getattr(message, "sender_id", "") or ""),
+            resolved_sender_name=resolved_sender,
+            upstream_sender_name=upstream_sender,
+            attribution_name_source=attribution.source,
         )
 
     def _to_line(self, message) -> str:

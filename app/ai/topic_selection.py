@@ -14,7 +14,7 @@ from app.services.speaker_identity import build_speaker_stats, speaker_name_sort
 
 from app.ai.conversation_segments import ConversationChunk, PromptMessage
 
-TOPIC_SELECTION_VERSION = "5.0"
+TOPIC_SELECTION_VERSION = "6.0"
 MAX_CANDIDATES = 10
 MIN_SELECTED = 2
 TARGET_SELECTED = 5
@@ -37,14 +37,15 @@ SCORE_WEIGHTS = {
 
 TOPIC_CANDIDATE_SYSTEM = """你是群聊日报选题编辑。只能基于给定消息或事件卡整理候选主题。
 必须返回一个 JSON 对象，不得输出 Markdown 或解释。候选主题必须引用真实 message_ids，禁止虚构。
+你只负责选择 message_ids 和概括事件，不得输出 people、quotes 或任何人物姓名；
+人物身份、显示名和逐字原话全部由程序按 message_id 从当前快照回填。
 事实真实性是准入门槛；通过真实性校验后，好玩程度是第一排序目标。
 内容充足时输出 10 个候选，证据不足时允许少于 10 个；共享同一核心事实、里程碑或结论的相似话题必须合并，
 不得为了凑数把一个事件拆成“发起/回应”或重复角度。
 comedy_score 为 0～40，group_recognition_score 为 0～20，visual_score 为 0～20。
 comedy_angle 说明真实笑点，visual_gag 说明不改变事实的视觉笑点，并给出简短 score_reason。
-为避免响应截断，标题、人物和评分理由必须简洁；summary 必须是一句完整、可直接放进图片的信息，建议不超过 60 个汉字，
+为避免响应截断，标题和评分理由必须简洁；summary 必须是不含人物姓名的一句完整事件概括，建议不超过 60 个汉字，
 不得以省略号、半句话或残缺表情代码结尾；
-quotes 只能逐字摘录原消息，禁止改写或把摘要伪装成原话；
 每个候选的 message_ids 最多保留 100 条有效证据。"""
 
 _CANDIDATE_SCHEMA = """返回结构：
@@ -53,9 +54,7 @@ _CANDIDATE_SCHEMA = """返回结构：
     {
       "topic_id": "topic-01",
       "title": "主题短标题",
-      "summary": "基于证据的一句事实过程或结论",
-      "people": ["真实参与者"],
-      "quotes": ["1-3 条逐字摘录的真实原话"],
+      "summary": "不含人物姓名、基于证据的一句事实过程或结论",
       "start_time": "YYYY-MM-DD HH:MM",
       "end_time": "YYYY-MM-DD HH:MM",
       "message_ids": ["真实消息ID"],
@@ -84,6 +83,7 @@ class TopicSelectionError(ValueError):
 @dataclass(frozen=True)
 class TopicEvidence:
     message_id: str
+    sender_id: str
     sender_key: str
     sender_name: str
     text: str
@@ -192,9 +192,15 @@ def _evidence(messages: Iterable[PromptMessage]) -> dict[str, TopicEvidence]:
     for source_index, item in enumerate(messages):
         if not item.message_id:
             continue
+        if item.message_id in result:
+            raise TopicSelectionError(
+                "TOPIC_EVIDENCE_DUPLICATE_ID",
+                f"messages.json 包含重复 message_id：{item.message_id}",
+            )
         result[item.message_id] = TopicEvidence(
             message_id=item.message_id,
-            sender_key=item.sender_id or item.sender_name or "(未知)",
+            sender_id=item.sender_id,
+            sender_key=(item.sender_id or "").casefold() or item.sender_name or "(未知)",
             sender_name=item.sender_name or "(未知)",
             text=item.text or "",
             timestamp=item.timestamp,
@@ -266,8 +272,10 @@ def _evidence_dialogue(items: Iterable[TopicEvidence]) -> list[dict[str, str]]:
         dialogue.append(
             {
                 "message_id": item.message_id,
+                "sender_id": item.sender_id,
                 "speaker": item.sender_name,
                 "text": excerpt,
+                "original_text": text,
             }
         )
     return dialogue
@@ -361,7 +369,8 @@ def score_and_select_topics(
         if len(timestamps) >= 2:
             duration = max(0.0, (max(timestamps) - min(timestamps)).total_seconds() / 60.0)
         attribution = _participant_attribution(items)
-        verified_quotes = _verified_quotes(candidate.get("quotes", []), items)
+        # 姓名和原话不能采用模型自由输出；统一按 message_id 从当前快照回填。
+        verified_quotes = _verified_quotes((), items)
         if not verified_quotes:
             raise TopicSelectionError(
                 "TOPIC_CANDIDATES_INVALID",

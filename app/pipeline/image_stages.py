@@ -31,8 +31,24 @@ class ImageStages:
 
     def make_job(self, group_name: str, run_date: str, force: bool) -> ImageJob:
         prompt_path = self.store.prompt_path(group_name, run_date)
-        prompt_sha256 = hashlib.sha256(prompt_path.read_bytes()).hexdigest()
         current = self.store.load_run(group_name, run_date)
+        prompt_meta = (
+            current.get("prompt_meta")
+            if isinstance(current.get("prompt_meta"), dict)
+            else {}
+        )
+        snapshot_hash = str(current.get("message_snapshot_sha256") or "")
+        speaker_fingerprint = str(current.get("speaker_fingerprint") or "")
+        if (
+            current.get("prompt_stale") is not False
+            or not snapshot_hash
+            or not speaker_fingerprint
+            or str(prompt_meta.get("message_snapshot_sha256") or "") != snapshot_hash
+            or str(prompt_meta.get("speaker_fingerprint") or "")
+            != speaker_fingerprint
+        ):
+            raise ValueError("Prompt 与消息快照归属契约不一致，已停止生图")
+        prompt_sha256 = hashlib.sha256(prompt_path.read_bytes()).hexdigest()
         previous = current.get("image_job") if isinstance(current.get("image_job"), dict) else {}
         if (
             not force
@@ -144,6 +160,10 @@ class ImageStages:
             image_safety_redactions=generator_detail.get("safety_redactions") or [],
             image_force_local_fallback=(
                 False if result["success"] else current.get("image_force_local_fallback", False)
+            ),
+            image_stale=False if result["success"] else current.get("image_stale", True),
+            artifact_stale_reason=(
+                "" if result["success"] else current.get("artifact_stale_reason", "")
             ),
             image_job=next_job,
         )

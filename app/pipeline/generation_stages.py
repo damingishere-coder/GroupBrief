@@ -11,6 +11,7 @@ from typing import Any, Callable
 from app.ai.concurrency import bounded_slot
 from app.ai.prompt_builder import GroupSummaryImagePromptBuilder
 from app.ai.prompt_builder_types import PromptInput
+from app.ai.speaker_attribution import build_attribution_contract
 from app.ai.strict_prompt_contract import append_strict_image_fact_contract
 from app.config.settings import Settings
 from app.core.observability import log_event
@@ -149,6 +150,17 @@ class GenerationStages:
             return self._finish(context, prompt_stage.terminal_response())
         prompt_meta = prompt_stage.next_value().prompt_meta
         if isinstance(prompt_meta, dict):
+            prompt_meta = dict(prompt_meta)
+            attribution = build_attribution_contract(messages)
+            prompt_meta.setdefault(
+                "message_snapshot_sha256",
+                attribution.message_snapshot_sha256,
+            )
+            prompt_meta.setdefault(
+                "speaker_fingerprint",
+                attribution.speaker_fingerprint,
+            )
+            prompt_meta.setdefault("speaker_bindings", [])
             self.store.update(
                 context.group_name,
                 context.run_date,
@@ -176,6 +188,20 @@ class GenerationStages:
                     or ""
                 ),
                 external_call_count=int(prompt_meta.get("api_call_count") or 0),
+                message_snapshot_sha256=str(
+                    prompt_meta.get("message_snapshot_sha256") or ""
+                ),
+                speaker_fingerprint=str(
+                    prompt_meta.get("speaker_fingerprint") or ""
+                ),
+                speaker_bindings=prompt_meta.get("speaker_bindings") or [],
+                prompt_stale=False,
+                image_stale=bool(context.group.image_enabled),
+                artifact_stale_reason=(
+                    "PROMPT_CHANGED_IMAGE_REBUILD_REQUIRED"
+                    if bool(context.group.image_enabled)
+                    else ""
+                ),
             )
         image_stage = self._decide_image(context)
         return self._finish(context, image_stage.terminal_response())
@@ -454,6 +480,7 @@ class GenerationStages:
             getattr(context.group, "sender_name_policy", "resolved"),
         )
         if not context.refresh_messages:
+            attribution = build_attribution_contract(messages)
             self._save_json(
                 snapshot_path,
                 [message.to_dict() for message in messages],
@@ -469,6 +496,8 @@ class GenerationStages:
                 message_snapshot_path=snapshot_path.name,
                 message_snapshot_period_start=context.period_start,
                 message_snapshot_period_end=context.period_end,
+                message_snapshot_sha256=attribution.message_snapshot_sha256,
+                speaker_fingerprint=attribution.speaker_fingerprint,
             )
         return StageResult.proceed(messages)
 
@@ -515,6 +544,7 @@ class GenerationStages:
             )
 
         context.timings["ranking_ms"] = round((perf_counter() - started_at) * 1000)
+        attribution = build_attribution_contract(messages)
         snapshot_path = self.store.messages_path(context.group_name, context.run_date)
         self._save_json(snapshot_path, [message.to_dict() for message in messages])
         self._save_json(
@@ -553,6 +583,11 @@ class GenerationStages:
             message_refresh_error="",
             prompt_rebuild_status="required",
             prompt_rebuild_error="",
+            message_snapshot_sha256=attribution.message_snapshot_sha256,
+            speaker_fingerprint=attribution.speaker_fingerprint,
+            prompt_stale=True,
+            image_stale=True,
+            artifact_stale_reason="MESSAGE_SNAPSHOT_REFRESHED",
             send_hold=True,
             send_hold_reason=hold_reason,
             needs_manual_send=True,
@@ -632,6 +667,7 @@ class GenerationStages:
         ranking: RankingResult,
     ) -> StageResult[PromptStageOutput]:
         group = context.group
+        attribution = build_attribution_contract(messages)
         prompt_messages = [
             message for message in messages if RankingEngine._countable(message)
         ]
@@ -644,6 +680,8 @@ class GenerationStages:
             ).strip(),
             group_id=str(group.id or group.wechat_group_id or context.group_name),
             run_date=context.run_date,
+            message_snapshot_sha256=attribution.message_snapshot_sha256,
+            speaker_fingerprint=attribution.speaker_fingerprint,
             period_start=context.period_start,
             period_end=context.period_end,
             report_date=context.window.period_end.date().isoformat(),
