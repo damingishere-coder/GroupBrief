@@ -8,12 +8,14 @@ from app.config.settings import Settings
 from app.sender.wechat_native import (
     NativeActionResult,
     OcrLine,
+    UiaSearchItem,
     WechatNativeSender,
     WindowsWechatDriver,
     create_wechat_sender,
     _main_chat_horizontal_bounds,
     _selected_header_matches,
     _select_group_search_match,
+    _select_uia_group_search_match,
     _title_matches,
 )
 
@@ -263,6 +265,47 @@ def test_search_rejects_target_when_trusted_group_section_is_missing():
 
     assert matched is None
     assert "可信分区 0" in detail
+
+
+def test_uia_search_selects_only_unique_exact_group_item_inside_search_box():
+    target = "Grok App 交流群"
+    search_box = (10, 20, 500, 600)
+    exact = UiaSearchItem(target, f"search_item_{target}", 100, 120, 330, 170)
+    chat_record = UiaSearchItem(target, "", 100, 220, 330, 270)
+    network = UiaSearchItem(target, "network_result", 100, 320, 330, 370)
+
+    matched, detail = _select_uia_group_search_match(
+        [chat_record, network, exact],
+        target,
+        search_box,
+    )
+
+    assert detail == ""
+    assert matched == OcrLine(target, 90, 100, 230, 50)
+
+
+def test_uia_search_rejects_duplicate_or_out_of_bounds_exact_items():
+    target = "Grok App 交流群"
+    expected_id = f"search_item_{target}"
+    inside = UiaSearchItem(target, expected_id, 100, 120, 330, 170)
+    duplicate = UiaSearchItem(target, expected_id, 100, 180, 330, 230)
+    outside = UiaSearchItem(target, expected_id, 600, 120, 830, 170)
+
+    ambiguous, ambiguous_detail = _select_uia_group_search_match(
+        [inside, duplicate],
+        target,
+        (10, 20, 500, 600),
+    )
+    bounded, bounded_detail = _select_uia_group_search_match(
+        [outside],
+        target,
+        (10, 20, 500, 600),
+    )
+
+    assert ambiguous is None
+    assert "当前 2" in ambiguous_detail
+    assert bounded is None
+    assert "当前 0" in bounded_detail
 
 
 def test_search_selects_exact_recent_group_before_network_section():
@@ -569,6 +612,41 @@ def test_target_search_retries_transient_ocr_miss(tmp_path, monkeypatch):
     ok, _ = driver.open_and_verify("目标群")
 
     assert ok is True
+
+
+def test_target_search_falls_back_to_unique_uia_group_item(tmp_path, monkeypatch):
+    driver = WindowsWechatDriver(_settings(tmp_path))
+    target = "Grok App 交流群"
+    screenshots = iter(
+        [
+            [OcrLine("其他会话", 10, 10, 100, 20)],
+            [OcrLine("聊天记录", 10, 210, 80, 20)],
+            [OcrLine("聊天记录", 10, 210, 80, 20)],
+            [OcrLine("聊天记录", 10, 210, 80, 20)],
+            [OcrLine(target, 10, 10, 160, 20)],
+        ]
+    )
+    clicks: list[tuple[float, float]] = []
+    monkeypatch.setattr(driver, "health_check", lambda: (True, "ok"))
+    monkeypatch.setattr(driver, "_wechat_windows", lambda: [123])
+    monkeypatch.setattr(driver, "_activate", lambda hwnd: True)
+    monkeypatch.setattr(driver, "_hotkey", lambda modifier, key: None)
+    monkeypatch.setattr(driver, "_set_clipboard_text", lambda text: None)
+    monkeypatch.setattr(driver, "_window_rect", lambda hwnd: (0, 0, 1000, 800))
+    monkeypatch.setattr(driver, "_ocr_screen", lambda box: next(screenshots))
+    monkeypatch.setattr(driver, "_click", lambda x, y: clicks.append((x, y)))
+    monkeypatch.setattr(
+        driver,
+        "_find_uia_group_search_match",
+        lambda value, box: (OcrLine(value, 80, 150, 160, 20), ""),
+    )
+    monkeypatch.setattr("app.sender.wechat_native.time.sleep", lambda seconds: None)
+
+    ok, detail = driver.open_and_verify(target)
+
+    assert ok is True
+    assert "精确查找并验证" in detail
+    assert clicks[1] == (160.0, 200.0)
 
 
 def test_submission_verification_requires_composer_to_return_near_empty():

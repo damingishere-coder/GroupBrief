@@ -1,7 +1,8 @@
 """微信 4.1.x Windows 原生发送器。
 
-微信 4.1 使用自绘界面，标准 UI Automation 无法可靠定位控件。本模块改用：
-键盘搜索 + Windows OCR 精确校验 + 剪贴板粘贴，并在任何歧义或校验失败时停止。
+微信 4.1 使用自绘界面，标准 UI Automation 只暴露部分控件。本模块组合：
+键盘搜索 + Windows OCR 精确校验 + 唯一 UIA 搜索项兜底 + 剪贴板粘贴，
+并在任何歧义或校验失败时停止。
 
 生产入口默认使用 :class:`WindowsWechatDriver`；测试可注入 fake driver，绝不操作桌面。
 """
@@ -49,6 +50,16 @@ class OcrLine:
     top: float
     width: float
     height: float
+
+
+@dataclass(frozen=True)
+class UiaSearchItem:
+    text: str
+    automation_id: str
+    left: float
+    top: float
+    right: float
+    bottom: float
 
 
 @dataclass(frozen=True)
@@ -311,6 +322,49 @@ def _select_group_search_match(lines: list[OcrLine], target: str) -> tuple[OcrLi
     return best[0], ""
 
 
+def _select_uia_group_search_match(
+    items: list[UiaSearchItem],
+    target: str,
+    search_box: tuple[int, int, int, int],
+) -> tuple[OcrLine | None, str]:
+    """Select one exact WeChat group result exposed by UI Automation.
+
+    WeChat 4.1 gives only the real group-search item an automation id in the
+    form ``search_item_<full title>``. Chat-history rows and network results do
+    not carry that id. Keep the final header OCR check in ``open_and_verify``
+    as a second, independent target verification layer.
+    """
+
+    expected_id = f"search_item_{target}"
+    box_left, box_top, box_right, box_bottom = search_box
+    matches: list[UiaSearchItem] = []
+    for item in items:
+        center_x = (item.left + item.right) / 2
+        center_y = (item.top + item.bottom) / 2
+        if (
+            item.automation_id == expected_id
+            and _title_matches(item.text, target)
+            and item.right > item.left
+            and item.bottom > item.top
+            and box_left <= center_x <= box_right
+            and box_top <= center_y <= box_bottom
+        ):
+            matches.append(item)
+    if len(matches) != 1:
+        return None, f"UIA 精确群聊项数量不是 1（当前 {len(matches)}）"
+    item = matches[0]
+    return (
+        OcrLine(
+            item.text,
+            item.left - box_left,
+            item.top - box_top,
+            item.right - item.left,
+            item.bottom - item.top,
+        ),
+        "",
+    )
+
+
 def _coerce_action_result(value: tuple[bool, str] | NativeActionResult) -> NativeActionResult:
     if isinstance(value, NativeActionResult):
         return value
@@ -505,6 +559,10 @@ class WindowsWechatDriver:
             if matched is not None:
                 break
             time.sleep(self.delay)
+        if matched is None:
+            matched, uia_error = self._find_uia_group_search_match(target, search_box)
+            if matched is None and uia_error:
+                match_error = f"{match_error}；{uia_error}"
         if matched is None:
             return False, f"{match_error}，已停止发送"
         self._click(search_box[0] + matched.left + matched.width / 2, search_box[1] + matched.top + matched.height / 2)
@@ -899,6 +957,45 @@ class WindowsWechatDriver:
         import win32gui
 
         return win32gui.GetWindowRect(hwnd)
+
+    def _find_uia_group_search_match(
+        self,
+        target: str,
+        search_box: tuple[int, int, int, int],
+    ) -> tuple[OcrLine | None, str]:
+        """Read the uniquely identified group result from WeChat's UIA tree."""
+
+        if not self._window:
+            return None, "微信窗口尚未验证"
+        try:
+            import win32process
+            from pywinauto import Desktop
+
+            _, process_id = win32process.GetWindowThreadProcessId(self._window)
+            if not process_id:
+                return None, "无法确认微信窗口进程"
+            items: list[UiaSearchItem] = []
+            for window in Desktop(backend="uia").windows(process=process_id, visible_only=True):
+                for control in window.descendants(control_type="ListItem"):
+                    info = control.element_info
+                    automation_id = str(getattr(info, "automation_id", "") or "")
+                    if not automation_id.startswith("search_item_"):
+                        continue
+                    rectangle = info.rectangle
+                    items.append(
+                        UiaSearchItem(
+                            text=str(control.window_text() or ""),
+                            automation_id=automation_id,
+                            left=float(rectangle.left),
+                            top=float(rectangle.top),
+                            right=float(rectangle.right),
+                            bottom=float(rectangle.bottom),
+                        )
+                    )
+            return _select_uia_group_search_match(items, target, search_box)
+        except Exception as exc:
+            logger.warning("WeChat UIA search fallback unavailable: %s", exc)
+            return None, f"UIA 搜索兜底不可用：{type(exc).__name__}"
 
     @staticmethod
     def _click(x: float, y: float) -> None:
