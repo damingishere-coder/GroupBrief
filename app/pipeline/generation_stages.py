@@ -269,7 +269,11 @@ class GenerationStages:
                     "detail": str(run.get("error") or "任务需人工核对")[:300],
                 }
             )
-        if run.get("status") == FAILED and execution_state == EXECUTION_FAILED_FINAL:
+        if (
+            not context.force
+            and run.get("status") == FAILED
+            and execution_state == EXECUTION_FAILED_FINAL
+        ):
             return StageResult.stop(
                 {
                     "group_name": context.group_name,
@@ -279,7 +283,8 @@ class GenerationStages:
                 }
             )
         if (
-            run.get("status") == FAILED
+            not context.force
+            and run.get("status") == FAILED
             and execution_state == EXECUTION_WAIT_RETRY
             and not retry_is_due(run)
         ):
@@ -293,8 +298,13 @@ class GenerationStages:
             )
         retrying = bool(
             run.get("status") == FAILED
-            and execution_state == EXECUTION_WAIT_RETRY
-            and retry_is_due(run)
+            and (
+                (
+                    execution_state == EXECUTION_WAIT_RETRY
+                    and (context.force or retry_is_due(run))
+                )
+                or (context.force and execution_state == EXECUTION_FAILED_FINAL)
+            )
         )
         group = context.group
         base = {

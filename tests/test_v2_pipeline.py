@@ -902,6 +902,61 @@ def test_identical_generation_failure_exhausts_budget_after_real_retries(tmp_pat
     assert len(run["attempt_ledger"]) == 3
 
 
+def test_force_generate_recovers_failed_final_without_erasing_retry_history(tmp_path, monkeypatch):
+    source = FakeSource(fail=True)
+    pipeline, group = _make_pipeline(tmp_path, source=source, image_enabled=False)
+    monkeypatch.setattr("app.pipeline.generation_stages.retry_is_due", lambda _run: True)
+
+    pipeline.generate_all(run_date="2026-08-18")
+    pipeline.generate_all(run_date="2026-08-18")
+    pipeline.generate_all(run_date="2026-08-18")
+    exhausted = pipeline.store.load_run("测试群", "2026-08-18")
+    assert exhausted["execution_state"] == "FAILED_FINAL"
+    assert exhausted["retry_attempt_count"] == 3
+
+    source.fail = False
+    recovered = pipeline.force_generate(group.id, "2026-08-18")
+
+    assert recovered["status"] == "ready_to_send"
+    run = pipeline.store.load_run("测试群", "2026-08-18")
+    assert run["status"] == READY_TO_SEND
+    assert run["retry_attempt_count"] == 3
+    assert len(run["attempt_ledger"]) == 3
+    assert source.fetch_calls == 4
+
+
+def test_force_generate_bypasses_retry_delay_but_not_manual_hold(tmp_path):
+    source = FakeSource(fail=True)
+    pipeline, group = _make_pipeline(tmp_path, source=source, image_enabled=False)
+
+    first = pipeline.generate_all(run_date="2026-08-18")
+    assert first[0]["status"] == "failed"
+    waiting = pipeline.store.load_run("测试群", "2026-08-18")
+    assert waiting["execution_state"] == "WAIT_RETRY"
+
+    source.fail = False
+    recovered = pipeline.force_generate(group.id, "2026-08-18")
+    assert recovered["status"] == "ready_to_send"
+
+    pipeline.store.update(
+        "测试群",
+        "2026-08-18",
+        status=FAILED,
+        failed_stage="prompt",
+        error_type="PROMPT_RESULT_UNKNOWN",
+        error="结果未知，需人工核对",
+        prompt_hold=True,
+        manual_hold=True,
+    )
+    source.fetch_calls = 0
+
+    held = pipeline.force_generate(group.id, "2026-08-18")
+
+    assert held["status"] == "held"
+    assert held["error_type"] == "PROMPT_RESULT_UNKNOWN"
+    assert source.fetch_calls == 0
+
+
 def test_weekday_default_skips_saturday(tmp_path):
     pipeline, group = _make_pipeline(tmp_path, schedule_rule="weekday_default")
     results = pipeline.generate_all(run_date="2026-08-22")  # 周六
