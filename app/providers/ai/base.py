@@ -19,6 +19,10 @@ class ExternalCallResultUnknownError(ExternalCallError):
     """请求可能已经被 Provider 接收，禁止自动重试或切换备用。"""
 
 
+class ExternalCallInvalidResponseError(ExternalCallError):
+    """Provider 已明确返回，但响应不可解析；禁止切备用，可安全本地降级。"""
+
+
 @dataclass
 class PromptContext:
     group_id: str

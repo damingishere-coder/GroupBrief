@@ -6,7 +6,10 @@ from types import SimpleNamespace
 import pytest
 
 from app.config.settings import Settings
-from app.providers.ai.base import ExternalCallNotSubmittedError
+from app.providers.ai.base import (
+    ExternalCallInvalidResponseError,
+    ExternalCallNotSubmittedError,
+)
 from app.providers.ai.codex import CodexGPTProvider, build_summary_provider
 
 
@@ -74,6 +77,27 @@ def test_codex_success_uses_stdin_read_only_and_does_not_call_fallback(monkeypat
     assert "--ignore-rules" in captured["command"]
     assert 'model_reasoning_effort="medium"' in captured["command"]
     assert captured["timeout"] == 30
+
+
+def test_codex_invalid_json_is_known_failure_without_fallback(monkeypatch):
+    provider = CodexGPTProvider(_settings(ai_api_key="fake"))
+    provider._resolved_binary = "codex.CMD"
+    fallback = _Fallback()
+    provider._fallback = fallback
+
+    def fake_run(command, **_kwargs):
+        output_path = Path(command[command.index("--output-last-message") + 1])
+        output_path.write_text("这不是 JSON", encoding="utf-8")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("app.providers.ai.codex.subprocess.run", fake_run)
+
+    with pytest.raises(ExternalCallInvalidResponseError, match="JSON 无效"):
+        provider._chat(
+            [{"role": "user", "content": "test"}],
+            response_format="json_object",
+        )
+    assert fallback.calls == 0
 
 
 def test_default_codex_summary_timeout_allows_long_structured_responses():

@@ -237,6 +237,99 @@ def test_unknown_image_result_never_calls_safe_or_local_fallback(tmp_path):
     assert not job.output_path.exists()
 
 
+def test_strict_verification_known_failure_uses_local_fallback(tmp_path, monkeypatch):
+    from app.image.image_task import ImageTaskResult
+
+    class QualityRetryFailsKnown:
+        def __init__(self):
+            self.calls = 0
+
+        def generate(self, _prompt_file, output_path, **_kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                output_path.write_bytes(_PNG_1PX)
+                return ImageTaskResult(True, image_path=output_path)
+            return ImageTaskResult(
+                False,
+                error="network failure",
+                detail={"outcome_unknown": False},
+            )
+
+    generator = QualityRetryFailsKnown()
+    job = _job(tmp_path, "群1", generator)
+    fallback_calls = []
+    monkeypatch.setattr(
+        "app.image.image_task.verify_image_contract",
+        lambda *_args, **_kwargs: (False, "图片事实校验失败"),
+    )
+    monkeypatch.setattr(
+        "app.image.fact_verification.strict_fact_verification_enabled",
+        lambda _path: True,
+    )
+    monkeypatch.setattr(
+        ImageJob,
+        "_local_fallback",
+        lambda self, reason: fallback_calls.append(reason)
+        or {
+            "group_name": self.group_name,
+            "status": "success",
+            "success": True,
+            "detail": "local fallback",
+            "error_type": "",
+            "generator_detail": {"fallback_level": 3},
+        },
+    )
+
+    result = job.run()
+
+    assert result["status"] == "success"
+    assert generator.calls == 2
+    assert fallback_calls == ["IMAGE_CONTENT_VERIFICATION_FAILED"]
+
+
+def test_strict_verification_unknown_retry_stays_failed_closed(tmp_path, monkeypatch):
+    from app.image.image_task import ImageTaskResult
+
+    class QualityRetryUnknown:
+        def __init__(self):
+            self.calls = 0
+
+        def generate(self, _prompt_file, output_path, **_kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                output_path.write_bytes(_PNG_1PX)
+                return ImageTaskResult(True, image_path=output_path)
+            return ImageTaskResult(
+                False,
+                error="receipt missing",
+                detail={"outcome_unknown": True},
+            )
+
+    generator = QualityRetryUnknown()
+    job = _job(tmp_path, "群1", generator)
+    monkeypatch.setattr(
+        "app.image.image_task.verify_image_contract",
+        lambda *_args, **_kwargs: (False, "图片事实校验失败"),
+    )
+    monkeypatch.setattr(
+        "app.image.fact_verification.strict_fact_verification_enabled",
+        lambda _path: True,
+    )
+    monkeypatch.setattr(
+        ImageJob,
+        "_local_fallback",
+        lambda *_args, **_kwargs: pytest.fail("结果未知时不得进入本地兜底"),
+    )
+
+    result = job.run()
+
+    assert result["status"] == "failed"
+    assert result["error_type"] == "IMAGE_GENERATION_FAILED"
+    assert generator.calls == 2
+
+
 def test_skip_when_image_exists(tmp_path):
     gen = FakeGenerator()
     job = _job(tmp_path, "群1", gen)

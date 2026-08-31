@@ -345,13 +345,19 @@ class ImageJob:
                         quality_retry=True,
                     )
                 except Exception as exc:
-                    return {
-                        "group_name": self.group_name,
-                        "status": "failed",
-                        "success": False,
-                        "detail": f"第一次{detail}；第二次生图异常：{str(exc)[:180]}",
-                        "error_type": IMAGE_CONTENT_VERIFICATION_FAILED,
-                    }
+                    try:
+                        return self._local_fallback(IMAGE_CONTENT_VERIFICATION_FAILED)
+                    except Exception as fallback_exc:
+                        return {
+                            "group_name": self.group_name,
+                            "status": "failed",
+                            "success": False,
+                            "detail": (
+                                f"第一次{detail}；第二次生图异常：{str(exc)[:140]}；"
+                                f"本地兜底失败：{str(fallback_exc)[:100]}"
+                            ),
+                            "error_type": IMAGE_CONTENT_VERIFICATION_FAILED,
+                        }
                 if retry_result.success:
                     retry_ok, retry_detail = verify_image_contract(
                         self.prompt_file,
@@ -371,16 +377,33 @@ class ImageJob:
                     retry_error = retry_detail
                 else:
                     retry_error = retry_result.error or "第二次生图失败"
+                    if image_result_is_unknown(retry_result.detail or {}):
+                        if self.output_path.exists():
+                            self.output_path.unlink()
+                        return {
+                            "group_name": self.group_name,
+                            "status": "failed",
+                            "success": False,
+                            "detail": f"第一次{detail}；第二次{retry_error}",
+                            "error_type": IMAGE_GENERATION_FAILED,
+                            "generator_detail": retry_result.detail or {},
+                        }
                 if self.output_path.exists():
                     self.output_path.unlink()
-                return {
-                    "group_name": self.group_name,
-                    "status": "failed",
-                    "success": False,
-                    "detail": f"第一次{detail}；第二次{retry_error}",
-                    "error_type": IMAGE_CONTENT_VERIFICATION_FAILED,
-                    "generator_detail": retry_result.detail or {},
-                }
+                try:
+                    return self._local_fallback(IMAGE_CONTENT_VERIFICATION_FAILED)
+                except Exception as fallback_exc:
+                    return {
+                        "group_name": self.group_name,
+                        "status": "failed",
+                        "success": False,
+                        "detail": (
+                            f"第一次{detail}；第二次{retry_error}；"
+                            f"本地兜底失败：{str(fallback_exc)[:100]}"
+                        ),
+                        "error_type": IMAGE_CONTENT_VERIFICATION_FAILED,
+                        "generator_detail": retry_result.detail or {},
+                    }
             try:
                 return self._local_fallback(IMAGE_FILE_MISSING)
             except Exception as fallback_exc:

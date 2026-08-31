@@ -19,6 +19,7 @@ from app.ai.concurrency import bounded_slot, normalized_limit
 from app.config.settings import Settings
 from app.core.logging import get_logger
 from app.providers.ai.base import (
+    ExternalCallInvalidResponseError,
     ExternalCallNotSubmittedError,
     ExternalCallResultUnknownError,
     PromptGeneratorProvider,
@@ -267,11 +268,11 @@ class CodexGPTProvider(DeepSeekV4FlashProvider):
                     text = _strip_json_fence(text)
                     parsed = json.loads(text)
                 except (ValueError, json.JSONDecodeError) as exc:
-                    raise ExternalCallResultUnknownError(
+                    raise ExternalCallInvalidResponseError(
                         f"Codex GPT JSON 无效（request_id={request_id}）"
                     ) from exc
                 if not isinstance(parsed, dict):
-                    raise ExternalCallResultUnknownError(
+                    raise ExternalCallInvalidResponseError(
                         f"Codex GPT JSON 输出不是对象（request_id={request_id}）"
                     )
             logger.info("Codex GPT 调用成功（model=%s request_id=%s）", self.model, request_id)

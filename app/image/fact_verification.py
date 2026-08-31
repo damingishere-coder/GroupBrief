@@ -18,7 +18,7 @@ from app.ai.strict_prompt_contract import STRICT_IMAGE_FACT_MARKER
 
 FACT_REVIEW_FILE = "image_fact_review.json"
 _NUMERIC_FACT_RE = re.compile(
-    r"(?<![A-Za-z0-9])\d+(?:[.,]\d+)?(?:[^\S\r\n]*(?:%|％|kg|KG|公斤|斤|元|万元|万|W|w|天|℃|°C|岁|厘米|cm|米|m|小时|分钟))?"
+    r"(?<![A-Za-z0-9])\d+(?:[.,]\d+)?(?:[^\S\r\n]*(?:%|％|kg|KG|公斤|斤|元|块|万元|万|W|w|天|℃|°C|岁|厘米|cm|米|m|小时|分钟))?"
 )
 _FACTUAL_TEXT_MARKERS = (
     "bmi",
@@ -85,7 +85,11 @@ def _canonical_number(value: str) -> str:
         "",
         value.replace("，", ".").replace(",", "."),
     ).casefold()
-    return normalized.replace("万元", "w").replace("万", "w")
+    normalized = normalized.replace("万元", "w").replace("万", "w")
+    normalized = normalized.replace("块", "元")
+    if re.fullmatch(r"0+", normalized):
+        return "0"
+    return normalized
 
 
 def _numeric_facts(value: str) -> set[str]:
@@ -116,6 +120,16 @@ def _load_evidence(prompt_file: Path) -> tuple[list[str], str, int]:
         line.strip() for line in visible_prompt.splitlines() if line.strip()
     ]
     numeric_evidence_lines: list[str] = []
+    for heading in ("群名称", "统计时间", "数据"):
+        match = re.search(
+            rf"【{heading}】\s*(.*?)(?=\n【|\Z)",
+            visible_prompt,
+            flags=re.DOTALL,
+        )
+        if match:
+            numeric_evidence_lines.extend(
+                line.strip() for line in match.group(1).splitlines() if line.strip()
+            )
     for item in payload:
         if not isinstance(item, dict):
             continue

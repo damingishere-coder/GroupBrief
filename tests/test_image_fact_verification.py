@@ -94,6 +94,45 @@ def test_numeric_units_do_not_join_across_ocr_lines(tmp_path):
     assert review.unknown_numeric == ()
 
 
+def test_allows_deterministic_header_numbers_and_currency_alias(tmp_path):
+    prompt = tmp_path / "image_prompt.txt"
+    prompt.write_text(
+        """【群名称】
+Eason张UED-4.1群
+【统计时间】
+2026-08-30 00:00:00 ~ 2026-08-30 23:59:59
+【数据】
+138 条消息
+20 人发言
+【版面1】
+38元魔法战神
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "messages.json").write_text(
+        json.dumps(
+            [{"sender_name": "符号昵称", "content": "38块的游戏"}],
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    image = tmp_path / "daily_image.png"
+    Image.new("RGB", (16, 16), "white").save(image)
+
+    review = review_image_facts(
+        prompt,
+        image,
+        ocr_text=(
+            "Eason张UED-4.1群\n"
+            "2026-08-30 00:00:00 ~ 2026-08-30 23:59:59\n"
+            "138 条消息 20 人发言\n38元魔法战神\n符号昵称 0000"
+        ),
+    )
+
+    assert review.ok
+    assert review.unknown_numeric == ()
+
+
 def test_strict_contract_removes_bmi_display_instructions():
     prompt = """【版面4】
 手指一路猜到BMI
