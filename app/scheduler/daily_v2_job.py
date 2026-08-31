@@ -8,7 +8,6 @@
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 import sys
 import uuid
@@ -24,7 +23,7 @@ from app.pipeline.daily_pipeline import DailyPipeline, parse_date
 from app.services.generation_runtime import GenerationBusyError, generation_mutex
 from app.services.email_service import email_delivery_config_error
 from app.v2.constants import IMAGE_GENERATION_FAILED, SCHEDULER_STATE_CORRUPT
-from app.v2.run_store import _run_mutex
+from app.v2.run_store import _atomic_write_text, _run_mutex
 from app.scheduler.outcome import ProcessExitCode, attach_outcome, summarize_results
 from app.scheduler.task_manifest import (
     build_expected_groups,
@@ -179,9 +178,10 @@ class DailyScheduleState:
             data["state_version"] = int(data.get("state_version") or 0) + 1
             data["updated_at"] = _now_iso()
             path.parent.mkdir(parents=True, exist_ok=True)
-            temp = path.with_suffix(".json.tmp")
-            temp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-            os.replace(temp, path)
+            _atomic_write_text(
+                path,
+                json.dumps(data, ensure_ascii=False, indent=2),
+            )
             return data
 
     def compare_and_update(
@@ -209,9 +209,10 @@ class DailyScheduleState:
             data["state_version"] = current_version + 1
             data["updated_at"] = _now_iso()
             path.parent.mkdir(parents=True, exist_ok=True)
-            temp = path.with_suffix(".json.tmp")
-            temp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-            os.replace(temp, path)
+            _atomic_write_text(
+                path,
+                json.dumps(data, ensure_ascii=False, indent=2),
+            )
             return data
 
 

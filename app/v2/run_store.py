@@ -14,13 +14,19 @@ import json
 import hashlib
 import os
 import threading
+import time
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Iterator
 
-from app.core.path_security import resolve_within, validate_iso_date, validate_path_label
+from app.core.path_security import (
+    _resolved_path,
+    resolve_within,
+    validate_iso_date,
+    validate_path_label,
+)
 from app.services.handoff_service import safe_dir_name
 from app.v2.constants import (
     CORRUPT,
@@ -47,6 +53,7 @@ from app.v2.reliability import enrich_run_state, retry_delay_seconds
 _RUN_WRITE_LOCK = threading.RLock()
 _WAIT_OBJECT_0 = 0
 _WAIT_ABANDONED = 0x80
+_WAIT_FAILED = 0xFFFFFFFF
 _PERSISTED_STATUSES = frozenset(STATUS_FLOW) - {CORRUPT}
 
 
@@ -57,6 +64,45 @@ class RunStateCorruptionError(RuntimeError):
 def validate_run_date(value: str) -> str:
     """校验 V2 运行目录日期，拒绝路径段和不存在的日历日期。"""
     return validate_iso_date(value, field_name="run_date")
+
+
+def _atomic_write_text(path: Path, content: str, *, encoding: str = "utf-8") -> None:
+    """使用唯一 staging 文件原子替换目标，且不遗留失败临时文件。"""
+
+    temp = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    try:
+        temp.write_text(content, encoding=encoding)
+        for attempt in range(8):
+            try:
+                os.replace(temp, path)
+                break
+            except PermissionError:
+                if attempt == 7 or not temp.exists():
+                    raise
+                time.sleep(min(0.01 * (2**attempt), 0.5))
+    finally:
+        try:
+            temp.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _windows_kernel32():
+    """返回声明了 64 位 HANDLE 签名的 Windows 同步 API。"""
+
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateMutexW.argtypes = [wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR]
+    kernel32.CreateMutexW.restype = wintypes.HANDLE
+    kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    kernel32.WaitForSingleObject.restype = wintypes.DWORD
+    kernel32.ReleaseMutex.argtypes = [wintypes.HANDLE]
+    kernel32.ReleaseMutex.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    return kernel32
 
 
 @contextmanager
@@ -70,26 +116,29 @@ def _run_mutex(path: Path, timeout_seconds: float = 10.0) -> Iterator[None]:
         raise TimeoutError(f"等待运行状态锁超时：{path}")
     handle = None
     owns_handle = False
+    kernel32 = None
+    digest = ""
     try:
         if os.name == "nt":
             import ctypes
 
-            digest = hashlib.sha256(str(path.resolve()).lower().encode("utf-8")).hexdigest()[:32]
-            handle = ctypes.windll.kernel32.CreateMutexW(None, False, f"Local\\GroupBrief.Run.{digest}")
+            digest = hashlib.sha256(str(_resolved_path(path)).lower().encode("utf-8")).hexdigest()[:32]
+            kernel32 = _windows_kernel32()
+            handle = kernel32.CreateMutexW(None, False, f"Local\\GroupBrief.Run.{digest}")
             if not handle:
-                raise OSError(f"无法创建运行状态互斥锁：{path}")
-            wait_code = ctypes.windll.kernel32.WaitForSingleObject(handle, int(timeout_seconds * 1000))
+                raise ctypes.WinError(ctypes.get_last_error())
+            wait_code = kernel32.WaitForSingleObject(handle, int(timeout_seconds * 1000))
+            if wait_code == _WAIT_FAILED:
+                raise ctypes.WinError(ctypes.get_last_error())
             if wait_code not in (_WAIT_OBJECT_0, _WAIT_ABANDONED):
                 raise TimeoutError(f"等待运行状态互斥锁超时：{path}")
             owns_handle = True
         yield
     finally:
-        if handle:
-            import ctypes
-
+        if handle and kernel32 is not None:
             if owns_handle:
-                ctypes.windll.kernel32.ReleaseMutex(handle)
-            ctypes.windll.kernel32.CloseHandle(handle)
+                kernel32.ReleaseMutex(handle)
+            kernel32.CloseHandle(handle)
         _RUN_WRITE_LOCK.release()
 
 
@@ -248,9 +297,10 @@ class RunStore:
             if schema_error:
                 raise ValueError(f"run.json 写入数据不符合 Schema：{schema_error}")
             data["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            temp = path.with_suffix(".json.tmp")
-            temp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-            temp.replace(path)
+            _atomic_write_text(
+                path,
+                json.dumps(data, ensure_ascii=False, indent=2),
+            )
             return data
 
     def update(self, group_name: str, run_date: str, **fields) -> dict:

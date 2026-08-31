@@ -4,7 +4,12 @@ from pathlib import Path
 
 import pytest
 
-from app.core.path_security import PathBoundaryError, resolve_within, validate_path_label
+from app.core.path_security import (
+    PathBoundaryError,
+    _strip_windows_extended_prefix,
+    resolve_within,
+    validate_path_label,
+)
 from app.v2.run_store import RunStore
 
 
@@ -21,6 +26,12 @@ def test_resolve_within_accepts_child_and_rejects_parent_or_sibling(tmp_path):
         resolve_within(root, Path("..") / "2026-08-24-extra" / "ranking.txt")
     with pytest.raises(PathBoundaryError):
         resolve_within(root, root)
+
+
+def test_windows_extended_path_prefix_is_normalized_without_changing_location():
+    assert _strip_windows_extended_prefix(r"\\?\C:\output\群A") == r"C:\output\群A"
+    assert _strip_windows_extended_prefix(r"\\?\UNC\server\share\群A") == r"\\server\share\群A"
+    assert _strip_windows_extended_prefix(r"C:\output\群A") == r"C:\output\群A"
 
 
 @pytest.mark.parametrize(

@@ -1,11 +1,52 @@
 from __future__ import annotations
 
 import multiprocessing
+import os
 from pathlib import Path
+
+import pytest
 
 from app.scheduler.daily_v2_job import DailyScheduleState
 from app.v2.constants import PENDING
-from app.v2.run_store import RunStore
+from app.v2.run_store import RunStore, _atomic_write_text
+
+
+def test_atomic_write_retries_transient_windows_sharing_violation(tmp_path, monkeypatch):
+    target = tmp_path / "state.json"
+    original_replace = os.replace
+    attempts = 0
+
+    def flaky_replace(source, destination):
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            raise PermissionError(5, "access denied", str(source), str(destination))
+        original_replace(source, destination)
+
+    monkeypatch.setattr(os, "replace", flaky_replace)
+    monkeypatch.setattr("app.v2.run_store.time.sleep", lambda _seconds: None)
+
+    _atomic_write_text(target, '{"ok": true}')
+
+    assert attempts == 3
+    assert target.read_text(encoding="utf-8") == '{"ok": true}'
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_atomic_write_does_not_hide_persistent_replace_failure(tmp_path, monkeypatch):
+    target = tmp_path / "state.json"
+
+    def blocked_replace(source, destination):
+        raise PermissionError(5, "access denied", str(source), str(destination))
+
+    monkeypatch.setattr(os, "replace", blocked_replace)
+    monkeypatch.setattr("app.v2.run_store.time.sleep", lambda _seconds: None)
+
+    with pytest.raises(PermissionError):
+        _atomic_write_text(target, '{"ok": false}')
+
+    assert not target.exists()
+    assert not list(tmp_path.glob("*.tmp"))
 
 
 def _run_store_writer(root: str, worker: int, count: int, queue) -> None:
@@ -64,6 +105,7 @@ def test_run_store_cross_process_updates_do_not_lose_fields(tmp_path):
         for index in range(12):
             assert run[f"worker_{worker}_{index}"] == index
     assert run["state_version"] >= 25
+    assert not list(root.rglob("*.tmp"))
 
 
 def test_scheduler_state_cross_process_updates_do_not_lose_fields(tmp_path):
@@ -74,3 +116,4 @@ def test_scheduler_state_cross_process_updates_do_not_lose_fields(tmp_path):
         for index in range(12):
             assert state[f"worker_{worker}_{index}"] == index
     assert state["state_version"] >= 24
+    assert not list(tmp_path.rglob("*.tmp"))

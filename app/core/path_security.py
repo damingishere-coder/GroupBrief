@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 from datetime import datetime
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -17,6 +18,23 @@ _PATH_SPLIT = re.compile(r"[\\/]+")
 
 class PathBoundaryError(ValueError):
     """用户输入可能逃出预期文件根目录。"""
+
+
+def _strip_windows_extended_prefix(value: str) -> str:
+    """把 Windows 同一路径的 extended-length 表示还原为普通 drive/UNC 表示。"""
+
+    if value.startswith("\\\\?\\UNC\\"):
+        return "\\\\" + value[8:]
+    if value.startswith("\\\\?\\") and len(value) >= 7 and value[5] == ":":
+        return value[4:]
+    return value
+
+
+def _resolved_path(value: Path | str) -> Path:
+    resolved = Path(value).resolve()
+    if os.name == "nt":
+        return Path(_strip_windows_extended_prefix(str(resolved)))
+    return resolved
 
 
 def validate_iso_date(value: str, *, field_name: str = "date") -> str:
@@ -47,8 +65,8 @@ def validate_path_label(value: str, *, field_name: str = "name") -> str:
 def resolve_within(root: Path | str, *parts: Path | str, allow_root: bool = False) -> Path:
     """解析路径并证明它位于 root 内；同时阻断 symlink 和 sibling-prefix 绕过。"""
     try:
-        resolved_root = Path(root).resolve()
-        candidate = resolved_root.joinpath(*(Path(part) for part in parts)).resolve()
+        resolved_root = _resolved_path(root)
+        candidate = _resolved_path(resolved_root.joinpath(*(Path(part) for part in parts)))
         candidate.relative_to(resolved_root)
     except (OSError, RuntimeError, ValueError) as exc:
         raise PathBoundaryError("路径超出允许的文件目录") from exc
