@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { confirmRecovery, get, getDashboard, getRuns, getRuntimeLogs, pipelineGenerate, pipelineSend, readV2JsonFile, resetSendFailure, resolveManualSend, resolvePromptUnknown, resolveSendUnknown } from "./api";
+import { batchUpdateGroupImageTheme, confirmRecovery, get, getDashboard, getRuns, getRuntimeLogs, pipelineGenerate, pipelineSend, readV2JsonFile, resetSendFailure, resolveManualSend, resolvePromptUnknown, resolveSendUnknown } from "./api";
 
 function response(body: unknown, options: { ok?: boolean; status?: number; raw?: string } = {}): Response {
   return {
@@ -53,6 +53,35 @@ describe("frontend API contract", () => {
       confirm_regenerated: true,
       confirm_late_send: true,
     });
+  });
+
+  it("sends one batch request for multiple group image themes", async () => {
+    const fetchMock = vi.fn(async () => response({
+      status: "success",
+      requested_count: 2,
+      success: [],
+      failed: [],
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await batchUpdateGroupImageTheme({
+      group_ids: [7, 8],
+      image_theme: "custom",
+      image_theme_custom: "低饱和黏土摄影",
+    });
+
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/groups/batch/image-theme",
+      expect.objectContaining({
+        method: "PUT",
+        body: JSON.stringify({
+          group_ids: [7, 8],
+          image_theme: "custom",
+          image_theme_custom: "低饱和黏土摄影",
+        }),
+      }),
+    );
   });
 
   it("confirms historical generation with CAS and no send field", async () => {

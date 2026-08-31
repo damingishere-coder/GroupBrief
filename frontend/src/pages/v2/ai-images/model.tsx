@@ -49,7 +49,7 @@ export function regenerationPollDelay(
   return Math.min(base * (2 ** Math.max(0, consecutiveFailures)), 30_000);
 }
 
-export function describeLoadError(scope: string, reason: unknown): string {
+export function describeApiError(reason: unknown): string {
   const raw = reason instanceof Error ? reason.message : String(reason);
   let detail = raw;
   try {
@@ -58,6 +58,11 @@ export function describeLoadError(scope: string, reason: unknown): string {
   } catch {
     // 非 JSON 错误直接保留原始信息。
   }
+  return detail;
+}
+
+export function describeLoadError(scope: string, reason: unknown): string {
+  const detail = describeApiError(reason);
   if (detail === "Not Found" || detail.includes('"detail":"Not Found"')) {
     return `${scope}接口尚未加载。当前后端可能仍是旧版本，请重启 GroupBrief 服务后重试。`;
   }

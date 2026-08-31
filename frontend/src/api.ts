@@ -403,6 +403,24 @@ export interface GroupImagePromptConfig {
   preview: string;
 }
 
+export interface BatchImageThemeSuccess {
+  group_id: number;
+  group_name: string;
+}
+
+export interface BatchImageThemeFailure {
+  group_id: number;
+  code: "GROUP_NOT_FOUND" | "GROUP_DELETED" | "DATABASE_SAVE_FAILED";
+  reason: string;
+}
+
+export interface BatchImageThemeResponse {
+  status: "success" | "partial" | "failed";
+  requested_count: number;
+  success: BatchImageThemeSuccess[];
+  failed: BatchImageThemeFailure[];
+}
+
 export interface RunPromptConfig {
   group_name: string;
   run_date: string;
@@ -513,6 +531,11 @@ export const syncWechatGroupNames = () => post<GroupNameSyncResult>("/groups/syn
 export const createGroup = (body: GroupPayload) => post<{ id: number; restored?: boolean }>("/groups", body);
 export const updateGroup = (groupId: number, body: Partial<GroupPayload>) =>
   put<{ id: number }>(`/groups/${groupId}`, body);
+export const batchUpdateGroupImageTheme = (body: {
+  group_ids: number[];
+  image_theme: string;
+  image_theme_custom: string;
+}) => put<BatchImageThemeResponse>("/groups/batch/image-theme", body);
 export const verifyGroupSendTarget = (groupId: number) =>
   post<{ ok: boolean; target: string; detail: string }>(`/groups/${groupId}/verify-send-target`);
 export const deleteGroup = (groupId: number) => del<{ ok: boolean; deleted_at: string | null }>(`/groups/${groupId}`);
