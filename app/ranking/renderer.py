@@ -9,6 +9,7 @@ from __future__ import annotations
 import re
 
 from app.ranking.engine_types import RankingResult
+from app.ranking.policies import RANKING_POLICY_TEXT_PRIMARY
 from app.ranking.template_service import (
     SUPPORTED_VARS,
     TemplateError,
@@ -23,15 +24,25 @@ def render_ranking(result: RankingResult, template_text: str) -> str:
     """把模板与统计结果渲染成最终排行榜文本。"""
     validate_template(template_text)
 
-    top_lines = "\n".join(
-        f"{s.rank}.{s.name}【{s.count}】" for s in result.top_speakers
-    )
+    if result.count_policy == RANKING_POLICY_TEXT_PRIMARY:
+        top_lines = "\n".join(
+            f"{s.rank}.{s.name}【文字 {s.text_count}｜互动 {s.interaction_count}】"
+            for s in result.top_speakers
+        )
+    else:
+        top_lines = "\n".join(
+            f"{s.rank}.{s.name}【{s.count}】" for s in result.top_speakers
+        )
     values = {
         "group_name": result.group_name,
         "period_start": result.period_start,
         "period_end": result.period_end,
         "speaker_count": str(result.speaker_count),
         "message_count": str(result.message_count),
+        "count_policy": result.count_policy,
+        "text_message_count": str(result.text_message_count),
+        "interaction_message_count": str(result.interaction_message_count),
+        "text_speaker_count": str(result.text_speaker_count),
         "top_limit": str(result.top_limit),
         "top_lines": top_lines,
         # 兼容已有自定义模板；变量名虽为 top10，内容仍以本次实际上限为准。

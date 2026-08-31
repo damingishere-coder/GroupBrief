@@ -18,6 +18,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from app.config.settings import Settings, get_settings
+from app.core.logging import get_logger
 from app.v2.constants import (
     GROUP_NOT_FOUND,
     MESSAGE_FETCH_FAILED,
@@ -36,6 +37,7 @@ from app.providers.history.wechat_data_analysis import WeChatDataAnalysisProvide
 
 # 默认本机地址（与 .env 一致；覆盖时仅允许本机回环，见 V1 wechat_mcp.py）
 DEFAULT_MCP_URL = "http://127.0.0.1:10392/mcp"
+logger = get_logger("groupbrief.data_source")
 
 
 class WeChatDataAnalysisSource(WeChatDataSource):
@@ -86,7 +88,7 @@ class WeChatDataAnalysisSource(WeChatDataSource):
                 if g.group_id == group_id:
                     return True
         except Exception:
-            pass
+            logger.warning("群存在性校验失败：group_id=%s", group_id, exc_info=True)
         return False
 
     # ---------- 消息读取 ----------
@@ -98,6 +100,37 @@ class WeChatDataAnalysisSource(WeChatDataSource):
         end_time: datetime,
     ) -> FetchResult:
         result = self._provider.fetch_messages(group_id, start_time, end_time)
+        primary_result = result
+        fallback_used = False
+        if (
+            self.settings.wechat_runtime_export_fallback_enabled
+            and getattr(self._provider, "_mcp_client", None) is not None
+            and result.status in {ProviderStatus.READ_FAILED, ProviderStatus.UNAVAILABLE}
+            and getattr(self._provider, "export_dir", None) is not None
+            and self._provider.export_dir.is_dir()
+        ):
+            # 完整切换到同一 WeChatDataAnalysis 的 JSON 导出结果；绝不拼接 MCP 消息。
+            fallback = self._provider._fetch_messages_export(
+                group_id,
+                start_time,
+                end_time,
+            )
+            if fallback.status in {ProviderStatus.OK, ProviderStatus.EMPTY_RESULT}:
+                result = fallback
+                fallback_used = True
+
+        source_meta = {
+            **(result.meta if isinstance(result.meta, dict) else {}),
+            "provider_chain": (
+                ["wechat_data_analysis_mcp", "wechat_data_analysis_export"]
+                if fallback_used
+                else ["wechat_data_analysis_mcp"]
+                if getattr(self._provider, "_mcp_client", None) is not None
+                else ["wechat_data_analysis_export"]
+            ),
+            "fallback_used": fallback_used,
+            "primary_error": primary_result.detail[:200] if fallback_used else "",
+        }
 
         if result.status == ProviderStatus.OK and result.messages:
             messages = [_to_v2_message(m) for m in result.messages]
@@ -105,7 +138,7 @@ class WeChatDataAnalysisSource(WeChatDataSource):
                 messages=messages,
                 status=DataSourceStatus.OK,
                 detail=f"{self.name}：{len(messages)} 条消息",
-                meta=result.meta,
+                meta=source_meta,
             )
         if result.status == ProviderStatus.GROUP_NOT_FOUND:
             return FetchResult(
@@ -122,7 +155,7 @@ class WeChatDataAnalysisSource(WeChatDataSource):
                     result.meta,
                 )
             return FetchResult(
-                [], DataSourceStatus.EMPTY_RESULT, result.detail, "", result.meta
+                [], DataSourceStatus.EMPTY_RESULT, result.detail, "", source_meta
             )
         # READ_FAILED / UNAVAILABLE 等一律归为取数失败
         error_type = WECHAT_DATA_UNAVAILABLE if result.status in (
@@ -162,6 +195,15 @@ def _to_v2_message(m: RawMessage) -> V2Message:
         timestamp=m.timestamp,
         message_type=m.message_type,
         content=m.content,
+        upstream_sender_name=(
+            m.upstream_sender_name
+            or (
+                m.sender_name
+                if m.sender_name_source in {"", "wechat_data_analysis"}
+                else ""
+            )
+        ),
+        sender_name_source=m.sender_name_source or "wechat_data_analysis",
         raw={
             "source": m.source,
             "source_message_id": m.source_message_id,

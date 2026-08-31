@@ -1,9 +1,18 @@
 """V2 逐群邮件测试：所有 SMTP 均使用内存 fake，不触发真实网络。"""
 
 import json
+from io import BytesIO
 from types import SimpleNamespace
 
+from PIL import Image
+
 from scripts import send_daily_email as mail_script
+
+
+def _png_bytes() -> bytes:
+    buffer = BytesIO()
+    Image.new("RGBA", (2, 2), (20, 40, 60, 255)).save(buffer, format="PNG")
+    return buffer.getvalue()
 
 
 def _settings(output_dir, *, enabled=True):
@@ -67,7 +76,7 @@ def test_collect_group_inputs_skips_empty_and_invalid_image(tmp_path):
 
 def test_build_message_uses_raw_ranking_and_one_image_attachment(tmp_path):
     run_date = "2026-08-21"
-    image = b"\x89PNG\r\n\x1a\nminimal-png"
+    image = _png_bytes()
     group_dir = _write_group(
         tmp_path,
         "示例群 A",
@@ -97,7 +106,7 @@ def test_build_message_uses_raw_ranking_and_one_image_attachment(tmp_path):
 
 def test_collect_group_inputs_prefers_current_image_setting_over_stale_run_snapshot(tmp_path):
     run_date = "2026-08-21"
-    image = b"\x89PNG\r\n\x1a\nminimal-png"
+    image = _png_bytes()
     _write_group(
         tmp_path,
         "后来开启图片的群",
@@ -163,7 +172,7 @@ def test_main_sends_each_group_and_continues_after_failure(tmp_path, monkeypatch
 
     rc = mail_script.main()
 
-    assert rc == 1
+    assert rc == 3
     sent_subjects = [
         str(message["Subject"])
         for instance in FakeSMTP.instances
@@ -177,10 +186,20 @@ def test_main_sends_each_group_and_continues_after_failure(tmp_path, monkeypatch
         if "失败群" in str(message["Subject"])
     ]
     assert len(sent_subjects) == 1
-    assert len(failed_attempts) == 2
+    assert len(failed_attempts) == 1
 
 
-def test_send_quit_failure_does_not_retry(monkeypatch):
+def test_delivery_exit_code_treats_skipped_group_as_partial():
+    assert mail_script._delivery_exit_code(
+        sent_count=1,
+        already_sent_count=0,
+        failed_count=0,
+        unknown_count=0,
+        skipped_count=1,
+    ) == 2
+
+
+def test_send_quit_failure_does_not_retry(tmp_path, monkeypatch):
     settings = _settings(None)
     calls = {"connect": 0, "send": 0, "sleep": 0}
 
@@ -202,10 +221,14 @@ def test_send_quit_failure_does_not_retry(monkeypatch):
     message = mail_script.EmailMessage()
     message["Subject"] = "测试群"
 
-    ok, detail = mail_script._send_with_retry(message, settings)
+    result = mail_script._send_with_retry(
+        message,
+        settings,
+        ledger=mail_script.EmailDeliveryLedger(tmp_path / "ledger"),
+    )
 
-    assert ok
-    assert detail == ""
+    assert result.success
+    assert result.detail == ""
     assert calls == {"connect": 1, "send": 1, "sleep": 0}
 
 
@@ -282,3 +305,23 @@ def test_dry_run_does_not_require_smtp_or_connect(tmp_path, monkeypatch, capsys)
 
     assert mail_script.main() == 0
     assert "预览群" in capsys.readouterr().out
+
+
+def test_main_invalid_email_config_aborts_before_smtp(tmp_path, monkeypatch, capsys):
+    settings = _settings(tmp_path)
+    settings.email_recipient = ""
+    smtp_calls = []
+
+    def fail_smtp(*args, **kwargs):
+        smtp_calls.append((args, kwargs))
+        raise AssertionError("配置无效时不应连接 SMTP")
+
+    monkeypatch.setattr(mail_script, "get_settings", lambda: settings)
+    monkeypatch.setattr(mail_script.repo, "init_db", lambda settings: None)
+    monkeypatch.setattr(mail_script.repo, "apply_db_settings", lambda settings: None)
+    monkeypatch.setattr(mail_script.smtplib, "SMTP_SSL", fail_smtp)
+    monkeypatch.setattr("sys.argv", ["send_daily_email.py", "--run-date", "2026-08-21"])
+
+    assert mail_script.main() == 1
+    assert "收件人" in capsys.readouterr().out
+    assert not smtp_calls

@@ -21,6 +21,15 @@ import {
 } from "../../components/common";
 import { useToast } from "../../components/ui";
 import { TemplateEditor } from "./Templates";
+import { shanghaiDateInputValue } from "../../date";
+import { ContentSwap } from "../../components/motion";
+import {
+  formatRankingCount,
+  INTERACTION_EXPLANATION,
+  isTextPrimaryRanking,
+  parseRanking,
+  type ParsedRankingSummary,
+} from "./rankingPolicy";
 
 const STATUS_LABELS: Record<string, string> = {
   PENDING: "待生成",
@@ -33,25 +42,10 @@ const STATUS_LABELS: Record<string, string> = {
   FAILED: "失败",
 };
 
-interface RankingSpeaker {
-  rank: number;
-  name: string;
-  count: number;
-}
-
-interface RankingSummary {
-  groupName: string;
-  periodStart: string;
-  periodEnd: string;
-  messageCount: number | null;
-  speakerCount: number | null;
-  topSpeakers: RankingSpeaker[];
-}
-
 interface RankingDetail {
   run: V2Run;
   files: string[];
-  summary: RankingSummary | null;
+  summary: ParsedRankingSummary | null;
   rankingText: string;
   jsonError: string;
   textError: string;
@@ -70,52 +64,6 @@ function StatusPill({ status }: { status: string }) {
   return <StatusBadge tone={statusTone(normalized)}>{STATUS_LABELS[normalized] || status || "未知"}</StatusBadge>;
 }
 
-function asRecord(value: unknown): Record<string, unknown> | null {
-  return typeof value === "object" && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : null;
-}
-
-function asText(value: unknown): string {
-  return typeof value === "string" ? value : "";
-}
-
-function asCount(value: unknown): number | null {
-  if (typeof value === "number" && Number.isFinite(value) && value >= 0) return Math.round(value);
-  return null;
-}
-
-function parseRanking(value: unknown): { summary: RankingSummary | null; error: string } {
-  const record = asRecord(value);
-  if (!record) return { summary: null, error: "ranking.json 不是对象格式，无法解析排行榜。" };
-  const rawSpeakers = record.top_speakers;
-  if (!Array.isArray(rawSpeakers)) {
-    return { summary: null, error: "ranking.json 缺少有效的 top_speakers 数组。" };
-  }
-  const topSpeakers: RankingSpeaker[] = [];
-  let malformed = false;
-  rawSpeakers.forEach((item, index) => {
-    const speaker = asRecord(item);
-    const name = speaker ? asText(speaker.name).trim() : "";
-    const count = speaker ? asCount(speaker.count) : null;
-    if (!name || count === null) {
-      malformed = true;
-      return;
-    }
-    const rank = asCount(speaker?.rank) || index + 1;
-    topSpeakers.push({ rank, name, count });
-  });
-  return {
-    summary: {
-      groupName: asText(record.group_name),
-      periodStart: asText(record.period_start),
-      periodEnd: asText(record.period_end),
-      messageCount: asCount(record.message_count),
-      speakerCount: asCount(record.speaker_count),
-      topSpeakers,
-    },
-    error: malformed ? "ranking.json 中有部分排行项格式异常，已跳过异常项。" : "",
-  };
-}
-
 function runKey(run: V2Run): string {
   return `${run.group_name}\u0000${run.run_date}`;
 }
@@ -128,7 +76,7 @@ function formatDateTime(value: unknown): string {
 export default function Ranking() {
   const { msg, toast } = useToast();
   const [runs, setRuns] = useState<V2Run[]>([]);
-  const [dateFilter, setDateFilter] = useState("");
+  const [dateFilter, setDateFilter] = useState(shanghaiDateInputValue);
   const [groupFilter, setGroupFilter] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
   const [selectedKey, setSelectedKey] = useState("");
@@ -195,7 +143,7 @@ export default function Ranking() {
           ? readV2TextFile(selected.group_name, selected.run_date, "ranking.txt")
           : Promise.resolve("");
         return Promise.allSettled([jsonRequest, textRequest]).then(([jsonResult, textResult]) => {
-          let summary: RankingSummary | null = null;
+          let summary: ParsedRankingSummary | null = null;
           let jsonError = result.files.includes("ranking.json") ? "" : "未找到 ranking.json，无法显示结构化排行。";
           let rankingText = "";
           let textError = result.files.includes("ranking.txt") ? "" : "未找到 ranking.txt，无法显示排行榜文案。";
@@ -255,7 +203,8 @@ export default function Ranking() {
         </section>
 
         <section className="ranking-detail-panel" aria-label="排行榜运行详情">
-          {detailLoading ? <LoadingState label="正在读取排行榜产物…" /> : !detail ? <EmptyState title="请选择运行记录" description="从左侧选择一条运行记录，读取真实 ranking.json 与 ranking.txt。" /> : (
+          <ContentSwap swapKey={detailLoading ? "loading" : detail ? selectedKey : "empty"}>
+            {detailLoading ? <LoadingState label="正在读取排行榜产物…" /> : !detail ? <EmptyState title="请选择运行记录" description="从左侧选择一条运行记录，读取真实 ranking.json 与 ranking.txt。" /> : (
             <>
               <div className="ranking-detail-head">
                 <div><span className="ranking-eyebrow">真实运行产物</span><h2>{detail.run.group_name} · {detail.run.run_date}</h2><p>状态 <StatusPill status={detail.run.status} /> · 更新时间 {formatDateTime(detail.run.updated_at)}</p></div>
@@ -267,12 +216,13 @@ export default function Ranking() {
               </div>
               {(detail.jsonError || detail.textError) && <div className="ranking-file-warning"><WarningCircle size={18} aria-hidden="true" /><div>{detail.jsonError && <p>{detail.jsonError}</p>}{detail.textError && <p>{detail.textError}</p>}</div></div>}
               <div className="ranking-detail-columns">
-                <div className="ranking-top-list"><div className="ranking-content-heading"><h3>Top 排名</h3><span>来自 ranking.json</span></div>{detail.summary?.topSpeakers.length ? <ol>{detail.summary.topSpeakers.map((speaker) => <li key={`${speaker.rank}-${speaker.name}`}><span className="ranking-rank">{speaker.rank}</span><strong>{speaker.name}</strong><span>{speaker.count} 条</span></li>)}</ol> : <EmptyState title="暂无结构化排行" description="ranking.json 缺失、为空或无法解析。" />}</div>
+                <div className="ranking-top-list"><div className="ranking-content-heading"><h3>Top 排名</h3><span>来自 ranking.json</span></div>{detail.summary?.topSpeakers.length ? <><ol>{detail.summary.topSpeakers.map((speaker) => <li key={`${speaker.rank}-${speaker.name}`}><span className="ranking-rank">{speaker.rank}</span><strong title={speaker.name}>{speaker.name}</strong><span>{formatRankingCount(detail.summary?.countPolicy || "all_messages", { count: speaker.count, text_count: speaker.textCount, interaction_count: speaker.interactionCount })}</span></li>)}</ol>{isTextPrimaryRanking(detail.summary.countPolicy) && <p className="ranking-interaction-note">{INTERACTION_EXPLANATION}</p>}</> : <EmptyState title="暂无结构化排行" description="ranking.json 缺失、为空或无法解析。" />}</div>
                 <div className="ranking-text-block"><div className="ranking-content-heading"><h3>排行榜文案</h3><span>来自 ranking.txt</span></div>{detail.rankingText.trim() ? <pre>{detail.rankingText}</pre> : <EmptyState title="暂无排行榜文案" description="真实 ranking.txt 缺失或为空。" />}</div>
               </div>
               {detail.run.error && <div className="ranking-run-error">任务错误：{String(detail.run.error)}</div>}
             </>
-          )}
+            )}
+          </ContentSwap>
         </section>
       </div>
 

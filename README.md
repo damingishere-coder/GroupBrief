@@ -111,14 +111,14 @@ start_windows.bat
 5. 在“记录与归档”中确认消息与运行文件已经保存。
 6. 只有完成当前微信版本和桌面环境的实机测试后，才开启该群的微信发送。
 
-### Docker（可选）
+### Docker（仅开发与只读）
 
 ```powershell
 Copy-Item .env.example .env
 docker compose up -d --build
 ```
 
-Docker 只运行 GroupBrief 服务本体。微信桌面客户端、WeChatDataAnalysis、Codex CLI 和微信 UI 自动化仍在 Windows 宿主机上。完整说明见 [`docs/DOCKER.md`](docs/DOCKER.md)。
+正式支持环境为 Windows 10/11 + Alter + 本机微信，且 FastAPI Scheduler 是唯一调度 owner。Docker 仅保留开发、读取与界面验证能力，不承诺原生微信发送；微信桌面客户端、WeChatDataAnalysis 和 Codex CLI 仍在 Windows 宿主机上。完整说明见 [`docs/DOCKER.md`](docs/DOCKER.md)。
 
 ## 配置
 

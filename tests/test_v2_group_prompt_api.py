@@ -3,6 +3,7 @@ from __future__ import annotations
 from fastapi.testclient import TestClient
 
 from app.main import app
+from app.ai.prompt_templates import DEFAULT_IMAGE_PROMPT_TEMPLATE
 
 client = TestClient(app)
 
@@ -23,8 +24,13 @@ def test_group_prompt_override_is_isolated_and_not_exposed_in_list():
             first_config = client.get(f"/api/groups/{first}/image-prompt").json()
             second_config = client.get(f"/api/groups/{second}/image-prompt").json()
             assert first_config["source"] == second_config["source"] == "global"
+            assert first_config["content"].count("【漫画分镜】") == 1
+            assert first_config["preview"].count("【漫画分镜】") == 1
 
-            custom = "【任务】\n为 {{group_name}} 生成真实群报。\n【大主题】\n{{image_theme}}\n"
+            custom = DEFAULT_IMAGE_PROMPT_TEMPLATE.replace(
+                "生成一张竖版微信群日报漫画信息图。",
+                "为 {{group_name}} 生成一张竖版微信群日报漫画信息图。",
+            )
             saved = client.put(
                 f"/api/groups/{first}/image-prompt",
                 json={
@@ -79,3 +85,26 @@ def test_group_prompt_revision_conflict_returns_409():
             assert response.status_code == 409
         finally:
             client.delete(f"/api/groups/{group_id}")
+
+
+def test_named_theme_preview_only_replaces_canonical_theme_section():
+    original = DEFAULT_IMAGE_PROMPT_TEMPLATE.replace(
+        "{{overall_visual}}",
+        "固定群聊漫画要求。\n\n根据当天真实聊天内容自由选择统一视觉风格。",
+    ).replace("{{panels}}", "【版面1】\n张三说今天完成 3 项工作。")
+    with client:
+        response = client.post(
+            "/api/v2/image-themes/resolve",
+            json={
+                "image_theme": "gouache_editorial",
+                "prompt": original,
+                "group_id": "group-1",
+                "run_date": "2026-08-24",
+            },
+        )
+        assert response.status_code == 200
+        resolved = response.json()
+        assert resolved["actual_key"] == "gouache_editorial"
+        assert "不透明水粉社论" in resolved["prompt"]
+        assert "张三说今天完成 3 项工作。" in resolved["prompt"]
+        assert resolved["prompt"].count("【漫画分镜】") == 1

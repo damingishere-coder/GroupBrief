@@ -22,17 +22,15 @@ import {
 } from "../../api";
 import { Button, EmptyState, LoadingState, PageHeader, StatusBadge, Toast } from "../../components/common";
 import { useToast } from "../../components/ui";
+import { ContentSwap, m } from "../../components/motion";
 
 type SettingsTab = "settings" | "health" | "startup" | "recovery";
 
 const SENSITIVE_KEYS = new Set(["ai_api_key", "email_smtp_password", "email_smtp_user", "email_from", "wechat_mcp_token"]);
-const BOOLEAN_KEYS = new Set(["history_provider_mock_enabled", "email_enabled", "email_use_ssl", "email_send_partial_report"]);
-const NUMBER_KEYS = new Set(["wechat_mcp_timeout_seconds", "wechat_mcp_range_timeout_seconds", "codex_summary_timeout_seconds", "codex_summary_max_retries", "codex_summary_request_concurrency", "ai_timeout_seconds", "ai_max_retries", "max_context_chars", "generation_group_concurrency", "wechat_fetch_concurrency", "ai_request_concurrency", "email_smtp_port"]);
+const BOOLEAN_KEYS = new Set(["email_enabled", "email_use_ssl", "email_send_partial_report"]);
+const NUMBER_KEYS = new Set(["wechat_mcp_timeout_seconds", "wechat_mcp_range_timeout_seconds", "codex_summary_timeout_seconds", "codex_summary_max_retries", "codex_summary_request_concurrency", "ai_timeout_seconds", "ai_max_retries", "max_context_chars", "generation_group_concurrency", "wechat_fetch_concurrency", "ai_request_concurrency", "wechat_native_stage_timeout_seconds", "wechat_native_submit_timeout_seconds", "wechat_native_poll_interval_seconds", "email_smtp_port"]);
 
 const LABELS: Record<string, string> = {
-  history_provider_primary: "主历史数据 Provider",
-  history_provider_fallback: "备用历史数据 Provider",
-  history_provider_mock_enabled: "启用 Mock 数据源",
   wechat_data_dir: "微信数据目录",
   wechat_export_dir: "微信导出目录",
   wechat_cli_path: "wechat-cli 路径",
@@ -48,7 +46,6 @@ const LABELS: Record<string, string> = {
   codex_summary_timeout_seconds: "Codex 总结超时（秒）",
   codex_summary_max_retries: "Codex 最大重试次数",
   codex_summary_request_concurrency: "Codex 总结并发数",
-  ai_provider: "DeepSeek Provider（备用）",
   ai_base_url: "DeepSeek Base URL（备用）",
   ai_api_key: "DeepSeek API Key（备用）",
   ai_model: "DeepSeek 模型 ID（备用）",
@@ -58,6 +55,9 @@ const LABELS: Record<string, string> = {
   generation_group_concurrency: "群任务并发数",
   wechat_fetch_concurrency: "微信取数并发数",
   ai_request_concurrency: "DeepSeek 备用请求并发数",
+  wechat_native_stage_timeout_seconds: "微信粘贴暂存等待（秒）",
+  wechat_native_submit_timeout_seconds: "微信提交验证等待（秒）",
+  wechat_native_poll_interval_seconds: "微信 UI 轮询间隔（秒）",
   email_enabled: "启用邮件（V1 兼容）",
   email_recipient: "邮件收件人（V1 兼容）",
   email_from: "发件地址（V1 兼容）",
@@ -78,9 +78,6 @@ const SETTING_GROUPS = [
     description: "只编辑当前后端设置 API 返回的 Provider、MCP 与本地读取字段。",
     icon: Database,
     keys: [
-      "history_provider_primary",
-      "history_provider_fallback",
-      "history_provider_mock_enabled",
       "wechat_data_dir",
       "wechat_export_dir",
       "wechat_cli_path",
@@ -97,19 +94,19 @@ const SETTING_GROUPS = [
     title: "模型与 Prompt",
     description: "Codex GPT 主用；单次失败时自动切换到已配置的 DeepSeek 备用。",
     icon: PlugsConnected,
-    keys: ["summary_provider_primary", "summary_provider_fallback", "codex_summary_model", "codex_summary_timeout_seconds", "codex_summary_max_retries", "ai_provider", "ai_base_url", "ai_model", "ai_api_key", "ai_timeout_seconds", "ai_max_retries", "max_context_chars"],
+    keys: ["summary_provider_primary", "summary_provider_fallback", "codex_summary_model", "codex_summary_timeout_seconds", "codex_summary_max_retries", "ai_base_url", "ai_model", "ai_api_key", "ai_timeout_seconds", "ai_max_retries", "max_context_chars"],
   },
   {
     id: "advanced",
     title: "高级并发设置",
     description: "控制群任务、微信取数、Codex 总结和 DeepSeek 备用请求的并发上限。",
     icon: GearSix,
-    keys: ["generation_group_concurrency", "wechat_fetch_concurrency", "codex_summary_request_concurrency", "ai_request_concurrency"],
+    keys: ["generation_group_concurrency", "wechat_fetch_concurrency", "codex_summary_request_concurrency", "ai_request_concurrency", "wechat_native_stage_timeout_seconds", "wechat_native_submit_timeout_seconds", "wechat_native_poll_interval_seconds"],
   },
   {
     id: "legacy",
     title: "邮件与每日调度",
-    description: "每日生成时间用于 V2 前一日群报；各群发送时间仍在群聊配置中管理。邮件字段保留兼容。",
+    description: "每日 00:15 生成前一日群报，08:30 按稳定群 ID 串行发送；邮件字段保留兼容。",
     icon: Clock,
     keys: ["email_enabled", "email_recipient", "email_from", "email_smtp_host", "email_smtp_port", "email_smtp_user", "email_smtp_password", "email_use_ssl", "email_send_partial_report", "schedule_generate_time", "schedule_email_time"],
   },
@@ -315,13 +312,14 @@ export default function Settings() {
       <div className="settings-secret-banner" id="settings-secret-note"><Key size={19} /><span>API Key、Token、密码等敏感值只显示掩码；留空或保持 <code>******</code> 不会修改现有密钥。</span></div>
 
       <div className="settings-tabs" role="tablist" aria-label="设置中心区域">
-        <button type="button" role="tab" aria-selected={tab === "settings"} className={`settings-tab ${tab === "settings" ? "is-active" : ""}`} onClick={() => setTab("settings")}><GearSix size={17} />运行设置</button>
-        <button type="button" role="tab" aria-selected={tab === "health"} className={`settings-tab ${tab === "health" ? "is-active" : ""}`} onClick={() => setTab("health")}><Heartbeat size={17} />系统健康</button>
-        <button type="button" role="tab" aria-selected={tab === "startup"} className={`settings-tab ${tab === "startup" ? "is-active" : ""}`} onClick={() => setTab("startup")}><PlugsConnected size={17} />启动检查</button>
-        <button type="button" role="tab" aria-selected={tab === "recovery"} className={`settings-tab ${tab === "recovery" ? "is-active" : ""}`} onClick={() => setTab("recovery")}><WarningCircle size={17} />恢复信息</button>
+        <button type="button" role="tab" aria-selected={tab === "settings"} className={`settings-tab ${tab === "settings" ? "is-active" : ""}`} onClick={() => setTab("settings")}>{tab === "settings" && <m.span className="settings-tab-indicator" layoutId="settings-tab-indicator" />}<GearSix size={17} />运行设置</button>
+        <button type="button" role="tab" aria-selected={tab === "health"} className={`settings-tab ${tab === "health" ? "is-active" : ""}`} onClick={() => setTab("health")}>{tab === "health" && <m.span className="settings-tab-indicator" layoutId="settings-tab-indicator" />}<Heartbeat size={17} />系统健康</button>
+        <button type="button" role="tab" aria-selected={tab === "startup"} className={`settings-tab ${tab === "startup" ? "is-active" : ""}`} onClick={() => setTab("startup")}>{tab === "startup" && <m.span className="settings-tab-indicator" layoutId="settings-tab-indicator" />}<PlugsConnected size={17} />启动检查</button>
+        <button type="button" role="tab" aria-selected={tab === "recovery"} className={`settings-tab ${tab === "recovery" ? "is-active" : ""}`} onClick={() => setTab("recovery")}>{tab === "recovery" && <m.span className="settings-tab-indicator" layoutId="settings-tab-indicator" />}<WarningCircle size={17} />恢复信息</button>
       </div>
 
-      {tab === "settings" && (
+      <ContentSwap swapKey={tab}>
+        {tab === "settings" && (
         <section className="settings-form-area" aria-label="运行设置">
           {settingsError && <div className="settings-error" role="alert"><WarningCircle size={18} />{settingsError}</div>}
           {settingsLoading && <LoadingState label="正在读取真实设置…" />}
@@ -341,6 +339,7 @@ export default function Settings() {
       {tab === "health" && <section className="settings-diagnostic-panel card" aria-label="系统健康"><div className="settings-panel-head"><div><h2>系统健康</h2><p>状态来自本地 `/api/v2/system/health`，不可用依赖保持真实阻塞状态。</p></div><Button tone="secondary" onClick={() => void loadDiagnostics()} busy={diagnosticsLoading}>重新检测</Button></div><HealthPanel health={health} loading={diagnosticsLoading} error={healthError} /></section>}
       {tab === "startup" && <section className="settings-diagnostic-panel card" aria-label="启动检查"><div className="settings-panel-head"><div><h2>启动检查</h2><p>展示服务启动时的真实检查结果，不在浏览器端安装或修改自启动。</p></div><Button tone="secondary" onClick={() => void loadDiagnostics()} busy={diagnosticsLoading}>重新读取</Button></div><StartupPanel checks={startup} loading={diagnosticsLoading} error={startupError} /></section>}
       {tab === "recovery" && <section className="settings-diagnostic-panel card" aria-label="恢复信息"><div className="settings-panel-head"><div><h2>恢复信息</h2><p>只读展示后端扫描到的未完成任务与输出完整性。</p></div><Button tone="secondary" onClick={() => void loadDiagnostics()} busy={diagnosticsLoading}>重新读取</Button></div><RecoveryPanel recovery={recovery} loading={diagnosticsLoading} error={recoveryError} /></section>}
+      </ContentSwap>
 
       <Toast message={msg} />
     </div>

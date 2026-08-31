@@ -9,8 +9,19 @@
 """
 
 import os
+import random
+import shutil
+import tempfile
+import uuid
+from pathlib import Path
 
-os.environ["DATABASE_URL"] = "sqlite:///data/test_groupbrief.db"
+_TEST_ROOT = Path(
+    tempfile.mkdtemp(prefix=f"groupbrief-pytest-{os.getpid()}-")
+)
+_TEST_DB_PATH = _TEST_ROOT / "groupbrief-test.db"
+
+os.environ["DATABASE_URL"] = f"sqlite:///{_TEST_DB_PATH.as_posix()}"
+os.environ["OUTPUT_ROOT_OVERRIDE"] = str(_TEST_ROOT / "output")
 os.environ["GROUPBRIEF_NO_SCHEDULER"] = "1"
 # 测试不读取真实微信联系人库（避免本机 APPDATA 下的 contact.db 影响断言）
 os.environ["GROUPBRIEF_NO_CONTACT_DB"] = "1"
@@ -21,3 +32,57 @@ os.environ["WECHAT_MCP_ACCOUNT"] = ""
 os.environ["AI_API_KEY"] = ""
 # 默认集成测试强制使用无需外部调用的旧兼容分支；Codex 主备路由由专门单测覆盖。
 os.environ["SUMMARY_PROVIDER_PRIMARY"] = "deepseek"
+# 旧 V1 单测需要显式进入兼容维护模式；生产默认仍是 read_only。
+os.environ["LEGACY_V1_WRITE_MODE"] = "maintenance"
+# 普通测试必须能在真实 8766 运行时执行，不能争抢生产生成锁。
+os.environ["GROUPBRIEF_GENERATION_MUTEX_NAMESPACE"] = (
+    f"pytest-{os.getpid()}-{uuid.uuid4().hex}"
+)
+
+
+def pytest_addoption(parser) -> None:
+    parser.addoption(
+        "--random-order-seed",
+        action="store",
+        type=int,
+        default=None,
+        help="使用给定整数 seed 随机重排测试收集顺序",
+    )
+
+
+def pytest_collection_modifyitems(config, items) -> None:
+    seed = config.getoption("--random-order-seed")
+    if seed is None:
+        return
+    random.Random(seed).shuffle(items)
+    reporter = config.pluginmanager.get_plugin("terminalreporter")
+    if reporter is not None:
+        reporter.write_line(f"random-order-seed={seed}")
+
+
+def pytest_sessionfinish(session, exitstatus) -> None:
+    """释放并删除本次 pytest 独占的临时 SQLite 文件。"""
+    del session, exitstatus
+    try:
+        from app.db import repository as repo
+
+        if repo.engine is not None:
+            repo.engine.dispose()
+    except Exception:
+        # 测试收尾不能覆盖更早、更有价值的失败信息。
+        pass
+
+    for candidate in (
+        _TEST_DB_PATH,
+        Path(f"{_TEST_DB_PATH}-wal"),
+        Path(f"{_TEST_DB_PATH}-shm"),
+        Path(f"{_TEST_DB_PATH}-journal"),
+    ):
+        try:
+            candidate.unlink(missing_ok=True)
+        except OSError:
+            pass
+    try:
+        shutil.rmtree(_TEST_ROOT)
+    except OSError:
+        pass

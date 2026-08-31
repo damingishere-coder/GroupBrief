@@ -21,6 +21,9 @@ class PromptMessage:
     sender_name: str
     text: str
     sender_id: str = ""
+    resolved_sender_name: str = ""
+    upstream_sender_name: str = ""
+    attribution_name_source: str = ""
 
 
 @dataclass(frozen=True)

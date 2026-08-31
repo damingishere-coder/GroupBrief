@@ -2,28 +2,191 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+from functools import partial
 from pathlib import Path
 from typing import Any
 
+from sqlalchemy import event
 from sqlmodel import Session, SQLModel, create_engine, select
 
 from app.config.settings import Settings
+from app.db.offline_migrations import MIGRATION_CHECKSUM, MIGRATION_ID, TARGET_USER_VERSION
 from app.db.models import Group, Report, Run, Setting
 
 engine: Any = None
 
+_RELATIONSHIP_COLUMNS = {"legacy_group_id", "identity_state", "orphan_reason"}
+_EXPECTED_FOREIGN_KEYS = {
+    ("group_runs", "run_id", "runs", "id", "RESTRICT"),
+    ("group_runs", "group_id", "groups", "id", "RESTRICT"),
+    ("reports", "group_run_id", "group_runs", "id", "RESTRICT"),
+    ("execution_logs", "run_id", "runs", "id", "RESTRICT"),
+}
+
+
+class DatabaseSchemaError(RuntimeError):
+    """正式数据库尚未迁移或关系 Schema 与当前代码不一致。"""
+
+
+def _enable_sqlite_connection_pragmas(
+    dbapi_connection,
+    _connection_record,
+    *,
+    busy_timeout_ms: int = 15_000,
+) -> None:
+    """每个 SQLite 连接启用外键，并给短暂锁竞争留出有限等待。"""
+    cursor = dbapi_connection.cursor()
+    try:
+        cursor.execute("PRAGMA foreign_keys = ON")
+        cursor.execute(f"PRAGMA busy_timeout = {max(int(busy_timeout_ms), 1000)}")
+    finally:
+        cursor.close()
+
+
+def _schema_error(detail: str) -> DatabaseSchemaError:
+    return DatabaseSchemaError(
+        f"数据库 Schema 与当前 GroupBrief 不兼容：{detail}。"
+        "请先停止所有写入者，再使用 scripts/migrate_db.py 执行 P0.2B 离线迁移。"
+    )
+
+
+def _ensure_relationship_schema_current() -> None:
+    """接受 Fresh/已迁移数据库，拒绝旧非空或伪迁移数据库。"""
+    with engine.begin() as connection:
+        foreign_keys_enabled = int(connection.exec_driver_sql("PRAGMA foreign_keys").scalar_one())
+        if foreign_keys_enabled != 1:
+            raise _schema_error("当前 SQLite 连接没有启用 foreign_keys")
+
+        columns = {
+            str(row[1])
+            for row in connection.exec_driver_sql("PRAGMA table_info(group_runs)")
+        }
+        missing_columns = sorted(_RELATIONSHIP_COLUMNS - columns)
+        if missing_columns:
+            raise _schema_error("group_runs 缺少列 " + ", ".join(missing_columns))
+
+        tables = {
+            str(row[0])
+            for row in connection.exec_driver_sql(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+        has_migration_table = "schema_migrations" in tables
+        user_version = int(connection.exec_driver_sql("PRAGMA user_version").scalar_one())
+
+        if not has_migration_table:
+            core_rows = sum(
+                int(connection.exec_driver_sql(f'SELECT COUNT(*) FROM "{table}"').scalar_one())
+                for table in ("groups", "runs", "group_runs", "reports", "execution_logs")
+            )
+            if core_rows:
+                raise _schema_error("非空数据库缺少 schema_migrations 记录")
+            connection.exec_driver_sql(
+                """
+                CREATE TABLE schema_migrations (
+                    migration_id TEXT NOT NULL PRIMARY KEY,
+                    applied_at TEXT NOT NULL,
+                    checksum TEXT NOT NULL
+                )
+                """
+            )
+            connection.exec_driver_sql(
+                "INSERT INTO schema_migrations(migration_id, applied_at, checksum) VALUES (?, ?, ?)",
+                (MIGRATION_ID, datetime.now(timezone.utc).isoformat(), MIGRATION_CHECKSUM),
+            )
+            connection.exec_driver_sql(f"PRAGMA user_version = {TARGET_USER_VERSION}")
+            user_version = TARGET_USER_VERSION
+
+        migration = connection.exec_driver_sql(
+            "SELECT checksum FROM schema_migrations WHERE migration_id=?",
+            (MIGRATION_ID,),
+        ).first()
+        if migration is None:
+            raise _schema_error(f"缺少迁移记录 {MIGRATION_ID}")
+        if str(migration[0]) != MIGRATION_CHECKSUM:
+            raise _schema_error(f"迁移 {MIGRATION_ID} checksum 不一致")
+        if user_version != TARGET_USER_VERSION:
+            raise _schema_error(
+                f"user_version={user_version}，预期 {TARGET_USER_VERSION}"
+            )
+
+        actual_foreign_keys = {
+            (table, str(row[3]), str(row[2]), str(row[4]), str(row[6]))
+            for table in ("group_runs", "reports", "execution_logs")
+            for row in connection.exec_driver_sql(f'PRAGMA foreign_key_list("{table}")')
+        }
+        if actual_foreign_keys != _EXPECTED_FOREIGN_KEYS:
+            raise _schema_error("外键结构或删除策略不符合 P0.2B 目标")
+
+        report_unique = False
+        for index_row in connection.exec_driver_sql("PRAGMA index_list(reports)"):
+            if not bool(index_row[2]):
+                continue
+            index_name = str(index_row[1]).replace('"', '""')
+            index_columns = [
+                str(row[2])
+                for row in connection.exec_driver_sql(f'PRAGMA index_info("{index_name}")')
+            ]
+            if index_columns == ["group_run_id"]:
+                report_unique = True
+                break
+        if not report_unique:
+            raise _schema_error("reports.group_run_id 缺少唯一约束")
+
+        required_indexes = {
+            ("groups", "uq_groups_wechat_group_id_active"): (True, ["wechat_group_id"]),
+            ("runs", "ix_runs_report_date_status"): (False, ["report_date", "status"]),
+            ("group_runs", "ix_group_runs_run_id"): (False, ["run_id"]),
+            ("group_runs", "ix_group_runs_group_id"): (False, ["group_id"]),
+            ("execution_logs", "ix_execution_logs_run_id"): (False, ["run_id"]),
+        }
+        for (table, index_name), (expected_unique, expected_columns) in required_indexes.items():
+            index_row = next(
+                (
+                    row
+                    for row in connection.exec_driver_sql(f'PRAGMA index_list("{table}")')
+                    if str(row[1]) == index_name
+                ),
+                None,
+            )
+            if index_row is None or bool(index_row[2]) != expected_unique:
+                raise _schema_error(f"缺少索引 {index_name} 或唯一性不一致")
+            escaped_name = index_name.replace('"', '""')
+            actual_columns = [
+                str(row[2])
+                for row in connection.exec_driver_sql(
+                    f'PRAGMA index_info("{escaped_name}")'
+                )
+            ]
+            if actual_columns != expected_columns:
+                raise _schema_error(f"索引 {index_name} 列定义不一致")
+
+        active_group_index_sql = connection.exec_driver_sql(
+            "SELECT sql FROM sqlite_master WHERE type='index' AND name=?",
+            ("uq_groups_wechat_group_id_active",),
+        ).scalar_one_or_none()
+        normalized_index_sql = " ".join(str(active_group_index_sql or "").lower().split())
+        expected_predicate = "where trim(wechat_group_id) <> '' and deleted_at is null"
+        if expected_predicate not in normalized_index_sql:
+            raise _schema_error("uq_groups_wechat_group_id_active 条件定义不一致")
+
 
 # V2 群配置扩展列（幂等迁移：仅在列不存在时 ALTER TABLE ADD COLUMN）
 _V2_GROUP_COLUMNS: dict[str, str] = {
-    "schedule_rule": "VARCHAR(64) NOT NULL DEFAULT 'weekday_default'",
+    "schedule_rule": "VARCHAR(64) NOT NULL DEFAULT 'daily_previous_day'",
     "send_time": "VARCHAR(8) NOT NULL DEFAULT '08:30'",
+    "summary_provider": "VARCHAR(32) NOT NULL DEFAULT ''",
+    "prompt_provider": "VARCHAR(32) NOT NULL DEFAULT ''",
     "summary_model": "VARCHAR(64) NOT NULL DEFAULT 'gpt-5.6-sol'",
     "prompt_model": "VARCHAR(64) NOT NULL DEFAULT 'gpt-5.6-sol'",
     "image_enabled": "BOOLEAN NOT NULL DEFAULT 1",
     "send_target": "VARCHAR(256) NOT NULL DEFAULT ''",
     "ranking_template": "VARCHAR(64) NOT NULL DEFAULT 'default'",
+    "ranking_count_policy": "VARCHAR(64) NOT NULL DEFAULT 'all_messages'",
+    "sender_name_policy": "VARCHAR(64) NOT NULL DEFAULT 'resolved'",
     "image_prompt_template": "VARCHAR(64) NOT NULL DEFAULT 'default'",
-    "image_theme": "VARCHAR(64) NOT NULL DEFAULT 'random_preset'",
+    "image_theme": "VARCHAR(64) NOT NULL DEFAULT 'ai_free'",
     "image_theme_custom": "VARCHAR(80) NOT NULL DEFAULT ''",
     "image_prompt_override": "TEXT NOT NULL DEFAULT ''",
     "wechat_send_enabled": "BOOLEAN NOT NULL DEFAULT 0",
@@ -191,9 +354,28 @@ def init_db(settings: Settings) -> Any:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     engine = create_engine(
         f"sqlite:///{db_path}",
-        connect_args={"check_same_thread": False},
+        connect_args={
+            "check_same_thread": False,
+            "timeout": max(int(settings.sqlite_busy_timeout_seconds), 1),
+        },
     )
+    busy_timeout_ms = max(int(settings.sqlite_busy_timeout_seconds), 1) * 1000
+    event.listen(
+        engine,
+        "connect",
+        partial(
+            _enable_sqlite_connection_pragmas,
+            busy_timeout_ms=busy_timeout_ms,
+        ),
+    )
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            f"PRAGMA busy_timeout = {busy_timeout_ms}"
+        )
+        connection.exec_driver_sql("PRAGMA journal_mode = WAL")
+        connection.exec_driver_sql("PRAGMA synchronous = NORMAL")
     SQLModel.metadata.create_all(engine)
+    _ensure_relationship_schema_current()
     _migrate_group_v2_columns()
     _seed_defaults(settings)
     # 先种默认值再迁移，确保旧 .env 中的 deepseek-chat / 12000 也会升级。
@@ -231,8 +413,13 @@ def _seed_defaults(settings: Settings) -> None:
         "codex_home": settings.codex_home,
         "codex_timeout_seconds": str(settings.codex_timeout_seconds),
         "codex_generated_images_dir": settings.codex_generated_images_dir,
+        "image_generation_concurrency": str(settings.image_generation_concurrency),
+        "image_fallback_font_path": settings.image_fallback_font_path,
         "wechat_sender_mode": settings.wechat_sender_mode,
         "wechat_native_action_delay_seconds": str(settings.wechat_native_action_delay_seconds),
+        "wechat_native_stage_timeout_seconds": str(settings.wechat_native_stage_timeout_seconds),
+        "wechat_native_submit_timeout_seconds": str(settings.wechat_native_submit_timeout_seconds),
+        "wechat_native_poll_interval_seconds": str(settings.wechat_native_poll_interval_seconds),
         "wechat_native_mutex_timeout_seconds": str(settings.wechat_native_mutex_timeout_seconds),
         "wechat_send_claim_seconds": str(settings.wechat_send_claim_seconds),
         "wechat_late_send_window_minutes": str(settings.wechat_late_send_window_minutes),

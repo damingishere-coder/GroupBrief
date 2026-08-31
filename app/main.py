@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+import logging
 import os
+from datetime import datetime
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -19,27 +21,71 @@ from app.db import repository
 APP_VERSION = "1.0.0"
 
 
+def _should_start_scheduler(settings) -> bool:
+    return (
+        settings.scheduler_owner == "fastapi"
+        and os.environ.get("GROUPBRIEF_NO_SCHEDULER", "") != "1"
+    )
+
+
+def _capture_startup_checks(settings, runner=None) -> tuple[list[dict], str]:
+    if runner is None:
+        from app.core.startup_check import run_startup_checks
+
+        runner = run_startup_checks
+    try:
+        return runner(settings), ""
+    except Exception as exc:
+        logging.getLogger("app").exception("启动检查执行失败")
+        detail = str(exc)[:200]
+        return [
+            {
+                "name": "启动检查执行",
+                "ok": False,
+                "status": "ERROR",
+                "detail": detail,
+            }
+        ], detail
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
     settings.ensure_dirs()
     setup_logging(settings.logs_dir)
+    if settings.legacy_v1_write_mode == "maintenance":
+        logging.getLogger("groupbrief.legacy_v1").warning(
+            "旧 V1 写入 maintenance 模式已启用；正式生成与发送仍应使用 V2"
+        )
+    else:
+        logging.getLogger("groupbrief.legacy_v1").info(
+            "旧 V1 写入已冻结为只读模式"
+        )
     repository.init_db(settings)
     app.state.settings = settings
     # P9：启动检查（记录日志，不阻止启动）
-    try:
-        from app.core.startup_check import run_startup_checks
+    app.state.startup_checks, app.state.startup_check_error = (
+        _capture_startup_checks(settings)
+    )
+    app.state.startup_checks_at = datetime.now().astimezone().isoformat()
+    from app.image.regeneration import recover_pending_regenerations
 
-        app.state.startup_checks = run_startup_checks(settings)
-    except Exception:
-        app.state.startup_checks = []
+    recovered_image_jobs = recover_pending_regenerations(settings)
+    if recovered_image_jobs:
+        logging.getLogger("groupbrief.image").warning(
+            "已按原 job_id 恢复 %d 个中断的生图任务；不会新建结果未知任务",
+            recovered_image_jobs,
+        )
     # P9：日志轮转清理已在 setup_logging 中执行
-    if os.environ.get("GROUPBRIEF_NO_SCHEDULER", "") != "1":
+    scheduler_started = _should_start_scheduler(settings)
+    app.state.scheduler_owner = settings.scheduler_owner
+    app.state.scheduler_active = scheduler_started
+    if scheduler_started:
         from app.scheduler.manager import start_scheduler
 
         start_scheduler(settings)
     yield
-    if os.environ.get("GROUPBRIEF_NO_SCHEDULER", "") != "1":
+    if scheduler_started:
         from app.scheduler.manager import stop_scheduler
 
         stop_scheduler()

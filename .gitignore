@@ -7,6 +7,7 @@
 data/
 output/
 logs/
+runtime/
 *.db
 *.sqlite
 *.sqlite3
@@ -27,6 +28,11 @@ build/
 node_modules/
 frontend/dist/
 frontend/.vite/
+frontend/playwright-report/
+frontend/test-results/
+.coverage
+coverage.xml
+htmlcov/
 *.tsbuildinfo
 
 # --- 系统文件 ---

@@ -6,8 +6,12 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlmodel import Session, select
 
-from app.config.settings import Settings, get_settings
-from app.ai.image_themes import DEFAULT_IMAGE_THEME, ImageThemeError, resolve_image_theme, validate_image_theme_config
+from app.ai.image_themes import (
+    DEFAULT_IMAGE_THEME,
+    ImageThemeError,
+    resolve_image_theme,
+    validate_image_theme_config,
+)
 from app.ai.prompt_builder import _strip_html_comments
 from app.ai.prompt_editing import prompt_revision, resolved_theme_text
 from app.ai.prompt_templates import (
@@ -16,6 +20,8 @@ from app.ai.prompt_templates import (
     render_image_prompt_template,
     validate_image_prompt_template,
 )
+from app.config.settings import Settings, get_settings
+from app.core.path_security import PathBoundaryError, validate_path_label
 from app.db import repository as repo
 from app.db.models import Group
 from app.data_sources.wechat_data_analysis import WeChatDataAnalysisSource
@@ -24,6 +30,7 @@ from app.services.group_name_sync import (
     effective_send_target,
     send_target_mode,
 )
+from app.services.group_provider_config import validate_group_provider_values
 
 router = APIRouter(prefix="/api/groups", tags=["groups"])
 
@@ -35,15 +42,19 @@ class GroupCreate(BaseModel):
     enabled: bool = True
     provider_preference: str = ""
     # V2 扩展
-    schedule_rule: str = "weekday_default"
+    schedule_rule: str = "daily_previous_day"
     send_time: str = "08:30"
-    summary_model: str = "gpt-5.6-sol"
-    prompt_model: str = "gpt-5.6-sol"
+    summary_provider: str = ""
+    prompt_provider: str = ""
+    summary_model: str = ""
+    prompt_model: str = ""
     image_enabled: bool = True
     send_target: str = ""
     ranking_template: str = "default"
+    ranking_count_policy: str = "all_messages"
+    sender_name_policy: str = "resolved"
     image_prompt_template: str = "default"
-    image_theme: str = "random_preset"
+    image_theme: str = DEFAULT_IMAGE_THEME
     image_theme_custom: str = ""
     image_prompt_override: str = ""
     wechat_send_enabled: bool = False
@@ -58,11 +69,15 @@ class GroupUpdate(BaseModel):
     # V2 扩展
     schedule_rule: str | None = None
     send_time: str | None = None
+    summary_provider: str | None = None
+    prompt_provider: str | None = None
     summary_model: str | None = None
     prompt_model: str | None = None
     image_enabled: bool | None = None
     send_target: str | None = None
     ranking_template: str | None = None
+    ranking_count_policy: str | None = None
+    sender_name_policy: str | None = None
     image_prompt_template: str | None = None
     image_theme: str | None = None
     image_theme_custom: str | None = None
@@ -88,6 +103,15 @@ def _validate_group_theme(theme: object, custom: object = "") -> tuple[str, str]
     try:
         return validate_image_theme_config(theme, custom)
     except ImageThemeError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+def _validate_output_group_name(value: object, *, field_name: str) -> str:
+    """拒绝会被当作文件路径的群名称，同时保留普通显示名标点。"""
+    text = str(value or "")
+    try:
+        return validate_path_label(text, field_name=field_name)
+    except PathBoundaryError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
@@ -119,7 +143,7 @@ def _group_prompt_payload(group: Group) -> dict:
     preview = render_image_prompt_template(
         _strip_html_comments(content),
         {
-            "group_name": group.display_name or group.wechat_group_name,
+            "group_name": group.wechat_group_name or group.display_name,
             "period_start": "（生成时写入统计开始时间）",
             "period_end": "（生成时写入统计结束时间）",
             "message_count": "（生成时写入消息数）",
@@ -147,8 +171,28 @@ def _require_active_group(session: Session, group_id: int) -> Group:
     return group
 
 
+def _apply_global_send_time(
+    values: dict,
+    settings: Settings,
+    *,
+    explicitly_provided: bool,
+) -> dict:
+    configured = str(getattr(settings, "schedule_send_time", "08:30") or "08:30")
+    provided = str(values.get("send_time") or "")
+    if explicitly_provided and provided != configured:
+        raise HTTPException(
+            status_code=422,
+            detail=f"群聊不能单独设置发送时间；日报发送批次固定为 {configured}",
+        )
+    values["send_time"] = configured
+    return values
+
+
 @router.get("")
-def list_groups(session: Session = Depends(repo.get_session)):
+def list_groups(
+    session: Session = Depends(repo.get_session),
+    settings: Settings = Depends(get_settings),
+):
     groups = repo.list_groups(session)
     return [
         {
@@ -158,8 +202,13 @@ def list_groups(session: Session = Depends(repo.get_session)):
             "wechat_group_name": g.wechat_group_name,
             "enabled": g.enabled,
             "provider_preference": g.provider_preference,
+            "history_provider_preference": g.provider_preference,
             "schedule_rule": g.schedule_rule,
-            "send_time": g.send_time,
+            "send_time": str(
+                getattr(settings, "schedule_send_time", "08:30") or "08:30"
+            ),
+            "summary_provider": g.summary_provider,
+            "prompt_provider": g.prompt_provider,
             "summary_model": g.summary_model,
             "prompt_model": g.prompt_model,
             "image_enabled": g.image_enabled,
@@ -167,6 +216,8 @@ def list_groups(session: Session = Depends(repo.get_session)):
             "effective_send_target": effective_send_target(g),
             "send_target_mode": send_target_mode(g),
             "ranking_template": g.ranking_template,
+            "ranking_count_policy": g.ranking_count_policy,
+            "sender_name_policy": g.sender_name_policy,
             "image_prompt_template": g.image_prompt_template,
             "image_theme": g.image_theme,
             "image_theme_custom": g.image_theme_custom,
@@ -180,11 +231,31 @@ def list_groups(session: Session = Depends(repo.get_session)):
 
 
 @router.post("")
-def create_group(payload: GroupCreate, session: Session = Depends(repo.get_session)):
-    values = payload.model_dump()
+def create_group(
+    payload: GroupCreate,
+    session: Session = Depends(repo.get_session),
+    settings: Settings = Depends(get_settings),
+):
+    raw_values = payload.model_dump()
+    values = _apply_global_send_time(
+        raw_values,
+        settings,
+        explicitly_provided="send_time" in payload.model_fields_set,
+    )
+    try:
+        values = validate_group_provider_values(values, settings)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    values["display_name"] = _validate_output_group_name(
+        values.get("display_name"), field_name="display_name"
+    )
+    if values.get("wechat_group_name"):
+        values["wechat_group_name"] = _validate_output_group_name(
+            values["wechat_group_name"], field_name="wechat_group_name"
+        )
     values["send_target"] = str(values.get("send_target") or "").strip()
     values["image_theme"], values["image_theme_custom"] = _validate_group_theme(
-        values.get("image_theme", "random_preset"), values.get("image_theme_custom", "")
+        values.get("image_theme", DEFAULT_IMAGE_THEME), values.get("image_theme_custom", "")
     )
     values["image_prompt_override"] = _validate_prompt_override(values.get("image_prompt_override", ""))
     wechat_group_id = str(values.get("wechat_group_id") or "").strip()
@@ -205,10 +276,31 @@ def create_group(payload: GroupCreate, session: Session = Depends(repo.get_sessi
 
 @router.put("/{group_id}")
 def update_group(
-    group_id: int, payload: GroupUpdate, session: Session = Depends(repo.get_session)
+    group_id: int,
+    payload: GroupUpdate,
+    session: Session = Depends(repo.get_session),
+    settings: Settings = Depends(get_settings),
 ):
     group = _require_active_group(session, group_id)
-    updates = payload.model_dump(exclude_unset=True)
+    raw_updates = payload.model_dump(exclude_unset=True)
+    updates = _apply_global_send_time(
+        raw_updates,
+        settings,
+        explicitly_provided="send_time" in payload.model_fields_set,
+    )
+    try:
+        updates = validate_group_provider_values(
+            updates,
+            settings,
+            base=group,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    for field_name in ("display_name", "wechat_group_name"):
+        if updates.get(field_name):
+            updates[field_name] = _validate_output_group_name(
+                updates[field_name], field_name=field_name
+            )
     if "image_theme" in updates or "image_theme_custom" in updates:
         theme, custom = _validate_group_theme(
             updates.get("image_theme", group.image_theme),
@@ -330,14 +422,17 @@ def bind_group_from_name(
             },
         )
 
+    selected_name = selected.group_name or name
+    _validate_output_group_name(selected_name, field_name="group_name")
+
     existing = session.exec(
         select(Group).where(Group.wechat_group_id == selected.group_id)
     ).first()
     if existing:
         if existing.deleted_at is not None:
-            existing.wechat_group_name = selected.group_name or existing.wechat_group_name
+            existing.wechat_group_name = selected_name or existing.wechat_group_name
             if not existing.display_name:
-                existing.display_name = selected.group_name or name
+                existing.display_name = selected_name
             restored = repo.restore_group(session, existing.id)
             return {
                 "id": restored.id,
@@ -349,9 +444,9 @@ def bind_group_from_name(
         return {"id": existing.id, "bound": True, "already_existed": True}
 
     group = Group(
-        display_name=selected.group_name or name,
+        display_name=selected_name,
         wechat_group_id=selected.group_id,
-        wechat_group_name=selected.group_name,
+        wechat_group_name=selected_name,
     )
     group = repo.save_group(session, group)
     return {"id": group.id, "bound": True, "already_existed": False}

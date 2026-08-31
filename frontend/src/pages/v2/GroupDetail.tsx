@@ -15,9 +15,11 @@ import {
   GroupMatch,
   GroupPayload,
   GroupV2,
+  ProviderCatalogResponse,
   createGroup,
   discoverGroups,
   listGroups,
+  getProviderCatalog,
   listImagePromptTemplates,
   listRankingTemplates,
   pipelineGenerate,
@@ -53,13 +55,17 @@ const EMPTY_FORM: GroupPayload = {
   wechat_group_name: "",
   enabled: true,
   provider_preference: "",
-  schedule_rule: "weekday_default",
+  schedule_rule: "daily_previous_day",
   send_time: "08:30",
-  summary_model: "gpt-5.6-sol",
-  prompt_model: "gpt-5.6-sol",
+  summary_provider: "",
+  prompt_provider: "",
+  summary_model: "",
+  prompt_model: "",
   image_enabled: true,
   send_target: "",
   ranking_template: "default",
+  ranking_count_policy: "all_messages",
+  sender_name_policy: "resolved",
   image_prompt_template: "default",
   image_prompt_override: "",
   wechat_send_enabled: false,
@@ -79,13 +85,17 @@ function toForm(group: GroupV2): GroupPayload {
     wechat_group_name: group.wechat_group_name || "",
     enabled: group.enabled,
     provider_preference: group.provider_preference || "",
-    schedule_rule: group.schedule_rule || "weekday_default",
-    send_time: group.send_time || "08:30",
-    summary_model: group.summary_model || "gpt-5.6-sol",
-    prompt_model: group.prompt_model || "gpt-5.6-sol",
+    schedule_rule: group.schedule_rule || "daily_previous_day",
+    send_time: "08:30",
+    summary_provider: group.summary_provider || "",
+    prompt_provider: group.prompt_provider || "",
+    summary_model: group.summary_model || "",
+    prompt_model: group.prompt_model || "",
     image_enabled: group.image_enabled,
     send_target: group.send_target || "",
     ranking_template: group.ranking_template || "default",
+    ranking_count_policy: group.ranking_count_policy || "all_messages",
+    sender_name_policy: group.sender_name_policy || "resolved",
     image_prompt_template: group.image_prompt_template || "default",
     wechat_send_enabled: group.wechat_send_enabled,
   };
@@ -126,6 +136,7 @@ export default function GroupDetail({ groupId, invalidGroupId }: GroupDetailProp
   const [rankingTemplates, setRankingTemplates] = useState<string[]>([]);
   const [imagePromptTemplates, setImagePromptTemplates] = useState<string[]>([]);
   const [templateError, setTemplateError] = useState("");
+  const [providerCatalog, setProviderCatalog] = useState<ProviderCatalogResponse["catalog"]>({ history: [], ai: [] });
   const [discovered, setDiscovered] = useState<DiscoveredGroup[]>([]);
   const [discovering, setDiscovering] = useState(false);
   const [showDiscovered, setShowDiscovered] = useState(false);
@@ -164,9 +175,10 @@ export default function GroupDetail({ groupId, invalidGroupId }: GroupDetailProp
     }
 
     const loadTemplates = async () => {
-      const [rankingResult, promptResult] = await Promise.allSettled([
+      const [rankingResult, promptResult, providerResult] = await Promise.allSettled([
         listRankingTemplates(),
         listImagePromptTemplates(),
+        getProviderCatalog(),
       ]);
       if (!active) return;
       const failures: string[] = [];
@@ -174,6 +186,8 @@ export default function GroupDetail({ groupId, invalidGroupId }: GroupDetailProp
       else failures.push(`排行榜模板：${String(rankingResult.reason)}`);
       if (promptResult.status === "fulfilled") setImagePromptTemplates(promptResult.value.templates);
       else failures.push(`Prompt 模板：${String(promptResult.reason)}`);
+      if (providerResult.status === "fulfilled") setProviderCatalog(providerResult.value.catalog);
+      else failures.push(`Provider 白名单：${String(providerResult.reason)}`);
       if (failures.length > 0) {
         setTemplateError(`模板列表加载失败，已保留当前配置。${failures.join("；")}`);
         toast("模板列表加载失败，当前值仍可保存");
@@ -232,7 +246,6 @@ export default function GroupDetail({ groupId, invalidGroupId }: GroupDetailProp
     const next: Record<string, string> = {};
     if (!form.display_name.trim()) next.display_name = "请填写展示名称";
     if (!form.wechat_group_id.trim()) next.wechat_group_id = "请绑定真实微信群 ID";
-    if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(form.send_time.trim())) next.send_time = "请输入 HH:mm 格式，例如 08:30";
     setErrors(next);
     return Object.keys(next).length === 0;
   };
@@ -246,7 +259,7 @@ export default function GroupDetail({ groupId, invalidGroupId }: GroupDetailProp
       wechat_group_id: form.wechat_group_id.trim(),
       wechat_group_name: form.wechat_group_name?.trim() || form.display_name.trim(),
       send_target: form.send_target.trim(),
-      send_time: form.send_time.trim(),
+      send_time: "08:30",
     };
     const request = groupId ? updateGroup(groupId, payload) : createGroup(payload);
     request
@@ -306,6 +319,10 @@ export default function GroupDetail({ groupId, invalidGroupId }: GroupDetailProp
   const currentPromptTemplates = imagePromptTemplates.includes(form.image_prompt_template)
     ? imagePromptTemplates
     : [form.image_prompt_template, ...imagePromptTemplates];
+  const aiModelsFor = (provider: string, current: string) => {
+    const models = providerCatalog.ai.find((item) => item.provider === provider)?.models || [];
+    return current && !models.includes(current) ? [current, ...models] : models;
+  };
 
   return (
     <div className="group-detail-page">
@@ -367,10 +384,13 @@ export default function GroupDetail({ groupId, invalidGroupId }: GroupDetailProp
           </Field>
           <Field id="provider-preference" label="数据源偏好">
             <select id="provider-preference" value={form.provider_preference} onChange={(event) => setField("provider_preference", event.target.value)}>
-              <option value="">自动选择</option>
-              <option value="wechat_data_analysis">WeChatDataAnalysis</option>
-              <option value="wechat-cli">wechat-cli</option>
+              <option value="">继承全局历史数据源</option>
+              {(providerCatalog.history.length ? providerCatalog.history : [
+                { provider: "wechat_data_analysis", label: "WeChatDataAnalysis", available: true, capabilities: [] },
+                { provider: "wechat_cli", label: "wechat-cli", available: false, capabilities: [] },
+              ]).map((item) => <option key={item.provider} value={item.provider} disabled={!item.available}>{item.label}{item.available ? "" : "（当前不可用）"}</option>)}
             </select>
+            <span className="group-detail-field-help">这里只控制聊天历史读取，不代表 AI Provider。</span>
           </Field>
           <label className="group-detail-switch" htmlFor="group-enabled">
             <input id="group-enabled" type="checkbox" checked={form.enabled} onChange={(event) => setField("enabled", event.target.checked)} />
@@ -380,15 +400,31 @@ export default function GroupDetail({ groupId, invalidGroupId }: GroupDetailProp
       </section>
 
       <section className="group-detail-card">
-        <div className="group-detail-section-heading"><div><h2>统计与规则</h2><p>V2 默认使用工作日规则：周一统计周五至周日，周末不生成。</p></div></div>
+        <div className="group-detail-section-heading"><div><h2>统计与规则</h2><p>默认每天生成前一自然日群报；也可为单个群显式选择工作日汇总。</p></div></div>
         <div className="group-detail-form-grid">
           <Field id="schedule-rule" label="统计周期规则">
             <select id="schedule-rule" value={form.schedule_rule} onChange={(event) => setField("schedule_rule", event.target.value)}>
-              <option value="weekday_default">工作日默认（周一=周五至周日）</option>
+              <option value="daily_previous_day">每天统计前一天（默认）</option>
+              <option value="weekday_default">仅工作日（周一=周五至周日）</option>
             </select>
           </Field>
-          <Field id="send-time" label="发送时间" required error={errors.send_time}>
-            <input id="send-time" type="time" value={form.send_time} onChange={(event) => setField("send_time", event.target.value)} />
+          <Field id="send-batch-time" label="发送批次">
+            <div id="send-batch-time">
+              <strong>每天 08:30</strong>
+              <span className="group-detail-field-help">所有启用群按稳定群 ID 顺序串行发送，群聊不能单独修改时间。</span>
+            </div>
+          </Field>
+          <Field id="ranking-count-policy" label="排行榜统计口径">
+            <select id="ranking-count-policy" value={form.ranking_count_policy} onChange={(event) => setField("ranking_count_policy", event.target.value as GroupPayload["ranking_count_policy"])}>
+              <option value="all_messages">所有非系统消息</option>
+              <option value="text_primary_with_interactions">文字主榜＋互动数</option>
+            </select>
+          </Field>
+          <Field id="sender-name-policy" label="排行榜名称来源">
+            <select id="sender-name-policy" value={form.sender_name_policy} onChange={(event) => setField("sender_name_policy", event.target.value as GroupPayload["sender_name_policy"])}>
+              <option value="resolved">冲突时使用联系人解析</option>
+              <option value="wechat_data_analysis">WeChatDataAnalysis 名称</option>
+            </select>
           </Field>
         </div>
       </section>
@@ -398,7 +434,7 @@ export default function GroupDetail({ groupId, invalidGroupId }: GroupDetailProp
         <div className="group-detail-form-grid">
           <label className="group-detail-switch" htmlFor="image-enabled">
             <input id="image-enabled" type="checkbox" checked={form.image_enabled} onChange={(event) => setField("image_enabled", event.target.checked)} />
-            <span><strong>启用 AI 图片</strong><small>启用后会进入串行生图阶段</small></span>
+            <span><strong>启用 AI 图片</strong><small>启用后会进入最多 2 路的受控生图阶段</small></span>
           </label>
           <Field id="send-target" label="发送目标（可选人工覆盖）" error={errors.send_target}>
             <input id="send-target" value={form.send_target} onChange={(event) => setField("send_target", event.target.value)} placeholder="留空则自动跟随微信当前群名" />
@@ -425,14 +461,28 @@ export default function GroupDetail({ groupId, invalidGroupId }: GroupDetailProp
       <section className="group-detail-card">
         <div className="group-detail-section-heading"><div><h2>模型与模板</h2><p>{templateError || "模板选择来自真实模板列表 API。"}</p></div></div>
         <div className="group-detail-form-grid">
-          <Field id="summary-model" label="摘要模型">
-            <select id="summary-model" value={form.summary_model} onChange={(event) => setField("summary_model", event.target.value)}>
-              <option value="gpt-5.6-sol">GPT-5.6 Sol（Codex 主用）</option>
+          <Field id="summary-provider" label="摘要 Provider">
+            <select id="summary-provider" value={form.summary_provider} onChange={(event) => { setField("summary_provider", event.target.value); setField("summary_model", ""); }}>
+              <option value="">继承全局配置</option>
+              {providerCatalog.ai.filter((item) => item.capabilities.includes("summary")).map((item) => <option key={item.provider} value={item.provider} disabled={!item.available}>{item.label}{item.available ? "" : "（当前不可用）"}</option>)}
             </select>
           </Field>
-          <Field id="prompt-model" label="Prompt 模型">
+          <Field id="summary-model" label="每周摘要模型">
+            <select id="summary-model" value={form.summary_model} onChange={(event) => setField("summary_model", event.target.value)}>
+              <option value="">继承 Provider 默认模型</option>
+              {aiModelsFor(form.summary_provider, form.summary_model).map((model) => <option key={model} value={model}>{model}</option>)}
+            </select>
+          </Field>
+          <Field id="prompt-provider" label="日报 Prompt Provider">
+            <select id="prompt-provider" value={form.prompt_provider} onChange={(event) => { setField("prompt_provider", event.target.value); setField("prompt_model", ""); }}>
+              <option value="">继承全局配置</option>
+              {providerCatalog.ai.filter((item) => item.capabilities.includes("prompt")).map((item) => <option key={item.provider} value={item.provider} disabled={!item.available}>{item.label}{item.available ? "" : "（当前不可用）"}</option>)}
+            </select>
+          </Field>
+          <Field id="prompt-model" label="日报 Prompt 模型">
             <select id="prompt-model" value={form.prompt_model} onChange={(event) => setField("prompt_model", event.target.value)}>
-              <option value="gpt-5.6-sol">GPT-5.6 Sol（Codex 主用）</option>
+              <option value="">继承 Provider 默认模型</option>
+              {aiModelsFor(form.prompt_provider, form.prompt_model).map((model) => <option key={model} value={model}>{model}</option>)}
             </select>
           </Field>
           <Field id="ranking-template" label="排行榜模板">

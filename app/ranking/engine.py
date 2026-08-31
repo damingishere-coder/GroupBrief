@@ -9,9 +9,21 @@
 
 from __future__ import annotations
 
+from collections import Counter
+import hashlib
+
 from app.data_sources.base import V2Message
+from app.ranking.policies import (
+    RANKING_POLICY_TEXT_PRIMARY,
+    normalize_ranking_policy,
+    normalize_sender_name_policy,
+)
 from app.services.message_normalizer import COUNTABLE_TYPES, SYSTEM_KEYWORDS
-from app.services.speaker_identity import build_speaker_stats, speaker_name_sort_key
+from app.services.speaker_identity import (
+    build_speaker_stats,
+    speaker_identity_key,
+    speaker_name_sort_key,
+)
 from app.ranking.engine_types import RankingResult, TopSpeaker
 
 
@@ -33,23 +45,71 @@ class RankingEngine:
         period_start: str,
         period_end: str,
         top_limit: int = 10,
+        count_policy: str = "all_messages",
+        name_source: str = "resolved",
     ) -> RankingResult:
         if top_limit <= 0:
             raise ValueError("排行榜上限必须大于 0")
 
+        policy = normalize_ranking_policy(count_policy)
+        normalized_name_source = normalize_sender_name_policy(name_source)
+        countable_messages = [message for message in messages if self._countable(message)]
         speakers = build_speaker_stats(
-            (m.sender_id, m.sender_name) for m in messages if self._countable(m)
+            (
+                message.sender_id,
+                message.sender_name,
+                message.sender_name_source == "contact",
+            )
+            for message in countable_messages
         )
-        message_count = sum(item.count for item in speakers)
-        speaker_count = len(speakers)
+        text_counts: Counter[tuple[str, str]] = Counter()
+        interaction_counts: Counter[tuple[str, str]] = Counter()
+        for message in countable_messages:
+            key = speaker_identity_key(message.sender_id, message.sender_name)
+            if key is None:
+                continue
+            if message.message_type == "text":
+                text_counts[key] += 1
+            else:
+                interaction_counts[key] += 1
 
-        # 确定性排序：消息数降序，同数量按名称稳定升序
-        ordered = sorted(
-            speakers,
-            key=lambda item: (-item.count, speaker_name_sort_key(item.name), item.key),
-        )
+        message_count = len(countable_messages)
+        speaker_count = len(speakers)
+        text_message_count = sum(text_counts.values())
+        interaction_message_count = sum(interaction_counts.values())
+        text_speaker_count = len(text_counts)
+
+        if policy == RANKING_POLICY_TEXT_PRIMARY:
+            # 互动数只展示，不参与名次或同分排序。
+            ordered = sorted(
+                (item for item in speakers if text_counts[item.key] > 0),
+                key=lambda item: (
+                    -text_counts[item.key],
+                    speaker_name_sort_key(item.name),
+                    item.key,
+                ),
+            )
+        else:
+            ordered = sorted(
+                speakers,
+                key=lambda item: (-item.count, speaker_name_sort_key(item.name), item.key),
+            )
         top_speakers = [
-            TopSpeaker(rank=i + 1, name=item.name, count=item.count)
+            TopSpeaker(
+                rank=i + 1,
+                name=item.name,
+                count=(
+                    text_counts[item.key]
+                    if policy == RANKING_POLICY_TEXT_PRIMARY
+                    else item.count
+                ),
+                identity_key=hashlib.sha256(
+                    f"{item.key[0]}:{item.key[1]}".encode("utf-8")
+                ).hexdigest()[:16],
+                text_count=text_counts[item.key],
+                interaction_count=interaction_counts[item.key],
+                name_source=normalized_name_source,
+            )
             for i, item in enumerate(ordered[:top_limit])
         ]
 
@@ -61,4 +121,8 @@ class RankingEngine:
             message_count=message_count,
             top_limit=top_limit,
             top_speakers=top_speakers,
+            count_policy=policy,
+            text_message_count=text_message_count,
+            interaction_message_count=interaction_message_count,
+            text_speaker_count=text_speaker_count,
         )

@@ -78,14 +78,26 @@ def test_deepseek_chunking():
     assert "消息44" in chunks[-1].text
 
 
-def test_explicit_deepseek_without_key_skips_to_template():
-    """显式选择 DeepSeek 但未配置 Key 时，PromptService 使用模板 Provider。"""
+def test_explicit_deepseek_without_key_stays_fail_closed():
+    """真实运行显式选择 DeepSeek 但缺 Key 时，不得偷偷改用模板。"""
     from app.config.settings import Settings
 
     settings = Settings(_env_file=None, summary_provider_primary="deepseek", ai_api_key="")
     service = PromptService(settings)
     provider = service._get_provider()
-    assert provider.name == "template"
+    assert provider.name == "deepseek"
+
+
+def test_explicit_test_gate_allows_template_provider():
+    from app.config.settings import Settings
+
+    settings = Settings(
+        _env_file=None,
+        summary_provider_primary="deepseek",
+        ai_api_key="",
+        allow_test_providers=True,
+    )
+    assert PromptService(settings)._get_provider().name == "template"
 
 
 def test_default_summary_provider_is_codex_gpt():
@@ -97,7 +109,7 @@ def test_default_summary_provider_is_codex_gpt():
     assert provider.model == "gpt-5.6-sol"
 
 
-def test_v1_model_failure_degrades_to_local_template():
+def test_v1_model_failure_does_not_degrade_to_template_in_real_runtime():
     from app.config.settings import Settings
     from app.db.models import Group
     from app.providers.ai.base import ImagePromptResult, PromptGeneratorProvider
@@ -124,8 +136,41 @@ def test_v1_model_failure_degrades_to_local_template():
         normalized,
     )
 
+    assert not outcome.success
+    assert outcome.prompt == ""
+    assert outcome.error == "主备都失败"
+
+
+def test_v1_model_failure_can_use_template_with_explicit_test_gate():
+    from app.config.settings import Settings
+    from app.db.models import Group
+    from app.providers.ai.base import ImagePromptResult, PromptGeneratorProvider
+
+    class FailingProvider(PromptGeneratorProvider):
+        name = "codex_gpt"
+
+        def health_check(self):
+            return False, "failed"
+
+        def generate_image_prompt(self, context):
+            return ImagePromptResult(False, error="主备都失败", provider=self.name)
+
+    service = PromptService(
+        Settings(_env_file=None, summary_provider_primary="codex", allow_test_providers=True)
+    )
+    service._provider = FailingProvider()
+    window = get_report_window(datetime.fromisoformat("2026-08-14").date())
+    normalized = _fetch_norm("group-b")
+    rank = RankingEngine().compute(normalized, "产品经理交流群", "s", "e")
+
+    outcome = service.generate(
+        Group(display_name="产品经理交流群", wechat_group_id="group-b"),
+        window,
+        rank,
+        normalized,
+    )
+
     assert outcome.success
-    assert "【任务】" in outcome.prompt
     assert outcome.meta["fallback"] == "template"
 
 
@@ -134,7 +179,14 @@ def test_prompt_service_generates_via_template():
 
     from app.config.settings import Settings
 
-    service = PromptService(Settings(_env_file=None, summary_provider_primary="deepseek", ai_api_key=""))
+    service = PromptService(
+        Settings(
+            _env_file=None,
+            summary_provider_primary="deepseek",
+            ai_api_key="",
+            allow_test_providers=True,
+        )
+    )
     window = get_report_window(datetime.fromisoformat("2026-08-14").date())
     normalized = _fetch_norm("group-b")
     rank = RankingEngine().compute(normalized, "产品经理交流群", "s", "e")

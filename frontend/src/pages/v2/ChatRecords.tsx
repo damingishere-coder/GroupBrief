@@ -22,6 +22,8 @@ import {
   Toast,
 } from "../../components/common";
 import { useToast } from "../../components/ui";
+import { shanghaiDateInputValue } from "../../date";
+import { ContentSwap } from "../../components/motion";
 
 const STATUS_LABELS: Record<string, string> = {
   PENDING: "待生成",
@@ -129,7 +131,7 @@ function initials(name: string): string {
 export default function ChatRecords() {
   const { msg, toast } = useToast();
   const [entries, setEntries] = useState<RunEntry[]>([]);
-  const [dateFilter, setDateFilter] = useState("");
+  const [dateFilter, setDateFilter] = useState(shanghaiDateInputValue);
   const [groupFilter, setGroupFilter] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
   const [selectedKey, setSelectedKey] = useState("");
@@ -146,9 +148,15 @@ export default function ChatRecords() {
   const loadEntries = () => {
     setLoading(true);
     setLoadError("");
-    getRuns(dateFilter || undefined)
+    getRuns(dateFilter || undefined, { includeFiles: true })
       .then(async (data) => {
         const detailed = await Promise.all(data.runs.map(async (run): Promise<RunEntry> => {
+          if (Array.isArray(run.files)) {
+            return {
+              run,
+              files: run.files.filter((file): file is string => typeof file === "string"),
+            };
+          }
           try {
             const detail = await getRunDetail(run.group_name, run.run_date);
             return { run: detail.run, files: detail.files };
@@ -257,7 +265,8 @@ export default function ChatRecords() {
         </aside>
 
         <main className="chat-records-panel" aria-label="归档消息内容">
-          {!selectedEntry ? <EmptyState title="暂无可用聊天归档" description="当前运行记录中没有包含 messages.json 的真实归档。" /> : messagesLoading ? <LoadingState label="正在解析真实消息归档…" /> : messageError ? <EmptyState title="无法读取聊天归档" description={messageError} /> : (
+          <ContentSwap swapKey={!selectedEntry ? "empty" : messagesLoading ? "loading" : selectedKey}>
+            {!selectedEntry ? <EmptyState title="暂无可用聊天归档" description="当前运行记录中没有包含 messages.json 的真实归档。" /> : messagesLoading ? <LoadingState label="正在解析真实消息归档…" /> : messageError ? <EmptyState title="无法读取聊天归档" description={messageError} /> : (
             <>
               <div className="chat-records-panel-head"><div><span className="chat-records-eyebrow">只读归档</span><h2>{selectedEntry.run.group_name} · {selectedEntry.run.run_date}</h2><p><StatusPill status={selectedEntry.run.status} /> · 周期 {selectedEntry.run.period_start || "—"} ~ {selectedEntry.run.period_end || "—"}</p></div><UserCircle size={27} aria-hidden="true" /></div>
               <div className="chat-records-message-toolbar">
@@ -269,7 +278,8 @@ export default function ChatRecords() {
               {messages.length === 0 ? <EmptyState title="该归档没有消息" description="messages.json 存在，但消息数组为空。" /> : filteredMessages.length === 0 ? <EmptyState title="没有匹配消息" description="请调整文本搜索或消息类型筛选。" /> : <div className="chat-message-list">{visibleMessages.map((message, index) => <article className="chat-message-row" key={message.message_id || `${message.timestamp}-${index}`}><div className="chat-message-avatar" aria-hidden="true">{initials(message.sender_name)}</div><div className="chat-message-body"><div className="chat-message-meta"><strong>{message.sender_name || "未提供发送者"}</strong><StatusBadge tone={message.message_type === "text" ? "neutral" : "info"}>{message.message_type}</StatusBadge><time>{formatTimestamp(message.timestamp)}</time></div><p className={message.message_type === "text" ? "" : "chat-message-non-text"}>{message.content || (message.message_type === "text" ? "（空文本）" : "未归档媒体文件")}</p>{message.message_type !== "text" && <span className="chat-message-media-note">未归档媒体文件（无附件路径）</span>}<small>消息 ID：{message.message_id || "未提供"} · 发送者 ID：{message.sender_id || "未提供"} · 群 ID：{message.group_id || "未提供"}</small></div></article>)}</div>}
               {visibleCount < filteredMessages.length && <div className="chat-records-load-more"><Button tone="secondary" onClick={() => setVisibleCount((count) => count + 80)}>加载更多（剩余 {filteredMessages.length - visibleCount} 条）</Button></div>}
             </>
-          )}
+            )}
+          </ContentSwap>
         </main>
       </div>
       <Toast message={msg} />

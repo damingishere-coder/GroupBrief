@@ -17,6 +17,8 @@ from threading import Event, Timer
 from time import monotonic
 from urllib.parse import urlsplit
 
+from app.core.logging import get_logger
+
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 
 # 默认回环主机集合（可传入额外允许主机，如 Docker 的 host.docker.internal）
@@ -26,6 +28,7 @@ DEFAULT_ALLOWED_HOSTS = frozenset()
 _PROXY_FREE_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 _READ_CHUNK_SIZE = 64 * 1024
 _MAX_RESPONSE_BYTES = 128 * 1024 * 1024
+logger = get_logger("groupbrief.wechat_mcp")
 
 
 class MCPError(Exception):
@@ -185,16 +188,16 @@ def _start_response_deadline_timer(response, deadline: float, expired: Event) ->
             try:
                 response_socket.shutdown(socket.SHUT_RDWR)
             except OSError:
-                pass
+                logger.debug("MCP 截止计时器关闭响应 socket 失败", exc_info=True)
             try:
                 response_socket.close()
             except OSError:
-                pass
+                logger.debug("MCP 截止计时器释放响应 socket 失败", exc_info=True)
             return
         try:
             response.close()
         except (AttributeError, OSError):
-            pass
+            logger.debug("MCP 截止计时器关闭响应失败", exc_info=True)
 
     timer = Timer(remaining, _abort)
     timer.daemon = True
@@ -217,7 +220,7 @@ def _set_response_socket_timeout(response, remaining: float) -> None:
         try:
             response_socket.settimeout(max(remaining, 0.001))
         except OSError:
-            pass
+            logger.debug("MCP 响应 socket 超时设置失败", exc_info=True)
 
 
 def _result_error_message(result: dict) -> str:

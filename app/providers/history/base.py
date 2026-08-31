@@ -53,6 +53,8 @@ class RawMessage:
     source: str = ""
     source_message_id: str = ""
     content_hash: str = ""
+    upstream_sender_name: str = ""
+    sender_name_source: str = ""
 
 
 @dataclass

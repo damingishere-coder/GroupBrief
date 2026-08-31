@@ -37,8 +37,12 @@ def _normalize_ts(raw: str) -> datetime:
 class MockProvider(ChatHistoryProvider):
     name = "mock"
 
-    def __init__(self, fixtures_dir: Path | None = None):
-        settings: Settings = get_settings()
+    def __init__(
+        self,
+        fixtures_dir: Path | None = None,
+        settings: Settings | None = None,
+    ):
+        settings = settings or get_settings()
         self.fixtures_dir = fixtures_dir or settings.fixtures_dir
 
     def health_check(self) -> ProviderHealth:

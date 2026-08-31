@@ -4,11 +4,37 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+_ENVIRONMENT_ONLY_FIELDS = frozenset(
+    {
+        "allow_test_providers",
+        "legacy_v1_write_mode",
+        "scheduler_owner",
+        "schedule_send_time",
+        "reliability_watchdog_enabled",
+        "reliability_lookback_days",
+        "reliability_watchdog_interval_minutes",
+        "wechat_fetch_max_attempts",
+        "wechat_fetch_retry_backoff_seconds",
+        "wechat_fetch_circuit_failure_threshold",
+        "wechat_fetch_circuit_cooldown_seconds",
+        "wechat_runtime_export_fallback_enabled",
+        "image_prompt_max_chars",
+        "image_prompt_max_bytes",
+        "sqlite_busy_timeout_seconds",
+        "sqlite_retry_max_attempts",
+        "scheduler_heartbeat_stale_seconds",
+        "weekly_insights_enabled",
+        "weekly_send_enabled",
+        "weekly_generate_time",
+        "weekly_send_time",
+        "output_root_override",
+    }
+)
 
 
 class Settings(BaseSettings):
@@ -22,14 +48,21 @@ class Settings(BaseSettings):
     app_host: str = "127.0.0.1"
     app_port: int = 8766
     app_timezone: str = "Asia/Shanghai"
+    # 测试 Provider 安全闸门：真实运行默认关闭，且不通过设置 API/数据库修改。
+    allow_test_providers: bool = False
+    # 旧 V1 数据库流水线默认只读；短期兼容只能通过环境显式进入 maintenance。
+    # 该字段不得加入设置 API/数据库，避免运行时误开双写。
+    legacy_v1_write_mode: Literal["read_only", "maintenance"] = "read_only"
 
     # 数据库
     database_url: str = "sqlite:///data/groupbrief.db"
+    sqlite_busy_timeout_seconds: int = 15
+    sqlite_retry_max_attempts: int = 3
 
-    # 微信历史读取
+    # V1 兼容历史读取；正式 V2 使用下方 WeChatDataAnalysis MCP/导出配置。
     history_provider_primary: str = "wechat_data_analysis"
     history_provider_fallback: str = "wechat_cli"
-    history_provider_mock_enabled: bool = True
+    history_provider_mock_enabled: bool = False
     wechat_data_dir: str = ""
     wechat_export_dir: str = ""
     wechat_cli_path: str = ""
@@ -44,6 +77,12 @@ class Settings(BaseSettings):
     # 单页范围读取允许更长超时；整组读取总时限独立控制，兼容旧分页路径。
     wechat_mcp_range_timeout_seconds: int = 60
     wechat_fetch_total_timeout_seconds: int = 600
+    wechat_fetch_max_attempts: int = 3
+    wechat_fetch_retry_backoff_seconds: float = 1.0
+    wechat_fetch_circuit_failure_threshold: int = 3
+    wechat_fetch_circuit_cooldown_seconds: int = 300
+    # 仅当 MCP 明确读取失败且完整 JSON 导出能独立返回同一时间窗时切换；不拼接两源。
+    wechat_runtime_export_fallback_enabled: bool = True
     # 额外允许的 MCP 主机（逗号分隔，仅 Docker 容器访问宿主机场景使用，
     # 如 host.docker.internal）。默认空：仍只允许本机回环地址。
     wechat_mcp_allowed_hosts: str = ""
@@ -55,11 +94,15 @@ class Settings(BaseSettings):
     summary_provider_primary: str = "codex"
     summary_provider_fallback: str = "deepseek"
     codex_summary_model: str = "gpt-5.6-sol"
-    codex_summary_timeout_seconds: int = 240
+    # 结构化群聊整理在高峰期可能超过 4 分钟；600 秒仍有明确上限，
+    # 同时避免把正常的长响应误判成不可自动恢复的结果未知。
+    codex_summary_timeout_seconds: int = 600
     codex_summary_max_retries: int = 2
     codex_summary_request_concurrency: int = 2
 
     # DeepSeek 备用
+    # 旧设置兼容字段；真实路由只使用 summary_provider_primary/fallback。
+    # 不再通过设置 API 暴露，保留一版以兼容旧 .env/数据库。
     ai_provider: str = "deepseek"
     ai_base_url: str = "https://api.deepseek.com"
     ai_api_key: str = ""
@@ -82,11 +125,21 @@ class Settings(BaseSettings):
     codex_home: str = ""
     codex_timeout_seconds: int = 1200
     codex_generated_images_dir: str = ""  # 留空时默认 ~/.codex/generated_images
+    # Codex/ImageGen 任务在可靠结构化回执下允许受控并发；默认两路。
+    image_generation_concurrency: int = 2
+    # 本地 Level 3 信息图字体；留空时按 Windows 常见中文字体顺序探测。
+    image_fallback_font_path: str = ""
+    # 最终 image_prompt.txt 的硬边界；仅部署环境可调，避免运行时误设为无限。
+    image_prompt_max_chars: int = 24000
+    image_prompt_max_bytes: int = 65536
 
     # 微信发送（V2）。默认适配微信 4.1.x 的 Windows 键盘/剪贴板/OCR 驱动；
     # legacy_cli 保留旧 wechat-automation-api 兼容入口。
     wechat_sender_mode: str = "native"
     wechat_native_action_delay_seconds: float = 0.6
+    wechat_native_stage_timeout_seconds: float = 5.0
+    wechat_native_submit_timeout_seconds: float = 8.0
+    wechat_native_poll_interval_seconds: float = 0.2
     wechat_native_mutex_timeout_seconds: float = 20.0
     wechat_send_claim_seconds: int = 180
     wechat_late_send_window_minutes: int = 30
@@ -110,9 +163,30 @@ class Settings(BaseSettings):
     email_send_partial_report: bool = True
 
     # 自动任务
+    # fastapi：8766 内 APScheduler 是唯一 owner；external：仅允许外部调度；
+    # disabled：不注册任何自动任务。该字段只由环境配置，不通过设置 API 修改。
+    scheduler_owner: Literal["fastapi", "external", "disabled"] = "fastapi"
     schedule_generate_time: str = "00:15"
+    # 日报微信发送采用唯一全局批次时间；群级 send_time 仅保留数据库兼容。
+    schedule_send_time: str = "08:30"
     schedule_email_time: str = "after_generate"
     schedule_startup_catchup_enabled: bool = True
+    # 无人值守恢复只在进程启动时检查一次，不再注册固定频率 Watchdog。
+    # 字段名保留一版以兼容既有部署环境。
+    reliability_watchdog_enabled: bool = True
+    # 自动恢复严格限制为当前日和前一日（48 小时产品边界）。更早任务只预览。
+    reliability_lookback_days: int = 2
+    reliability_watchdog_interval_minutes: int = 10  # 已弃用，仅兼容旧配置
+    # 周报能力先部署、后灰度：14 天可靠性验收完成前保持关闭。
+    weekly_insights_enabled: bool = False
+    weekly_send_enabled: bool = False
+    weekly_generate_time: str = "07:45"
+    weekly_send_time: str = "08:30"
+    scheduler_heartbeat_stale_seconds: int = 300
+
+    # 只供测试/离线执行通过环境变量隔离 output 与相邻 runtime；
+    # 生产默认留空，路径合同保持不变，且设置 API 无权修改。
+    output_root_override: str = ""
 
     # 路径
     @property
@@ -121,6 +195,8 @@ class Settings(BaseSettings):
 
     @property
     def output_dir(self) -> Path:
+        if self.output_root_override:
+            return Path(self.output_root_override).expanduser().resolve()
         return PROJECT_ROOT / "output"
 
     @property
@@ -155,7 +231,7 @@ class Settings(BaseSettings):
         applied: list[str] = []
         field_map = Settings.model_fields
         for key, raw in values.items():
-            if key not in field_map:
+            if key not in field_map or key in _ENVIRONMENT_ONLY_FIELDS:
                 continue
             if isinstance(raw, str) and raw.strip() == "******":
                 continue
@@ -182,7 +258,7 @@ def _coerce_setting_value(key: str, raw: Any, annotation: Any) -> Any:
             return True
         if text in _BOOL_FALSE:
             return False
-        return bool(text)
+        raise ValueError(f"{key} 必须是 true/false")
     if annotation is int or annotation == int:
         if isinstance(raw, bool):
             return int(raw)

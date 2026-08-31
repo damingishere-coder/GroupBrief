@@ -14,8 +14,11 @@ import {
   ArchiveGroup,
   V2Run,
   V2RunDetail,
+  WeeklyInsight,
   getArchiveGroups,
   getRunDetail,
+  getWeeklyInsight,
+  listWeeklyInsights,
   getV2File,
   readV2TextFile,
   restoreGroup,
@@ -180,6 +183,9 @@ export default function Archive() {
   const [imageBroken, setImageBroken] = useState(false);
   const [imageViewerOpen, setImageViewerOpen] = useState(false);
   const [restoringId, setRestoringId] = useState<number | null>(null);
+  const [weeklyItems, setWeeklyItems] = useState<WeeklyInsight[]>([]);
+  const [selectedWeekly, setSelectedWeekly] = useState<WeeklyInsight | null>(null);
+  const [weeklyLoading, setWeeklyLoading] = useState(true);
 
   const loadArchive = async (): Promise<ArchiveGroup[]> => {
     setLoading(true);
@@ -204,7 +210,25 @@ export default function Archive() {
 
   useEffect(() => {
     void loadArchive();
+    listWeeklyInsights()
+      .then((response) => {
+        const items = Array.isArray(response.items) ? response.items : [];
+        setWeeklyItems(items);
+        if (items[0]) return getWeeklyInsight(items[0].week_start, items[0].group_id);
+        return null;
+      })
+      .then((detail) => detail && setSelectedWeekly(detail))
+      .catch((error) => toast(`周报归档读取失败：${safeError(error, "请稍后重试")}`))
+      .finally(() => setWeeklyLoading(false));
   }, []);
+
+  const selectWeeklyInsight = (item: WeeklyInsight) => {
+    setWeeklyLoading(true);
+    getWeeklyInsight(item.week_start, item.group_id)
+      .then(setSelectedWeekly)
+      .catch((error) => toast(`周报详情读取失败：${safeError(error, "请稍后重试")}`))
+      .finally(() => setWeeklyLoading(false));
+  };
 
   const activeGroups = useMemo(() => groups.filter((group) => group.state === "active"), [groups]);
   const trashGroups = useMemo(() => groups.filter((group) => group.state !== "active"), [groups]);
@@ -375,6 +399,25 @@ export default function Archive() {
         description="按群聊和日期查看历史归档；移除的群会保留在回收站。"
         actions={<Button tone="secondary" onClick={() => void loadArchive()} busy={loading}><ArrowClockwise size={16} />刷新归档</Button>}
       />
+
+      <section className="weekly-archive card" aria-label="每周洞察归档">
+        <div className="archive-catalog-head"><div><h2>每周洞察</h2><p>只读展示上一自然周的已保存日报聚合；不会重新上传整周聊天。</p></div><StatusBadge tone="info">独立周报</StatusBadge></div>
+        {weeklyLoading && weeklyItems.length === 0 ? <LoadingState label="正在读取周报归档…" /> : weeklyItems.length === 0 ? <EmptyState title="暂无每周洞察" description="14 天可靠性验收完成并开启周报生成后，归档会显示在这里。" /> : (
+          <div className="weekly-archive-layout">
+            <div className="weekly-archive-list">{weeklyItems.map((item) => (
+              <button type="button" key={`${item.week_start}:${item.group_id}`} className={selectedWeekly?.week_start === item.week_start && selectedWeekly?.group_id === item.group_id ? "is-selected" : ""} onClick={() => selectWeeklyInsight(item)}>
+                <strong>{item.group_name}</strong><span>{item.week_start} — {item.week_end}</span><small>{item.aggregation?.message_count || 0} 条消息 · {item.status}</small>
+              </button>
+            ))}</div>
+            {selectedWeekly && <article className="weekly-archive-detail">
+              <div><h3>{selectedWeekly.group_name}</h3><p>{selectedWeekly.week_start} — {selectedWeekly.week_end} · {selectedWeekly.narrative_source === "ai" ? `${selectedWeekly.actual_provider} / ${selectedWeekly.actual_model}` : "本地确定性降级"}</p></div>
+              {selectedWeekly.card_url && <img src={selectedWeekly.card_url} alt={`${selectedWeekly.group_name} 每周洞察卡片`} />}
+              <pre>{selectedWeekly.narrative}</pre>
+              <div className="weekly-archive-meta"><span>缺失日报 {selectedWeekly.aggregation?.missing_days?.length || 0} 天</span><span>AI 状态 {selectedWeekly.ai_status}</span><span>状态 {selectedWeekly.status}</span></div>
+            </article>}
+          </div>
+        )}
+      </section>
 
       <section className="archive-group-catalog card" aria-label="归档群聊">
         <div className="archive-catalog-head">

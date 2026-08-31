@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import sys
@@ -30,6 +31,7 @@ sys.stdout.reconfigure(encoding="utf-8")
 
 from app.config.settings import get_settings
 from app.scheduler.daily_v2_job import run_daily_v2_job
+from app.scheduler.outcome import attach_outcome
 
 LOG_DIR = PROJECT_ROOT / "output" / "logs"
 
@@ -65,10 +67,23 @@ def main() -> int:
         settings=get_settings(),
         skip_email=args.skip_email,
     )
-    log.info("===== 每日自动任务结束：%s =====", result)
-    return 0 if result.get("status") in {
-        "success", "skipped", "already_completed", "already_running"
-    } else 1
+    outcome = attach_outcome(result)
+    audit = {
+        "status": outcome.get("status"),
+        "outcome_status": outcome["outcome_status"],
+        "exit_code": outcome["exit_code"],
+        "run_date": outcome.get("run_date", run_date),
+        "generation_status": outcome.get("generation_status"),
+        "email_status": outcome.get("email_status"),
+    }
+    log.info(
+        "===== 每日自动任务结束 status=%s outcome=%s exit_code=%d =====",
+        audit["status"],
+        audit["outcome_status"],
+        audit["exit_code"],
+    )
+    print("OUTCOME " + json.dumps(audit, ensure_ascii=False, sort_keys=True))
+    return int(outcome["exit_code"])
 
 
 if __name__ == "__main__":

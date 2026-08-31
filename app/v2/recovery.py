@@ -12,12 +12,14 @@ from pathlib import Path
 
 from app.core.logging import get_logger
 from app.v2.constants import (
+    CORRUPT,
     FILE_IMAGE,
     FILE_PROMPT,
     FILE_RANKING_TXT,
     FAILED,
     IMAGE_READY,
     READY_TO_SEND,
+    RUN_STATE_CORRUPT,
     SENT,
 )
 from app.v2.run_store import RunStore
@@ -59,7 +61,12 @@ def _required_files(status: str, run: dict) -> list[str]:
     return required
 
 
-def scan_incomplete(store: RunStore, run_date: str | None = None) -> list[dict]:
+def scan_incomplete(
+    store: RunStore,
+    run_date: str | None = None,
+    *,
+    runs: list[dict] | None = None,
+) -> list[dict]:
     """找出未到终态的 run（需要恢复/重跑的）。
 
     排除 SENT（绝不重发）与 FAILED（保留错误，手动重跑）。
@@ -69,8 +76,26 @@ def scan_incomplete(store: RunStore, run_date: str | None = None) -> list[dict]:
     返回按更新时间排序的列表。
     """
     incomplete: list[dict] = []
-    for run in store.list_runs(run_date):
+    source_runs = store.list_runs(run_date) if runs is None else runs
+    for run in source_runs:
         status = run.get("status", "")
+        if status == CORRUPT:
+            item = dict(run)
+            item["recovery_type"] = "manual_review"
+            incomplete.append(item)
+            continue
+        if run.get("prompt_hold") or run.get("prompt_operation_status") == "unknown":
+            item = dict(run)
+            item["recovery_type"] = "manual_review"
+            item["error_type"] = "PROMPT_RESULT_UNKNOWN"
+            incomplete.append(item)
+            continue
+        if run.get("send_hold_reason") == "SEND_RESULT_UNKNOWN" or run.get("send_state") == "unknown":
+            item = dict(run)
+            item["recovery_type"] = "manual_review"
+            item["error_type"] = "SEND_RESULT_UNKNOWN"
+            incomplete.append(item)
+            continue
         if status in (SENT, FAILED):
             continue
         item = dict(run)
@@ -82,11 +107,30 @@ def scan_incomplete(store: RunStore, run_date: str | None = None) -> list[dict]:
     return incomplete
 
 
-def verify_output(store: RunStore, run_date: str | None = None) -> list[dict]:
+def verify_output(
+    store: RunStore,
+    run_date: str | None = None,
+    *,
+    runs: list[dict] | None = None,
+) -> list[dict]:
     """检查所有 run 的输出文件完整性，返回 [{group_name, run_date, status, missing, ok}]。"""
     results: list[dict] = []
-    for run in store.list_runs(run_date):
+    source_runs = store.list_runs(run_date) if runs is None else runs
+    for run in source_runs:
         status = run.get("status", "")
+        if status == CORRUPT:
+            results.append(
+                {
+                    "group_name": run.get("group_name", "未知群"),
+                    "run_date": run.get("run_date", ""),
+                    "status": CORRUPT,
+                    "missing": [],
+                    "ok": False,
+                    "error_type": RUN_STATE_CORRUPT,
+                    "detail": "运行状态文件损坏，需人工复核",
+                }
+            )
+            continue
         required = _required_files(status, run)
         missing = []
         for f in required:
@@ -122,13 +166,32 @@ def recover_incomplete(
     """
     from app.pipeline.daily_pipeline import DailyPipeline
 
-    pipeline = DailyPipeline()
     incomplete = scan_incomplete(store, run_date)
     if not incomplete:
         return [{"status": "ok", "detail": "无未完成任务"}]
     results: list[dict] = []
+    pipeline = None
     for run in incomplete:
         group_name = run["group_name"]
+        if run.get("recovery_type") == "manual_review":
+            error_type = str(run.get("error_type") or RUN_STATE_CORRUPT)
+            results.append(
+                {
+                    "group_name": group_name,
+                    "status": "blocked",
+                    "error_type": error_type,
+                    "detail": (
+                        "AI 调用结果未知，需人工复核"
+                        if error_type == "PROMPT_RESULT_UNKNOWN"
+                        else "微信发送结果未知，需人工核对后消歧"
+                        if error_type == "SEND_RESULT_UNKNOWN"
+                        else "运行状态文件损坏，需人工复核"
+                    ),
+                }
+            )
+            continue
+        if pipeline is None:
+            pipeline = DailyPipeline()
         # 找到群 id（按显示名）
         gid = _find_group_id_by_name(group_name)
         if gid is None:

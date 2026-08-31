@@ -7,6 +7,7 @@ import time
 from datetime import datetime
 
 import pytest
+from sqlmodel import Session, SQLModel, create_engine
 
 from app.ai.concurrency import bounded_slot
 from app.ai.prompt_builder_types import PromptOutput
@@ -21,19 +22,40 @@ from app.services.generation_runtime import GenerationBusyError, generation_mute
 from app.v2.run_store import RunStore
 
 
+@pytest.fixture(autouse=True)
+def _isolate_concurrency_tests_from_group_name_sync(monkeypatch):
+    """并发测试不依赖数据库初始化，也不验证群名同步。"""
+
+    monkeypatch.setattr(DailyPipeline, "_sync_group_names", lambda self, group_ids=None: None)
+
+
 class DelayedSource(WeChatDataSource):
     name = "delayed"
 
-    def __init__(self):
+    def __init__(self, barrier_participants: int = 0):
         self.lock = threading.Lock()
         self.active = 0
         self.maximum = 0
+        self.barrier = (
+            threading.Barrier(barrier_participants)
+            if barrier_participants > 1
+            else None
+        )
+        self.barrier_slots = barrier_participants
+        self.barrier_guard = threading.Lock()
 
     def fetch_messages(self, group_id, start_time, end_time):
         with self.lock:
             self.active += 1
             self.maximum = max(self.maximum, self.active)
-        time.sleep(0.06)
+        with self.barrier_guard:
+            use_barrier = self.barrier is not None and self.barrier_slots > 0
+            if use_barrier:
+                self.barrier_slots -= 1
+        if use_barrier:
+            self.barrier.wait(timeout=5)
+        else:
+            time.sleep(0.06)
         with self.lock:
             self.active -= 1
         if group_id == "group-3":
@@ -52,21 +74,49 @@ class DelayedSource(WeChatDataSource):
 
 
 class DelayedPrompt:
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, barrier_participants: int = 0):
         self.settings = settings
         self.lock = threading.Lock()
         self.active = 0
         self.maximum = 0
+        self.barrier = (
+            threading.Barrier(barrier_participants)
+            if barrier_participants > 1
+            else None
+        )
+        self.barrier_slots = barrier_participants
+        self.barrier_guard = threading.Lock()
 
-    def build(self, _data):
+    def build(self, data):
+        from app.ai.speaker_attribution import build_attribution_contract
+
         with bounded_slot("deepseek_request", self.settings.ai_request_concurrency):
             with self.lock:
                 self.active += 1
                 self.maximum = max(self.maximum, self.active)
-            time.sleep(0.06)
+            with self.barrier_guard:
+                use_barrier = self.barrier is not None and self.barrier_slots > 0
+                if use_barrier:
+                    self.barrier_slots -= 1
+            if use_barrier:
+                self.barrier.wait(timeout=5)
+            else:
+                time.sleep(0.06)
             with self.lock:
                 self.active -= 1
-        return PromptOutput(True, "完整 Prompt", meta={"api_call_count": 1, "chunk_count": 1})
+        contract = build_attribution_contract(data.messages)
+        snapshot_hash = data.message_snapshot_sha256 or contract.message_snapshot_sha256
+        speaker_fingerprint = data.speaker_fingerprint or contract.speaker_fingerprint
+        return PromptOutput(
+            True,
+            "完整 Prompt",
+            meta={
+                "api_call_count": 1,
+                "chunk_count": 1,
+                "message_snapshot_sha256": snapshot_hash,
+                "speaker_fingerprint": speaker_fingerprint,
+            },
+        )
 
 
 class PromptReadyOrder:
@@ -78,13 +128,24 @@ class PromptReadyOrder:
         self.slow_saw_image_start = False
 
     def build(self, data):
+        from app.ai.speaker_attribution import build_attribution_contract
+
+        contract = build_attribution_contract(data.messages)
+        meta = {
+            "api_call_count": 1,
+            "chunk_count": 1,
+            "message_snapshot_sha256": (
+                data.message_snapshot_sha256 or contract.message_snapshot_sha256
+            ),
+            "speaker_fingerprint": data.speaker_fingerprint or contract.speaker_fingerprint,
+        }
         if data.group_name == "快群":
             self.fast_prompt_ready.set()
-            return PromptOutput(True, "Prompt 快群", meta={"api_call_count": 1, "chunk_count": 1})
+            return PromptOutput(True, "Prompt 快群", meta=meta)
 
         assert self.fast_prompt_ready.wait(timeout=1)
         self.slow_saw_image_start = self.image_started.wait(timeout=2)
-        return PromptOutput(True, "Prompt 慢群", meta={"api_call_count": 1, "chunk_count": 1})
+        return PromptOutput(True, "Prompt 慢群", meta=meta)
 
 
 class ImmediateFakeImageGenerator:
@@ -94,6 +155,7 @@ class ImmediateFakeImageGenerator:
         self.active = 0
         self.maximum = 0
         self.lock = threading.Lock()
+        self.barrier = threading.Barrier(2)
 
     def generate(self, prompt_file, output_path):
         from app.image.image_task import ImageTaskResult
@@ -105,14 +167,16 @@ class ImmediateFakeImageGenerator:
             self.calls.append(prompt)
         if prompt == "Prompt 快群":
             self.prompt_order.image_started.set()
-        time.sleep(0.02)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_bytes(bytes.fromhex(
-            "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489"
-            "0000000d4944415478da63f8cfc0f80100050001fff83f240000000049454e44ae426082"
-        ))
-        with self.lock:
-            self.active -= 1
+        try:
+            self.barrier.wait(timeout=5)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_bytes(bytes.fromhex(
+                "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489"
+                "0000000d4944415478da63f8cfc0f80100050001fff83f240000000049454e44ae426082"
+            ))
+        finally:
+            with self.lock:
+                self.active -= 1
         return ImageTaskResult(True, image_path=output_path)
 
 
@@ -123,8 +187,8 @@ def test_five_groups_overlap_with_limits_order_and_failure_isolation(tmp_path, m
         wechat_fetch_concurrency=3,
         ai_request_concurrency=2,
     )
-    source = DelayedSource()
-    prompt = DelayedPrompt(settings)
+    source = DelayedSource(barrier_participants=3)
+    prompt = DelayedPrompt(settings, barrier_participants=2)
     groups = [
         Group(
             display_name=f"群{index}",
@@ -143,16 +207,13 @@ def test_five_groups_overlap_with_limits_order_and_failure_isolation(tmp_path, m
     )
     monkeypatch.setattr(pipeline, "_load_groups", lambda group_ids=None: groups)
 
-    started = time.perf_counter()
     results = pipeline.generate_all(run_date="2026-08-21")
-    elapsed = time.perf_counter() - started
 
     assert [item["group_name"] for item in results] == [f"群{index}" for index in range(5)]
     assert results[3]["status"] == "failed"
     assert all(item["status"] == "ready_to_send" for index, item in enumerate(results) if index != 3)
     assert 1 < source.maximum <= 3
     assert 1 < prompt.maximum <= 2
-    assert elapsed < 0.45  # 串行基线约 0.54 秒，延迟 Fake 不访问真实服务。
 
 
 def test_prompt_ready_group_starts_image_before_other_prompts_finish(tmp_path, monkeypatch):
@@ -192,9 +253,64 @@ def test_prompt_ready_group_starts_image_before_other_prompts_finish(tmp_path, m
 
     assert prompt_order.slow_saw_image_start is True
     assert generator.calls == ["Prompt 快群", "Prompt 慢群"]
-    assert generator.maximum == 1
+    assert generator.maximum == 2
     assert [item["group_name"] for item in results] == ["慢群", "快群"]
     assert all(item["status"] == "ready_to_send" for item in results)
+
+
+def test_group_overrides_rebuild_loaded_group_with_live_sqlalchemy_state(tmp_path, monkeypatch):
+    engine = create_engine(
+        f"sqlite:///{tmp_path / 'group-overrides.db'}",
+        connect_args={"check_same_thread": False},
+    )
+    SQLModel.metadata.create_all(engine)
+    monkeypatch.setattr(repo, "engine", engine)
+    with Session(engine) as session:
+        group = repo.save_group(
+            session,
+            Group(
+                display_name="覆盖配置群",
+                wechat_group_id="override-group",
+                image_enabled=False,
+                image_theme="random_preset",
+            ),
+        )
+        group_id = int(group.id)
+
+    settings = Settings(
+        _env_file=None,
+        generation_group_concurrency=1,
+        wechat_fetch_concurrency=1,
+        ai_request_concurrency=1,
+    )
+    pipeline = DailyPipeline(
+        settings=settings,
+        data_source=DelayedSource(),
+        prompt_builder=DelayedPrompt(settings),
+        store=RunStore(tmp_path / "output"),
+        dry_run=True,
+    )
+
+    results = pipeline.generate_all(
+        run_date="2026-08-21",
+        group_overrides={
+            group_id: {
+                "image_enabled": False,
+                "image_theme": "ai_free",
+            }
+        },
+    )
+
+    assert results == [
+        {
+            "group_name": "覆盖配置群",
+            "status": "ready_to_send",
+            "detail": "未启用生图",
+        }
+    ]
+    run = pipeline.store.load_run("覆盖配置群", "2026-08-21")
+    assert run["image_enabled"] is False
+    assert run["image_theme"] == "ai_free"
 
 
 def test_unexpected_worker_and_image_errors_are_isolated(tmp_path, monkeypatch):

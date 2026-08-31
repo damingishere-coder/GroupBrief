@@ -103,6 +103,66 @@ def test_render_top10_lines_format():
     assert lines[-1] == "10.神奇小郭【7】"
 
 
+def test_render_text_primary_shows_text_and_interactions():
+    result = RankingResult(
+        group_name="Eason张UED-4群🤘",
+        period_start="2026-08-28 00:00:00",
+        period_end="2026-08-28 08:14:59",
+        speaker_count=2,
+        message_count=4,
+        count_policy="text_primary_with_interactions",
+        text_message_count=2,
+        interaction_message_count=2,
+        text_speaker_count=2,
+        top_speakers=[
+            TopSpeaker(
+                rank=1,
+                name="深圳-UI-白白",
+                count=1,
+                text_count=1,
+                interaction_count=2,
+                name_source="wechat_data_analysis",
+            )
+        ],
+    )
+
+    text = render_ranking(result, "{{top_lines}}")
+
+    assert text == "1.深圳-UI-白白【文字 1｜互动 2】"
+
+
+def test_text_interactions_template_appends_approved_explanation_once():
+    result = RankingResult(
+        group_name="测试群",
+        period_start="2026-08-28 00:00:00",
+        period_end="2026-08-28 23:59:59",
+        speaker_count=1,
+        message_count=3,
+        count_policy="text_primary_with_interactions",
+        text_message_count=1,
+        interaction_message_count=2,
+        text_speaker_count=1,
+        top_speakers=[
+            TopSpeaker(
+                rank=1,
+                name="群友",
+                count=1,
+                text_count=1,
+                interaction_count=2,
+                name_source="wechat_data_analysis",
+            )
+        ],
+    )
+
+    text = RankingRenderer().render(result, template_name="text_interactions")
+    explanation = "说明：互动指图片、表情、引用等非文字消息，仅展示活跃度，不影响排名。"
+
+    assert text.count(explanation) == 1
+    assert text.rstrip().endswith(explanation)
+    assert text.index("1.群友【文字 1｜互动 2】") < text.index(explanation)
+    assert explanation not in render_ranking(result, DEFAULT_RANKING_TEMPLATE)
+
+
 def test_render_top15_heading_and_lines():
     result = RankingResult(
         group_name="周末群",
@@ -211,19 +271,21 @@ def test_renderer_uses_template_file(tmp_path):
 
 def test_group_v2_defaults():
     g = Group()
-    assert g.schedule_rule == "weekday_default"
+    assert g.schedule_rule == "daily_previous_day"
     assert g.send_time == "08:30"
     assert g.summary_model == "gpt-5.6-sol"
     assert g.prompt_model == "gpt-5.6-sol"
     assert g.image_enabled is True
     assert g.send_target == ""
     assert g.ranking_template == "default"
+    assert g.ranking_count_policy == "all_messages"
+    assert g.sender_name_policy == "resolved"
     assert g.image_prompt_template == "default"
-    assert g.image_theme == "random_preset"
+    assert g.image_theme == "ai_free"
     assert g.image_theme_custom == ""
 
 
-def test_existing_groups_table_gets_image_theme_columns(tmp_path, monkeypatch):
+def test_existing_groups_table_gets_v2_policy_columns(tmp_path, monkeypatch):
     """旧数据库启动时应补列，并为已有群写入安全默认值。"""
     engine = create_engine(f"sqlite:///{tmp_path / 'legacy.db'}")
     with engine.begin() as conn:
@@ -238,7 +300,13 @@ def test_existing_groups_table_gets_image_theme_columns(tmp_path, monkeypatch):
     with engine.connect() as conn:
         columns = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(groups)")}
         row = conn.exec_driver_sql(
-            "SELECT image_theme, image_theme_custom FROM groups WHERE id = 1"
+            "SELECT image_theme, image_theme_custom, ranking_count_policy, "
+            "sender_name_policy FROM groups WHERE id = 1"
         ).one()
-    assert {"image_theme", "image_theme_custom"}.issubset(columns)
-    assert tuple(row) == ("random_preset", "")
+    assert {
+        "image_theme",
+        "image_theme_custom",
+        "ranking_count_policy",
+        "sender_name_policy",
+    }.issubset(columns)
+    assert tuple(row) == ("ai_free", "", "all_messages", "resolved")

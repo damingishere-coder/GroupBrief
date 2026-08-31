@@ -1,7 +1,7 @@
 """历史聊天业务服务。
 
 业务层只依赖 ChatHistoryProvider 接口，不直接依赖任何开源项目内部实现。
-自动降级：主 Provider 失败 → 备用 Provider → Mock。
+自动降级：主 Provider 失败 → 备用 Provider；Mock 仅限显式测试安全闸门。
 群名解析（resolve）路径只搜索真实的非 Mock Provider，绝不回落到 fixtures。
 """
 

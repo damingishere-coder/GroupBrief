@@ -7,6 +7,22 @@ from dataclasses import dataclass, field
 from app.ai.conversation_segments import PromptMessage
 
 
+class ExternalCallError(RuntimeError):
+    """外部 AI 调用失败的统一基类。"""
+
+
+class ExternalCallNotSubmittedError(ExternalCallError):
+    """可以确认请求尚未提交给 Provider。"""
+
+
+class ExternalCallResultUnknownError(ExternalCallError):
+    """请求可能已经被 Provider 接收，禁止自动重试或切换备用。"""
+
+
+class ExternalCallInvalidResponseError(ExternalCallError):
+    """Provider 已明确返回，但响应不可解析；禁止切备用，可安全本地降级。"""
+
+
 @dataclass
 class PromptContext:
     group_id: str

@@ -2,11 +2,21 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
   "properties": {
-    "image_path": {
+    "job_id": {
       "type": "string",
-      "minLength": 1
+      "minLength": 8
+    },
+    "status": {
+      "type": "string",
+      "enum": ["success", "failed"]
+    },
+    "image_path": {
+      "type": "string"
+    },
+    "error": {
+      "type": "string"
     }
   },
-  "required": ["image_path"],
+  "required": ["job_id", "status", "image_path", "error"],
   "additionalProperties": false
 }

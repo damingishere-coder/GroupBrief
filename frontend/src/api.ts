@@ -41,6 +41,7 @@ export interface SystemStatus {
   should_run_today: boolean;
   is_weekend_summary: boolean;
   next_generate_at: string;
+  next_send_at: string;
   enabled_groups: number;
   total_groups: number;
 }
@@ -76,6 +77,8 @@ export interface LatestReport {
 export interface GroupV2 extends Group {
   schedule_rule: string;
   send_time: string;
+  summary_provider: string;
+  prompt_provider: string;
   summary_model: string;
   prompt_model: string;
   image_enabled: boolean;
@@ -83,6 +86,8 @@ export interface GroupV2 extends Group {
   effective_send_target: string;
   send_target_mode: "auto" | "manual";
   ranking_template: string;
+  ranking_count_policy: "all_messages" | "text_primary_with_interactions";
+  sender_name_policy: "resolved" | "wechat_data_analysis";
   image_prompt_template: string;
   image_theme: string;
   image_theme_custom: string;
@@ -98,11 +103,15 @@ export interface GroupPayload {
   provider_preference: string;
   schedule_rule: string;
   send_time: string;
+  summary_provider: string;
+  prompt_provider: string;
   summary_model: string;
   prompt_model: string;
   image_enabled: boolean;
   send_target: string;
   ranking_template: string;
+  ranking_count_policy: "all_messages" | "text_primary_with_interactions";
+  sender_name_policy: "resolved" | "wechat_data_analysis";
   image_prompt_template: string;
   image_theme?: string;
   image_theme_custom?: string;
@@ -117,6 +126,7 @@ export interface DashboardCard {
   schedule_rule: string;
   image_enabled: boolean;
   ranking_template: string;
+  ranking_count_policy: "all_messages" | "text_primary_with_interactions";
   image_prompt_template: string;
   status: string;
   period_start: string;
@@ -124,9 +134,99 @@ export interface DashboardCard {
   message_count: number;
   speaker_count: number;
   image_url: string;
+  ranking_preview: {
+    rank: number;
+    name: string;
+    count: number;
+    text_count: number;
+    interaction_count: number;
+    name_source: string;
+  }[];
+  ranking_error: string;
   error: string;
   sent_at: string;
+  prompt_hold: boolean;
+  prompt_hold_reason: string;
+  prompt_operation_id: string;
+  prompt_operation_status: string;
+  wechat_send_enabled: boolean;
+  send_hold: boolean;
+  send_state: string;
+  send_hold_reason: string;
+  send_error: string;
+  send_error_type: string;
+  send_unknown_at: string;
   updated_at: string;
+}
+
+export type RuntimeNodeStatus = "pending" | "running" | "success" | "retry_pending" | "held" | "failed";
+
+export interface RuntimeNode {
+  id: "scheduler" | "data" | "ranking" | "prompt" | "image" | "send";
+  label: string;
+  status: RuntimeNodeStatus;
+  completed_groups: number;
+  total_groups: number;
+}
+
+export interface RuntimeGroup {
+  group_id: string;
+  group_name: string;
+  run_status: string;
+  current_node: RuntimeNode["id"];
+  current_node_label: string;
+  node_status: RuntimeNodeStatus;
+  nodes: Pick<RuntimeNode, "id" | "label" | "status">[];
+  last_error_type: string;
+  last_error_summary: string;
+  updated_at: string;
+}
+
+export type RuntimeOverallStatus =
+  | "not_started"
+  | "running"
+  | "retry_pending"
+  | "complete"
+  | "partial"
+  | "blocked"
+  | "failed"
+  | "needs_attention";
+
+export interface DashboardRuntime {
+  schema_version: number;
+  run_date: string;
+  run_id: string;
+  updated_at: string;
+  overall_status: RuntimeOverallStatus;
+  scheduler: {
+    scheduled_at?: string;
+    send_scheduled_at?: string;
+    next_generate_at?: string;
+    next_send_at?: string;
+    generation_started_at?: string;
+    generation_completed_at?: string;
+    generation_status?: string;
+    state_status?: string;
+    generation_error?: string;
+  };
+  summary: Record<string, unknown>;
+  nodes: RuntimeNode[];
+  groups: RuntimeGroup[];
+}
+
+export interface RuntimeLogItem {
+  timestamp: string;
+  level: "DEBUG" | "INFO" | "WARNING" | "ERROR" | "CRITICAL";
+  source: "scheduler" | "app" | "provider" | "ai";
+  message: string;
+  redacted_or_truncated?: boolean;
+}
+
+export interface RuntimeLogsResponse {
+  run_date: string;
+  updated_at: string;
+  items: RuntimeLogItem[];
+  truncated: boolean;
 }
 
 export interface Dashboard {
@@ -135,8 +235,14 @@ export interface Dashboard {
   period_start: string;
   period_end: string;
   enabled_groups: number;
-  counts: { pending: number; generated: number; sent: number; failed: number };
+  counts: { pending: number; generated: number; sent: number; failed: number; held: number };
   next_send: string;
+  daily_status: {
+    overall_status: RuntimeOverallStatus;
+    updated_at?: string;
+    summary: Record<string, unknown>;
+  };
+  runtime: DashboardRuntime;
   cards: DashboardCard[];
 }
 
@@ -146,6 +252,7 @@ export interface V2Run {
   status: string;
   period_start?: string;
   period_end?: string;
+  files?: string[];
   [key: string]: unknown;
 }
 
@@ -192,6 +299,12 @@ export interface SystemHealth {
   warnings?: string[];
 }
 
+export interface SystemReadiness extends SystemHealth {
+  ready: boolean;
+  scheduler_owner: string;
+  scheduler_active: boolean;
+}
+
 export interface StartupCheck {
   checks: { name: string; ok: boolean; status: string; detail: string }[];
 }
@@ -199,6 +312,57 @@ export interface StartupCheck {
 export interface RecoveryInfo {
   incomplete: V2Run[];
   integrity: { group_name: string; run_date: string; status: string; missing: string[]; ok: boolean }[];
+}
+
+export interface RecoveryBacklogItem {
+  run_date: string;
+  group_id: number | null;
+  group_name: string;
+  status: string;
+  reason: string;
+  safe_stage: "generation_only" | "manual_review_only";
+  recoverable: boolean;
+  manifest_source: string;
+  estimated_summary_calls?: number;
+  estimated_image_calls?: number;
+}
+
+export interface RecoveryBacklog {
+  generated_at: string;
+  automatic_recovery_dates: string[];
+  lookback_days: number;
+  version: string;
+  items: RecoveryBacklogItem[];
+}
+
+export interface ProviderCatalogResponse {
+  catalog: {
+    history: { provider: string; label: string; available: boolean; capabilities: string[] }[];
+    ai: { provider: string; label: string; available: boolean; models: string[]; capabilities: string[] }[];
+  };
+  [key: string]: unknown;
+}
+
+export interface WeeklyInsight {
+  schema_version: number;
+  week_start: string;
+  week_end: string;
+  group_id: number;
+  group_name: string;
+  status: string;
+  narrative: string;
+  narrative_source: string;
+  ai_status: string;
+  actual_provider: string;
+  actual_model: string;
+  generated_at: string;
+  aggregation: {
+    message_count: number;
+    missing_days: string[];
+    contributors: { identity_key: string; name: string; count: number }[];
+    topics: { title: string; days: number }[];
+  };
+  card_url?: string;
 }
 
 export interface TemplateItem {
@@ -210,6 +374,11 @@ export interface ImageThemeOption {
   key: string;
   label: string;
   description: string;
+  kind: "mode" | "preset";
+  category: string;
+  swatches: string[];
+  variation_count: number;
+  preview_url: string;
 }
 
 export interface ResolvedImageTheme {
@@ -249,7 +418,8 @@ export interface RunPromptConfig {
 export interface TopicScores {
   discussion: number;
   participation: number;
-  interestingness: number;
+  comedy: number;
+  group_recognition: number;
   visual: number;
   continuity: number;
   total: number;
@@ -274,6 +444,18 @@ export interface TopicSelection {
   selected_count: number;
   selected_topic_ids: string[];
   candidates: TopicCandidate[];
+}
+
+export interface ImageCandidate {
+  candidate_id: string;
+  job_id: string;
+  group_id: number | string;
+  wechat_group_id: string;
+  group_name: string;
+  run_date: string;
+  sha256: string;
+  size_bytes: number;
+  preview_url: string;
 }
 
 // 群发现 / 解析绑定 / 测试读取（兼容保留能力）
@@ -326,6 +508,7 @@ export const testReadGroup = (groupId: number) =>
   post<TestReadResult>(`/groups/${groupId}/test-read`);
 
 export const listGroups = () => get<GroupV2[]>("/groups");
+export const getProviderCatalog = () => get<ProviderCatalogResponse>("/system/providers");
 export const syncWechatGroupNames = () => post<GroupNameSyncResult>("/groups/sync-wechat-names");
 export const createGroup = (body: GroupPayload) => post<{ id: number; restored?: boolean }>("/groups", body);
 export const updateGroup = (groupId: number, body: Partial<GroupPayload>) =>
@@ -336,18 +519,44 @@ export const deleteGroup = (groupId: number) => del<{ ok: boolean; deleted_at: s
 export const restoreGroup = (groupId: number) =>
   post<{ ok: boolean; id: number; enabled: boolean; wechat_send_enabled: boolean }>(`/groups/${groupId}/restore`);
 
-export const getDashboard = () => get<Dashboard>("/v2/dashboard");
+export const getDashboard = (runDate?: string) =>
+  get<Dashboard>(`/v2/dashboard${runDate ? `?run_date=${encodeURIComponent(runDate)}` : ""}`);
+export const getRuntimeLogs = (
+  runDate: string,
+  options: { tail?: number; sources?: string; levels?: string } = {},
+) => {
+  const params = new URLSearchParams({
+    run_date: runDate,
+    tail: String(options.tail ?? 100),
+  });
+  if (options.sources) params.set("sources", options.sources);
+  if (options.levels) params.set("levels", options.levels);
+  return get<RuntimeLogsResponse>(`/v2/runtime/logs?${params.toString()}`);
+};
 export const getArchiveGroups = () => get<ArchiveGroupsResponse>("/v2/archive/groups");
-export const getRuns = (runDate?: string) =>
-  get<{ runs: V2Run[]; total: number }>(`/v2/runs${runDate ? `?run_date=${runDate}` : ""}`);
+export const getRuns = (runDate?: string, options?: { includeFiles?: boolean }) => {
+  const params = new URLSearchParams();
+  if (runDate) params.set("run_date", runDate);
+  if (options?.includeFiles) params.set("include_files", "true");
+  const query = params.toString();
+  return get<{ runs: V2Run[]; total: number }>(`/v2/runs${query ? `?${query}` : ""}`);
+};
 export const getRunDetail = (group: string, date: string) =>
   get<V2RunDetail>(`/v2/runs/${encodeURIComponent(group)}/${date}`);
 export type SettingsValues = Record<string, string>;
 export const getSettings = () => get<SettingsValues>("/settings");
 export const saveSettings = (values: SettingsValues) => put<{ ok: boolean }>("/settings", { values });
 export const getSystemHealth = () => get<SystemHealth>("/v2/system/health");
+export const getSystemReadiness = () => get<SystemReadiness>("/system/ready");
 export const getStartupChecks = () => get<StartupCheck>("/v2/system/startup");
 export const getRecoveryInfo = () => get<RecoveryInfo>("/v2/system/recovery");
+export const getRecoveryBacklog = (lookbackDays = 30) =>
+  get<RecoveryBacklog>(`/v2/recovery/backlog?lookback_days=${lookbackDays}`);
+export const confirmRecovery = (body: { expected_version: string; tasks: { run_date: string; group_id: number }[] }) =>
+  post<{ status: string; generation_only: boolean; send_invoked: boolean; results: { status: string; group_name?: string }[] }>("/v2/recovery/confirm", body);
+export const listWeeklyInsights = () => get<{ schema_version: number; items: WeeklyInsight[] }>("/v2/weekly");
+export const getWeeklyInsight = (weekStart: string, groupId: number) =>
+  get<WeeklyInsight>(`/v2/weekly/${weekStart}/${groupId}`);
 export const retryFailed = (body: { group_id?: number; run_date?: string }) =>
   post<{ results: { group_name?: string; status: string; detail?: string }[] }>("/v2/pipeline/retry-failed", body);
 export const pipelineGenerate = (body: { group_id?: number; run_date?: string; force?: boolean; refresh_messages?: boolean }) =>
@@ -355,6 +564,14 @@ export const pipelineGenerate = (body: { group_id?: number; run_date?: string; f
 export const pipelineSendDue = () => post<{ results: { status: string; group_name?: string }[] }>("/v2/pipeline/send-due");
 export const pipelineSend = (body: { group_id: number; run_date?: string; confirm_regenerated?: boolean; confirm_late_send?: boolean }) =>
   post<{ result: { status: string; group_name?: string; error_type?: string; error?: string; detail?: string } }>("/v2/pipeline/send", body);
+export const resolveSendUnknown = (body: { group_id: number; run_date: string; resolution: "text_sent" | "not_sent"; expected_send_unknown_at: string }) =>
+  post<{ result: { status: string; group_name: string; resolution: string; next_stage: string; detail: string } }>("/v2/pipeline/resolve-send-unknown", body);
+export const resetSendFailure = (body: { group_id: number; run_date: string; expected_updated_at: string; expected_state_version: number }) =>
+  post<{ result: { status: "prepared"; group_name: string; send_state: "ready"; run_status: string; updated_at: string; state_version: number; detail: string } }>("/v2/pipeline/reset-send-failure", body);
+export const resolvePromptUnknown = (body: { group_id: number; run_date: string; expected_operation_id: string }) =>
+  post<{ result: { status: string; group_name: string; resolution: string; next_stage: string; detail: string } }>("/v2/pipeline/resolve-prompt-unknown", body);
+export const resolveManualSend = (body: { group_id: number; run_date: string; resolution: "all_sent" | "text_sent" | "not_sent"; expected_updated_at: string }) =>
+  post<{ result: { status: string; group_name: string; resolution: string; next_stage: string; detail: string; run_status: string; updated_at: string } }>("/v2/pipeline/resolve-manual-send", body);
 export const getV2File = (group: string, date: string, file: string) =>
   `/api/v2/files/${encodeURIComponent(group)}/${date}/${file}`;
 
@@ -401,6 +618,13 @@ export const rebuildRunPrompt = (group: string, date: string) =>
   post<{ result: { status: string; detail?: string }; run: V2Run }>(`/v2/runs/${encodeURIComponent(group)}/${date}/rebuild-prompt`);
 export const regenerateRunImage = (group: string, date: string) =>
   post<{ accepted: boolean; run: V2Run }>(`/v2/runs/${encodeURIComponent(group)}/${date}/regenerate-image`);
+export const getRunImageCandidates = (group: string, date: string) =>
+  get<{ candidates: ImageCandidate[] }>(`/v2/runs/${encodeURIComponent(group)}/${date}/image-candidates`);
+export const claimRunImageCandidate = (
+  group: string,
+  date: string,
+  body: { job_id: string; candidate_id: string },
+) => post<{ claimed: boolean; run: V2Run }>(`/v2/runs/${encodeURIComponent(group)}/${date}/image-candidates/claim`, body);
 
 // 模板中心
 export const listRankingTemplates = () => get<{ templates: string[]; previews: Record<string, string> }>("/v2/templates/ranking");

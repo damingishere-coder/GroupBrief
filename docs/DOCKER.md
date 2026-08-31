@@ -1,6 +1,6 @@
-# 使用 Docker 运行 GroupBrief
+# 使用 Docker 开发或只读运行 GroupBrief
 
-Docker 方式适合希望让 GroupBrief 后端、Web UI 和调度器持续运行的用户。微信桌面客户端、WeChatDataAnalysis 和微信 UI 自动化仍运行在 Windows 宿主机上。
+Docker 只作为开发、读取和界面验证环境。正式支持环境是 Windows + Alter + 本机微信，由 FastAPI Scheduler 独占调度；Docker 不承诺原生微信发送。微信桌面客户端、WeChatDataAnalysis 和微信 UI 自动化仍运行在 Windows 宿主机上。
 
 ## 运行边界
 

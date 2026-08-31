@@ -16,12 +16,162 @@ contact.db 由 WeChatDataAnalysis 在启动时解密导出，位置默认自动�
 from __future__ import annotations
 
 import os
+import re
 import sqlite3
 from pathlib import Path
+from typing import Iterator
 
 from app.core.logging import get_logger
 
 logger = get_logger("groupbrief.contact")
+
+_SYSTEM_DISPLAY_NAME_MARKERS = (
+    "加入群聊",
+    "进入群聊",
+    "退出群聊",
+    "移出群聊",
+    "邀请了",
+    "修改群名",
+    "修改了群名",
+    "红包待领取",
+    "撤回了一条消息",
+    "拍了拍",
+)
+
+
+def is_plausible_group_card(value: object) -> bool:
+    """排除 ext_buffer 中混入的系统事件文本和结构性脏值。"""
+    text = str(value or "").strip()
+    return bool(
+        text
+        and len(text) <= 64
+        and "\n" not in text
+        and "\r" not in text
+        and not any(marker in text for marker in _SYSTEM_DISPLAY_NAME_MARKERS)
+    )
+
+
+def _decode_varint(raw: bytes, offset: int) -> tuple[int | None, int]:
+    value = 0
+    shift = 0
+    position = int(offset)
+    while position < len(raw):
+        byte = raw[position]
+        position += 1
+        value |= (byte & 0x7F) << shift
+        if (byte & 0x80) == 0:
+            return value, position
+        shift += 7
+        if shift > 63:
+            break
+    return None, len(raw)
+
+
+def _iter_protobuf_fields(raw: bytes) -> Iterator[tuple[int, int, bytes]]:
+    """遍历群成员 ext_buffer 中的 length-delimited protobuf 字段。"""
+    position = 0
+    while position < len(raw):
+        tag, next_position = _decode_varint(raw, position)
+        if tag is None or next_position <= position:
+            break
+        position = next_position
+        field_number = int(tag) >> 3
+        wire_type = int(tag) & 0x07
+        if wire_type == 0:
+            _, next_position = _decode_varint(raw, position)
+            if next_position <= position:
+                break
+            position = next_position
+            continue
+        if wire_type == 1:
+            position += 8
+            continue
+        if wire_type == 5:
+            position += 4
+            continue
+        if wire_type != 2:
+            break
+        size, next_position = _decode_varint(raw, position)
+        if size is None or next_position <= position:
+            break
+        position = next_position
+        end = position + int(size)
+        if end > len(raw):
+            break
+        yield field_number, wire_type, raw[position:end]
+        position = end
+
+
+def _looks_like_username(value: str) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return False
+    if text.startswith(("wxid_", "gh_")) or text.endswith("@chatroom") or "@" in text:
+        return True
+    return bool(
+        6 <= len(text) <= 32
+        and not re.search(r"\s", text)
+        and re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]+", text)
+    )
+
+
+def _pick_legacy_group_card(fields: list[tuple[int, str]], username: str) -> str:
+    """兼容旧布局：field 4 是成员 ID、field 1 是显示名。"""
+    candidates: list[tuple[int, int, str]] = []
+    for index, (field_number, value) in enumerate(fields):
+        text = str(value or "").strip()
+        if not text or text == username or len(text) > 64 or "\n" in text or "\r" in text:
+            continue
+        if text.startswith(("wxid_", "gh_")) or text.endswith("@chatroom") or "@" in text:
+            continue
+        score = (100 if field_number == 2 else 0) + (20 if not _looks_like_username(text) else 0)
+        score += max(0, 32 - len(text))
+        candidates.append((score, -index, text))
+    return max(candidates, default=(-1, 0, ""))[2]
+
+
+def _parse_group_nicknames(ext_buffer: bytes, usernames: set[str]) -> dict[str, str]:
+    """按当前字段语义解析群名片，并保留受限的旧布局兼容。"""
+    result: dict[str, str] = {}
+    primary_seen: set[str] = set()
+    for _, wire_type, chunk in _iter_protobuf_fields(ext_buffer):
+        if wire_type != 2 or not chunk:
+            continue
+        text_fields: list[tuple[int, str]] = []
+        for field_number, nested_wire_type, value in _iter_protobuf_fields(chunk):
+            if nested_wire_type != 2 or not value or len(value) > 256:
+                continue
+            try:
+                text = bytes(value).decode("utf-8", errors="strict").strip()
+            except UnicodeDecodeError:
+                continue
+            if text:
+                text_fields.append((field_number, text))
+        if not text_fields:
+            continue
+
+        field1 = [value for field_number, value in text_fields if field_number == 1]
+        field2 = [value for field_number, value in text_fields if field_number == 2]
+        primary_members = [value for value in field1 if value in usernames]
+        if primary_members:
+            for username in primary_members:
+                primary_seen.add(username)
+                if field2 and is_plausible_group_card(field2[0]):
+                    result[username] = field2[0]
+                else:
+                    result.pop(username, None)
+            continue
+
+        legacy_members = [
+            value
+            for field_number, value in text_fields
+            if field_number == 4 and value in usernames and value not in primary_seen
+        ]
+        for username in legacy_members:
+            display = _pick_legacy_group_card(text_fields, username)
+            if display:
+                result[username] = display
+    return result
 
 
 def find_contact_db() -> Path | None:
@@ -104,3 +254,30 @@ class ContactResolver:
         """解析微信号对应的显示名，找不到时回退到 fallback。"""
         name = self.display_name(username)
         return name if name else fallback
+
+    def group_nicknames(self, chatroom_id: str, usernames: list[str]) -> dict[str, str]:
+        """只读解析指定群的成员群名片；任何读取或格式异常均安全回退为空。"""
+        chatroom = str(chatroom_id or "").strip()
+        targets = {
+            str(username or "").strip()
+            for username in usernames
+            if str(username or "").strip()
+        }
+        if not chatroom.endswith("@chatroom") or not targets or not self.available:
+            return {}
+        try:
+            con = sqlite3.connect(f"file:{self._db_path}?mode=ro", uri=True)
+            try:
+                row = con.execute(
+                    "SELECT ext_buffer FROM chat_room WHERE username = ? LIMIT 1",
+                    (chatroom,),
+                ).fetchone()
+            finally:
+                con.close()
+            if row is None or row[0] is None:
+                return {}
+            raw = row[0].tobytes() if isinstance(row[0], memoryview) else bytes(row[0])
+            return _parse_group_nicknames(raw, targets) if raw else {}
+        except Exception as exc:
+            logger.warning("读取群名片映射失败：%s", str(exc)[:200])
+            return {}

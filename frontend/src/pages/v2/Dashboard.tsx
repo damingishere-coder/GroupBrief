@@ -1,6 +1,5 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
-  ArrowRight,
   ArrowsClockwise,
   CheckCircle,
   GearSix,
@@ -11,9 +10,12 @@ import {
 import {
   DashboardCard,
   getDashboard,
+  getRuntimeLogs,
   getSystemHealth,
   pipelineGenerate,
   pipelineSend,
+  resolveManualSend,
+  resolvePromptUnknown,
 } from "../../api";
 import {
   Button,
@@ -28,6 +30,15 @@ import {
 } from "../../components/common";
 import { useFetch, useToast } from "../../components/ui";
 import { navigateToHash } from "../../navigation";
+import { shanghaiDateInputValue } from "../../date";
+import { AnimatePresence, m, MOTION_EASE } from "../../components/motion";
+import {
+  formatRankingCount,
+  INTERACTION_EXPLANATION,
+  isTextPrimaryRanking,
+} from "./rankingPolicy";
+import { DashboardRuntimePanels } from "./DashboardRuntimePanels";
+import { runtimeRefreshDelay } from "./dashboardRuntime";
 
 const STATUS_META: Record<string, { label: string; tone: "success" | "warning" | "danger" | "info" | "neutral" }> = {
   PENDING: { label: "待生成", tone: "warning" },
@@ -43,14 +54,6 @@ const STATUS_META: Record<string, { label: string; tone: "success" | "warning" |
 function StatusPill({ status }: { status: string }) {
   const meta = STATUS_META[status.toUpperCase()] || { label: status || "未知", tone: "neutral" as const };
   return <StatusBadge tone={meta.tone}>{meta.label}</StatusBadge>;
-}
-
-// 本地时区的今天（避免 toISOString 的 UTC 偏移问题）
-function todayLocal(): string {
-  const d = new Date();
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(
-    d.getDate()
-  ).padStart(2, "0")}`;
 }
 
 function formatDateTime(value: string): string {
@@ -103,7 +106,9 @@ interface TaskActionsProps {
   senderOk: boolean;
   senderDetail: string;
   onGenerate: () => void;
+  onResolvePrompt: () => void;
   onSend: () => void;
+  onResolve: () => void;
 }
 
 function TaskActions({
@@ -113,10 +118,13 @@ function TaskActions({
   senderOk,
   senderDetail,
   onGenerate,
+  onResolvePrompt,
   onSend,
+  onResolve,
 }: TaskActionsProps) {
-  const canGenerate = card.status !== "SENT";
-  const canSend = ["IMAGE_READY", "READY_TO_SEND"].includes(card.status) && !card.sent_at;
+  const canGenerate = card.status !== "SENT" && !card.prompt_hold;
+  const canResolvePrompt = card.prompt_hold && card.prompt_hold_reason === "PROMPT_RESULT_UNKNOWN";
+  const canSend = ["IMAGE_READY", "READY_TO_SEND"].includes(card.status) && !card.sent_at && !card.send_hold;
 
   return (
     <div className="dashboard-task-actions">
@@ -135,6 +143,18 @@ function TaskActions({
           {generating ? "生成中…" : "立即生成"}
         </Button>
       )}
+      {canResolvePrompt && (
+        <Button tone="secondary" className="ui-button-compact" onClick={onResolvePrompt}>
+          <WarningCircle size={16} aria-hidden="true" />
+          核对后重试
+        </Button>
+      )}
+      {card.prompt_hold && !canResolvePrompt && (
+        <Button tone="ghost" className="ui-button-compact" disabled title="当前 Prompt 暂停原因需要人工检查运行记录">
+          <WarningCircle size={16} aria-hidden="true" />
+          Prompt 待复核
+        </Button>
+      )}
       {canSend && senderOk && (
         <Button tone="primary" className="ui-button-compact" onClick={onSend} busy={sending}>
           <PaperPlaneTilt size={16} aria-hidden="true" />
@@ -151,22 +171,114 @@ function TaskActions({
           微信发送未启用
         </Button>
       )}
+      {card.send_hold && (
+        <Button tone="secondary" className="ui-button-compact" onClick={onResolve}>
+          <WarningCircle size={16} aria-hidden="true" />
+          人工核对
+        </Button>
+      )}
     </div>
   );
 }
 
 export default function Dashboard() {
-  const dashboard = useFetch(getDashboard);
+  const [runDate, setRunDate] = useState(shanghaiDateInputValue);
+  const dashboard = useFetch(() => getDashboard(runDate), [runDate]);
   const health = useFetch(getSystemHealth);
+  const [logSource, setLogSource] = useState<"all" | "scheduler" | "app" | "provider" | "ai">("all");
+  const [logLevel, setLogLevel] = useState<"all" | "DEBUG" | "INFO" | "WARNING" | "ERROR" | "CRITICAL">("all");
+  const logs = useFetch(
+    () => getRuntimeLogs(runDate, {
+      tail: 100,
+      sources: logSource === "all" ? undefined : logSource,
+      levels: logLevel === "all" ? undefined : logLevel,
+    }),
+    [runDate, logSource, logLevel],
+  );
   const { msg, toast } = useToast();
-  const [runDate, setRunDate] = useState(todayLocal());
   const [generatingId, setGeneratingId] = useState<number | null>(null);
   const [sendingId, setSendingId] = useState<number | null>(null);
   const [sendCard, setSendCard] = useState<DashboardCard | null>(null);
+  const [promptRetryCard, setPromptRetryCard] = useState<DashboardCard | null>(null);
   const [viewerImage, setViewerImage] = useState<ViewerImage | null>(null);
+  const [manualCard, setManualCard] = useState<DashboardCard | null>(null);
+  const [manualResolution, setManualResolution] = useState<"all_sent" | "text_sent" | "not_sent">("all_sent");
+  const [manualBusy, setManualBusy] = useState(false);
+  const [healthOpen, setHealthOpen] = useState(false);
+  const [logPaused, setLogPaused] = useState(false);
+  const [pageVisible, setPageVisible] = useState(() => document.visibilityState !== "hidden");
+  const manualDialogRef = useRef<HTMLElement>(null);
+  const manualReturnFocusRef = useRef<HTMLElement | null>(null);
+  const manualBusyRef = useRef(manualBusy);
+  manualBusyRef.current = manualBusy;
+
+  useEffect(() => {
+    if (!manualCard) return;
+    manualReturnFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const frame = window.requestAnimationFrame(() => manualDialogRef.current?.focus());
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !manualBusyRef.current) {
+        event.preventDefault();
+        setManualCard(null);
+        return;
+      }
+      if (event.key !== "Tab" || !manualDialogRef.current) return;
+      const focusable = Array.from(
+        manualDialogRef.current.querySelectorAll<HTMLElement>(
+          "button:not(:disabled), input:not(:disabled), textarea:not(:disabled), select:not(:disabled), [tabindex]:not([tabindex='-1'])",
+        ),
+      );
+      if (!focusable.length) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      document.removeEventListener("keydown", onKeyDown);
+      window.requestAnimationFrame(() => manualReturnFocusRef.current?.focus());
+    };
+  }, [manualCard]);
+
+  useEffect(() => {
+    const onVisibilityChange = () => {
+      const visible = document.visibilityState !== "hidden";
+      setPageVisible(visible);
+      if (visible && runDate === shanghaiDateInputValue()) {
+        dashboard.reload();
+        logs.reload();
+      }
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => document.removeEventListener("visibilitychange", onVisibilityChange);
+  }, [dashboard.reload, logs.reload, runDate]);
+
+  const runtimeStatus = dashboard.data?.runtime?.overall_status || "not_started";
+  const runtimeScheduledAt = dashboard.data?.runtime?.scheduler?.scheduled_at;
+  useEffect(() => {
+    const delay = runtimeRefreshDelay(runtimeStatus, {
+      isToday: runDate === shanghaiDateInputValue(),
+      visible: pageVisible,
+      scheduledAt: runtimeScheduledAt,
+    });
+    if (delay === null) return;
+    const timer = window.setTimeout(() => {
+      dashboard.reload();
+      logs.reload();
+    }, delay);
+    return () => window.clearTimeout(timer);
+  }, [dashboard.reload, logs.reload, pageVisible, runDate, runtimeScheduledAt, runtimeStatus]);
 
   const refresh = () => {
     dashboard.reload();
+    logs.reload();
     health.reload();
   };
 
@@ -217,6 +329,51 @@ export default function Dashboard() {
       });
   };
 
+  const confirmPromptRetry = () => {
+    if (!promptRetryCard || generatingId !== null) return;
+    const card = promptRetryCard;
+    setGeneratingId(card.group_id);
+    toast(`正在解除「${card.group_name}」的 Prompt 暂停并重新生成…`);
+    resolvePromptUnknown({
+      group_id: card.group_id,
+      run_date: runDate,
+      expected_operation_id: card.prompt_operation_id,
+    })
+      .then(() => pipelineGenerate({ group_id: card.group_id, force: true, run_date: runDate }))
+      .then((response) => {
+        const result = response.results?.[0];
+        if (!result || ["failed", "error", "blocked"].includes(result.status)) {
+          toast(`生成未完成：${result?.detail || result?.error_type || result?.status || "未知状态"}`);
+        } else {
+          toast(`生成完成：${result.detail || result.status}`);
+        }
+        dashboard.reload();
+      })
+      .catch((error: unknown) => toast(`Prompt 核对或重试失败：${String(error)}`))
+      .finally(() => {
+        setGeneratingId(null);
+        setPromptRetryCard(null);
+      });
+  };
+
+  const confirmManualResolution = () => {
+    if (!manualCard || manualBusy) return;
+    setManualBusy(true);
+    resolveManualSend({
+      group_id: manualCard.group_id,
+      run_date: runDate,
+      resolution: manualResolution,
+      expected_updated_at: manualCard.updated_at,
+    })
+      .then((response) => {
+        toast(response.result.detail);
+        setManualCard(null);
+        dashboard.reload();
+      })
+      .catch((error: unknown) => toast(`人工核对失败：${String(error)}`))
+      .finally(() => setManualBusy(false));
+  };
+
   const totalMessages = useMemo(
     () => dashboard.data?.cards.reduce((total, card) => total + Number(card.message_count || 0), 0) || 0,
     [dashboard.data]
@@ -230,6 +387,9 @@ export default function Dashboard() {
     [dashboard.data]
   );
   const healthChecks = health.data ? Object.values(health.data.checks) : [];
+  const healthProblems = health.data
+    ? Object.entries(health.data.checks).filter(([, check]) => !check.ok)
+    : [];
   const systemHealthy = healthChecks.length > 0 && healthChecks.every((check) => check.ok);
   const senderDetail = health.data?.checks?.wechat_sender?.detail || health.error || "微信自动发送服务不可用";
 
@@ -247,7 +407,16 @@ export default function Dashboard() {
 
   const data = dashboard.data;
   const counts = data.counts;
-  const recentCards = data.cards.slice(0, 5);
+  const dailyStatusMeta = {
+    not_started: { label: "今日未开始", tone: "neutral" as const },
+    running: { label: "今日运行中", tone: "info" as const },
+    retry_pending: { label: "等待自动重试", tone: "warning" as const },
+    complete: { label: "今日已完成", tone: "success" as const },
+    partial: { label: "今日部分完成", tone: "warning" as const },
+    blocked: { label: "今日已阻断", tone: "danger" as const },
+    failed: { label: "今日运行失败", tone: "danger" as const },
+    needs_attention: { label: "今日待核对", tone: "danger" as const },
+  }[data.daily_status?.overall_status || "not_started"];
 
   return (
     <div className="dashboard-page">
@@ -256,16 +425,25 @@ export default function Dashboard() {
         description={`${data.today} · 统计周期 ${data.period_start} ~ ${data.period_end}${!data.should_run ? " · 今天不生成" : ""}`}
         actions={
           <>
-            <StatusBadge tone={health.loading ? "neutral" : systemHealthy ? "success" : "warning"}>
-              {health.loading ? "健康检查中" : systemHealthy ? "系统健康" : "需要关注"}
-            </StatusBadge>
+            <StatusBadge tone={dailyStatusMeta.tone}>{dailyStatusMeta.label}</StatusBadge>
+            <button
+              type="button"
+              className="dashboard-health-trigger"
+              aria-expanded={healthOpen}
+              aria-controls="dashboard-health-details"
+              onClick={() => setHealthOpen((value) => !value)}
+            >
+              <StatusBadge tone={health.loading ? "neutral" : systemHealthy ? "success" : "warning"}>
+                {health.loading ? "健康检查中" : systemHealthy ? "系统健康" : "需要关注"}
+              </StatusBadge>
+            </button>
             <label className="dashboard-date-field">
-              <span>生成日期</span>
+              <span>运行日期</span>
               <input
                 type="date"
                 value={runDate}
-                onChange={(event) => setRunDate(event.target.value || todayLocal())}
-                aria-label="生成日期"
+                onChange={(event) => setRunDate(event.target.value || shanghaiDateInputValue())}
+                aria-label="运行日期"
               />
             </label>
             <Button tone="ghost" onClick={refresh} busy={dashboard.loading}>
@@ -275,6 +453,17 @@ export default function Dashboard() {
           </>
         }
       />
+
+      {healthOpen && (
+        <section id="dashboard-health-details" className="dashboard-health-details" aria-live="polite">
+          <strong>{systemHealthy ? "所有系统检查均正常" : `有 ${healthProblems.length || 1} 项检查需要关注`}</strong>
+          {health.error && <p>{health.error}</p>}
+          {healthProblems.map(([name, check]) => (
+            <p key={name}><b>{name}</b><span>{check.detail || check.status}</span></p>
+          ))}
+          {health.data?.warnings?.map((warning) => <p key={warning}><b>运行提醒</b><span>{warning}</span></p>)}
+        </section>
+      )}
 
       <section className="dashboard-kpis" aria-label="运行统计">
         <div className="dashboard-kpi-card">
@@ -299,10 +488,24 @@ export default function Dashboard() {
         </div>
       </section>
 
-      <div className={`dashboard-failure-note ${counts.failed > 0 ? "has-failures" : ""}`}>
-        {counts.failed > 0 ? <WarningCircle size={20} aria-hidden="true" /> : <CheckCircle size={20} aria-hidden="true" />}
-        <span>{counts.failed > 0 ? `有 ${counts.failed} 个群任务失败，请查看下方状态与错误信息。` : "当前没有失败任务。"}</span>
+      <div className={`dashboard-failure-note ${counts.failed > 0 || counts.held > 0 ? "has-failures" : ""}`}>
+        {counts.failed > 0 || counts.held > 0 ? <WarningCircle size={20} aria-hidden="true" /> : <CheckCircle size={20} aria-hidden="true" />}
+        <span>{counts.failed > 0 || counts.held > 0 ? `失败 ${counts.failed} 个，暂停待核对 ${counts.held} 个；请查看下方状态与错误信息。` : "当前没有失败或暂停任务。"}</span>
       </div>
+
+      <DashboardRuntimePanels
+        runtime={data.runtime}
+        logs={logs.data}
+        loading={logs.loading}
+        error={logs.error}
+        source={logSource}
+        level={logLevel}
+        paused={logPaused}
+        onSourceChange={setLogSource}
+        onLevelChange={setLogLevel}
+        onPausedChange={setLogPaused}
+        onRefresh={logs.reload}
+      />
 
       <div className="dashboard-main-grid">
         <section className="dashboard-panel dashboard-message-panel">
@@ -329,61 +532,57 @@ export default function Dashboard() {
           )}
         </section>
 
-        <section className="dashboard-panel dashboard-status-panel">
-          <div className="dashboard-panel-heading">
-            <div>
-              <h2>今日任务状态</h2>
-              <p>每个群独立记录，失败不会隐藏或阻塞其他群。</p>
-            </div>
-          </div>
-          {data.cards.length === 0 ? (
-            <EmptyState title="暂无今日任务" description="启用群后，这里会显示任务状态。" />
-          ) : (
-            <div className="dashboard-status-list">
-              {data.cards.map((card) => (
-                <div className="dashboard-status-row" key={card.group_id}>
-                  <div className="dashboard-status-main">
-                    <strong>{card.group_name}</strong>
-                    <span>更新时间 {formatDateTime(card.updated_at)} · 发送 {card.send_time || "—"}</span>
-                  </div>
-                  <StatusPill status={card.status} />
-                </div>
-              ))}
-            </div>
-          )}
-        </section>
       </div>
 
       <section className="dashboard-panel dashboard-recent-panel">
         <div className="dashboard-panel-heading dashboard-panel-heading-with-action">
           <div>
-            <h2>最近群任务</h2>
-            <p>显示当前接口返回的群任务，最多 5 项。</p>
+            <h2>当前群任务</h2>
+            <p>每群一张完整任务卡：左侧核对排行榜，右侧核对 AI 图片和发送状态。</p>
           </div>
           <Button tone="ghost" className="ui-button-compact" onClick={() => navigateToHash("/groups")}>
             管理群聊
-            <ArrowRight size={16} aria-hidden="true" />
           </Button>
         </div>
-        {recentCards.length === 0 ? (
+        {data.cards.length === 0 ? (
           <EmptyState title="暂无群任务" description="启用群后，任务卡片会出现在这里。" />
         ) : (
           <div className="dashboard-task-grid">
-            {recentCards.map((card) => (
-              <article className="dashboard-task-card" key={card.group_id}>
+            {data.cards.map((card) => (
+              <article className="dashboard-task-card" key={`${card.group_id}-${card.updated_at}`}>
                 <div className="dashboard-task-card-head">
                   <div>
                     <h3>{card.group_name}</h3>
-                    <span>{formatPeriod(card)}</span>
+                    <span>{formatPeriod(card)} · 更新 {formatDateTime(card.updated_at)}</span>
                   </div>
-                  <StatusPill status={card.status} />
+                  {card.prompt_hold ? <StatusBadge tone="warning">暂停待核对</StatusBadge> : <StatusPill status={card.status} />}
                 </div>
-                <ImagePreview key={card.image_url || "empty"} card={card} onOpen={setViewerImage} />
+                <div className="dashboard-task-content">
+                  <section className="dashboard-ranking-preview" aria-label={`${card.group_name} Top 5 排行榜`}>
+                    <div className="dashboard-task-content-head"><strong>Top 5 排行榜</strong><span>{card.ranking_preview?.length ? "ranking.json" : "暂无排行"}</span></div>
+                    {card.ranking_preview?.length ? (
+                      <>
+                        <ol>
+                          {(card.ranking_preview || []).map((speaker) => (
+                            <li key={`${speaker.rank}-${speaker.name}`}>
+                              <span>{speaker.rank}</span><strong title={speaker.name}>{speaker.name}</strong><em>{formatRankingCount(card.ranking_count_policy, speaker)}</em>
+                            </li>
+                          ))}
+                        </ol>
+                        {isTextPrimaryRanking(card.ranking_count_policy) && <p className="dashboard-ranking-interaction-note">{INTERACTION_EXPLANATION}</p>}
+                      </>
+                    ) : <div className="dashboard-ranking-empty">{card.ranking_error || "尚未生成结构化排行榜"}</div>}
+                  </section>
+                  <section className="dashboard-image-preview" aria-label={`${card.group_name} AI 图片`}>
+                    <div className="dashboard-task-content-head"><strong>AI 图片</strong><span>{card.image_url ? "daily_image.png" : "暂无图片"}</span></div>
+                    <ImagePreview key={card.image_url || "empty"} card={card} onOpen={setViewerImage} />
+                  </section>
+                </div>
                 {card.error && <p className="dashboard-task-error">{card.error}</p>}
                 <div className="dashboard-task-meta">
                   <span>消息 {Number(card.message_count || 0)}</span>
                   <span>发言 {Number(card.speaker_count || 0)}</span>
-                  <span>发送 {card.send_time || "—"}</span>
+                  <span>发送批次 {card.send_time || "08:30"}</span>
                 </div>
                 <TaskActions
                   card={card}
@@ -392,7 +591,12 @@ export default function Dashboard() {
                   senderOk={health.data?.checks?.wechat_sender?.ok ?? false}
                   senderDetail={senderDetail}
                   onGenerate={() => handleGenerate(card)}
+                  onResolvePrompt={() => setPromptRetryCard(card)}
                   onSend={() => handleSend(card)}
+                  onResolve={() => {
+                    setManualResolution("all_sent");
+                    setManualCard(card);
+                  }}
                 />
               </article>
             ))}
@@ -419,6 +623,34 @@ export default function Dashboard() {
         onConfirm={confirmSend}
         onCancel={() => sendingId === null && setSendCard(null)}
       />
+      <ConfirmDialog
+        open={Boolean(promptRetryCard)}
+        title="确认丢弃未知 Prompt 结果并重试"
+        description={promptRetryCard ? `「${promptRetryCard.group_name}」上一次 Codex GPT 调用已经提交，但超时后没有可恢复的最终 Prompt。确认后会解除暂停并发起一次新的文本生成，可能增加一次模型用量；不会发送微信或邮件。` : ""}
+        confirmLabel="确认并重新生成"
+        busy={generatingId !== null}
+        onConfirm={confirmPromptRetry}
+        onCancel={() => generatingId === null && setPromptRetryCard(null)}
+      />
+      <AnimatePresence>
+        {manualCard && (
+        <m.div className="ui-dialog-backdrop" role="presentation" onMouseDown={() => !manualBusy && setManualCard(null)} initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.18 }}>
+          <m.section ref={manualDialogRef} tabIndex={-1} className="ui-dialog dashboard-manual-dialog" role="dialog" aria-modal="true" aria-labelledby="manual-send-title" onMouseDown={(event) => event.stopPropagation()} initial={{ opacity: 0, scale: 0.985, y: 5 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.985, y: 4 }} transition={{ duration: 0.2, ease: MOTION_EASE }}>
+            <h2 id="manual-send-title">核对「{manualCard.group_name}」的发送结果</h2>
+            <p>请选择你已经在微信中实际完成的情况。这里仅更新任务状态和审计记录，不会再次发送任何内容。</p>
+            <fieldset>
+              <label><input type="radio" name="manual-resolution" checked={manualResolution === "all_sent"} onChange={() => setManualResolution("all_sent")} /><span><b>排行榜和图片均已发送</b><small>整单标记为已发送，不再自动重发。</small></span></label>
+              <label><input type="radio" name="manual-resolution" checked={manualResolution === "text_sent"} onChange={() => setManualResolution("text_sent")} /><span><b>只发送了排行榜文字</b><small>保留图片待发送，后续只会继续图片阶段。</small></span></label>
+              <label><input type="radio" name="manual-resolution" checked={manualResolution === "not_sent"} onChange={() => setManualResolution("not_sent")} /><span><b>两项都没有发送</b><small>清除未知提交检查点，恢复为可发送状态。</small></span></label>
+            </fieldset>
+            <div className="ui-dialog-actions">
+              <Button tone="secondary" onClick={() => setManualCard(null)} disabled={manualBusy}>取消</Button>
+              <Button tone="primary" onClick={confirmManualResolution} busy={manualBusy}>确认核对结果</Button>
+            </div>
+          </m.section>
+        </m.div>
+        )}
+      </AnimatePresence>
       <Toast message={msg} />
     </div>
   );

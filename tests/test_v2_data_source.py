@@ -10,7 +10,9 @@ from datetime import datetime
 
 import pytest
 
+from app.config.settings import Settings
 from app.data_sources.base import DataSourceStatus
+from app.data_sources.history_provider import _message as adapt_history_message
 from app.data_sources.wechat_data_analysis import WeChatDataAnalysisSource
 from app.providers.history.base import (
     FetchResult,
@@ -135,6 +137,20 @@ def test_fetch_message_id_fallback_to_hash():
     assert result.messages[0].message_id  # 非空（确定性 hash）
 
 
+def test_history_provider_adapter_preserves_sender_name_provenance():
+    message = adapt_history_message(
+        _raw(
+            sender_name="联系人解析名",
+            upstream_sender_name="消息当时显示名",
+            sender_name_source="upstream_sender_name",
+        )
+    )
+
+    assert message.sender_name == "联系人解析名"
+    assert message.upstream_sender_name == "消息当时显示名"
+    assert message.sender_name_source == "upstream_sender_name"
+
+
 # ---------- 错误类型 ----------
 
 
@@ -179,3 +195,87 @@ def test_fetch_unavailable_maps_to_wechat_data_unavailable():
     result = _make_source(fake).fetch_messages("g1@chatroom", datetime(2026, 8, 17), datetime(2026, 8, 17))
     assert result.status == DataSourceStatus.READ_FAILED
     assert result.error_type == WECHAT_DATA_UNAVAILABLE
+
+
+def test_mcp_read_failure_can_switch_to_complete_export_without_mixing(tmp_path):
+    fake = FakeProvider()
+    fake._mcp_client = object()
+    fake.export_dir = tmp_path
+    fake.fetch = FetchResult(
+        "fake",
+        "g1@chatroom",
+        [],
+        ProviderStatus.READ_FAILED,
+        "MCP timeout",
+    )
+    export_message = _raw(source="export", source_message_id="export-1")
+    fake._fetch_messages_export = lambda group_id, start, end: FetchResult(
+        "fake",
+        group_id,
+        [export_message],
+        ProviderStatus.OK,
+        "export ok",
+    )
+    source = WeChatDataAnalysisSource(
+        settings=Settings(
+            _env_file=None,
+            wechat_runtime_export_fallback_enabled=True,
+        ),
+        provider=fake,
+    )
+
+    result = source.fetch_messages(
+        "g1@chatroom",
+        datetime(2026, 8, 17),
+        datetime(2026, 8, 18),
+    )
+
+    assert result.status == DataSourceStatus.OK
+    assert [message.message_id for message in result.messages] == ["export-1"]
+    assert result.meta["fallback_used"] is True
+    assert result.meta["provider_chain"] == [
+        "wechat_data_analysis_mcp",
+        "wechat_data_analysis_export",
+    ]
+    assert result.meta["primary_error"] == "MCP timeout"
+
+
+def test_mcp_read_failure_accepts_complete_empty_export_as_authoritative(tmp_path):
+    fake = FakeProvider()
+    fake._mcp_client = object()
+    fake.export_dir = tmp_path
+    fake.fetch = FetchResult(
+        "fake",
+        "g1@chatroom",
+        [],
+        ProviderStatus.READ_FAILED,
+        "MCP timeout",
+    )
+    fake._fetch_messages_export = lambda group_id, start, end: FetchResult(
+        "fake",
+        group_id,
+        [],
+        ProviderStatus.EMPTY_RESULT,
+        "export complete but empty",
+    )
+    source = WeChatDataAnalysisSource(
+        settings=Settings(
+            _env_file=None,
+            wechat_runtime_export_fallback_enabled=True,
+        ),
+        provider=fake,
+    )
+
+    result = source.fetch_messages(
+        "g1@chatroom",
+        datetime(2026, 8, 17),
+        datetime(2026, 8, 18),
+    )
+
+    assert result.status == DataSourceStatus.EMPTY_RESULT
+    assert result.messages == []
+    assert result.meta["fallback_used"] is True
+    assert result.meta["provider_chain"] == [
+        "wechat_data_analysis_mcp",
+        "wechat_data_analysis_export",
+    ]

@@ -65,6 +65,8 @@ class V2Message:
     timestamp: datetime
     message_type: str = "text"
     content: str = ""
+    upstream_sender_name: str = ""
+    sender_name_source: str = ""
     raw: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
@@ -77,6 +79,8 @@ class V2Message:
             "timestamp": self.timestamp.isoformat(),
             "message_type": self.message_type,
             "content": self.content,
+            "upstream_sender_name": self.upstream_sender_name,
+            "sender_name_source": self.sender_name_source,
         }
 
 

@@ -23,11 +23,15 @@ class PromptInput:
     template: str = "default"
     group_id: str = ""
     run_date: str = ""
-    image_theme: str = "random_preset"
+    message_snapshot_sha256: str = ""
+    speaker_fingerprint: str = ""
+    visible_group_name: str = ""
+    image_theme: str = "ai_free"
     image_theme_custom: str = ""
     template_override: str = ""
     previous_theme_signature: str = ""
     persisted_theme_meta: dict[str, Any] | None = None
+    persisted_topic_selection: dict[str, Any] | None = None
     recent_layout_history: tuple[dict[str, Any], ...] = ()
 
 

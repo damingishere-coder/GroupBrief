@@ -1,11 +1,14 @@
 """P7 测试：Scheduler 配置与任务函数。"""
 
 from datetime import datetime, time
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
+
+import pytest
 
 from app.scheduler.manager import (
     _parse_generate_time,
-    _schedule_startup_catchup,
+    _schedule_startup_recovery,
     get_scheduler,
     start_scheduler,
     stop_scheduler,
@@ -20,14 +23,19 @@ def test_scheduler_jobs_configured():
     from app.config.settings import Settings
 
     # 这里只验证 Cron 注册；禁止启动补偿在测试后台触发真实生成链路。
-    settings = Settings(_env_file=None, schedule_startup_catchup_enabled=False)
+    settings = Settings(
+        _env_file=None,
+        reliability_watchdog_enabled=False,
+    )
     start_scheduler(settings)
     scheduler = get_scheduler()
     assert scheduler is not None
     jobs = scheduler.get_jobs()
     ids = [j.id for j in jobs]
     assert "daily_v2_generate_email" in ids
-    assert "send_wechat_due" in ids
+    assert "daily_wechat_send_batch" in ids
+    assert "reliability_watchdog" not in ids
+    assert len(jobs) == 2
     assert "generate_daily" not in ids
     assert "send_daily_email" not in ids
     for job in jobs:
@@ -36,11 +44,34 @@ def test_scheduler_jobs_configured():
             fields = {field.name: str(field) for field in job.trigger.fields}
             assert fields["hour"] == "0"
             assert fields["minute"] == "15"
-        if job.id == "send_wechat_due":
-            assert job.name == "SendWechatDue"
+        if job.id == "daily_wechat_send_batch":
+            assert job.name == "DailyWechatSendBatch"
+            fields = {field.name: str(field) for field in job.trigger.fields}
+            assert fields["hour"] == "8"
+            assert fields["minute"] == "30"
+        assert job.trigger.__class__.__name__ == "CronTrigger"
     assert start_scheduler(settings) is scheduler
     stop_scheduler()
     assert get_scheduler() is None
+
+
+def test_scheduler_registers_only_one_startup_recovery_job():
+    from app.config.settings import Settings
+
+    settings = Settings(
+        _env_file=None,
+        reliability_watchdog_enabled=True,
+        reliability_watchdog_interval_minutes=7,
+    )
+    start_scheduler(settings)
+    scheduler = get_scheduler()
+    assert scheduler is not None
+    jobs = {job.id: job for job in scheduler.get_jobs()}
+    assert "reliability_watchdog" not in jobs
+    assert "startup_recovery" in jobs
+    assert jobs["startup_recovery"].name == "StartupRecovery"
+    assert jobs["startup_recovery"].trigger.__class__.__name__ == "DateTrigger"
+    stop_scheduler()
 
 
 def test_generate_job_runs_every_day():
@@ -57,6 +88,18 @@ def test_generate_job_runs_every_day():
     repo.init_db(settings)  # 该测试不依赖其他测试文件的副作用，独立初始化
     result = run_generate_job()
     assert result["status"] in ("success", "partial", "failed")
+
+
+def test_scheduler_owner_controls_fastapi_registration(monkeypatch):
+    from app.config.settings import Settings
+    from app.main import _should_start_scheduler
+
+    monkeypatch.delenv("GROUPBRIEF_NO_SCHEDULER", raising=False)
+    assert _should_start_scheduler(Settings(_env_file=None, scheduler_owner="fastapi")) is True
+    assert _should_start_scheduler(Settings(_env_file=None, scheduler_owner="external")) is False
+    assert _should_start_scheduler(Settings(_env_file=None, scheduler_owner="disabled")) is False
+    monkeypatch.setenv("GROUPBRIEF_NO_SCHEDULER", "1")
+    assert _should_start_scheduler(Settings(_env_file=None, scheduler_owner="fastapi")) is False
 
 
 def test_daily_v2_job_persists_generation_and_email_idempotency(tmp_path, monkeypatch):
@@ -97,11 +140,16 @@ def test_daily_v2_job_persists_generation_and_email_idempotency(tmp_path, monkey
     assert state["email_completed_at"]
 
 
-def test_daily_v2_job_resumes_interrupted_generation_without_email(tmp_path, monkeypatch):
+def test_completed_legacy_day_lazily_adds_manifest_without_regeneration(
+    tmp_path,
+    monkeypatch,
+):
     from app.config.settings import Settings
+    from app.db.models import Group
     from app.scheduler import daily_v2_job as daily
+    from app.scheduler.period import PeriodResolver
 
-    settings = Settings(_env_file=None, email_enabled=True, email_smtp_host="smtp.example.com")
+    settings = Settings(_env_file=None, email_enabled=False, email_smtp_host="")
     real_state_class = daily.DailyScheduleState
 
     class TempState(real_state_class):
@@ -109,7 +157,73 @@ def test_daily_v2_job_resumes_interrupted_generation_without_email(tmp_path, mon
             super().__init__(tmp_path)
 
     state = TempState(tmp_path)
-    state.update("2026-08-21", generation_started_at="2026-08-21T00:15:00+08:00")
+    state.update(
+        "2026-08-25",
+        generation_started_at="2026-08-25T00:15:00+08:00",
+        generation_completed_at="2026-08-25T00:20:00+08:00",
+        generation_status="success",
+        generation_results=[{"group_name": "测试群", "status": "ready_to_send"}],
+        email_started_at="2026-08-25T00:21:00+08:00",
+        email_completed_at="2026-08-25T00:21:01+08:00",
+        email_status="skipped_disabled",
+    )
+
+    class CompletedPipeline:
+        def __init__(self, settings):
+            self.period_resolver = PeriodResolver()
+
+        def _load_groups(self):
+            return [
+                Group(
+                    id=7,
+                    display_name="测试群",
+                    wechat_group_id="test@chatroom",
+                    wechat_group_name="测试群",
+                    image_enabled=False,
+                    wechat_send_enabled=False,
+                )
+            ]
+
+        def generate_all(self, **_kwargs):
+            pytest.fail("已完成旧任务只能补清单，不得重新生成")
+
+    monkeypatch.setattr(daily, "DailyScheduleState", TempState)
+    monkeypatch.setattr(daily, "DailyPipeline", CompletedPipeline)
+    monkeypatch.setattr(daily.repo, "init_db", lambda settings: None)
+    monkeypatch.setattr(daily.repo, "apply_db_settings", lambda settings: [])
+
+    result = daily.run_daily_v2_job("2026-08-25", settings=settings)
+    saved = state.load("2026-08-25")
+
+    assert result["status"] == "already_completed"
+    assert saved["manifest_source"] == "legacy_current_config_compat"
+    assert saved["expected_group_count"] == 1
+    assert saved["expected_groups"][0]["group_id"] == 7
+
+
+def test_daily_v2_job_resumes_interrupted_generation_without_email(tmp_path, monkeypatch):
+    from app.config.settings import Settings
+    from app.scheduler import daily_v2_job as daily
+
+    settings = Settings(
+        _env_file=None,
+        email_enabled=True,
+        email_smtp_host="smtp.example.com",
+        email_recipient="to@example.com",
+        email_from="from@example.com",
+    )
+    real_state_class = daily.DailyScheduleState
+
+    class TempState(real_state_class):
+        def __init__(self, _output_root):
+            super().__init__(tmp_path)
+
+    state = TempState(tmp_path)
+    state.update(
+        "2026-08-21",
+        generation_started_at="2026-08-21T00:15:00+08:00",
+        generation_status="running",
+    )
     calls = []
 
     class FakePipeline:
@@ -169,40 +283,638 @@ def test_daily_v2_job_exception_keeps_generation_incomplete_for_startup_resume(t
     assert state["generation_hold"] is True
 
 
-def test_startup_catchup_is_added_only_when_today_is_incomplete(monkeypatch):
+def test_retryable_generation_result_does_not_seal_batch(tmp_path, monkeypatch):
     from app.config.settings import Settings
-    from app.scheduler import manager
+    from app.scheduler import daily_v2_job as daily
 
-    settings = Settings(_env_file=None, schedule_startup_catchup_enabled=True)
+    settings = Settings(_env_file=None, email_enabled=False, email_smtp_host="")
+    real_state_class = daily.DailyScheduleState
+
+    class TempState(real_state_class):
+        def __init__(self, _output_root):
+            super().__init__(tmp_path)
+
+    calls = []
+
+    class RecoveringPipeline:
+        def __init__(self, settings):
+            pass
+
+        def generate_all(self, run_date, acquire_lock=True):
+            calls.append(run_date)
+            if len(calls) == 1:
+                return [
+                    {
+                        "group_name": "群A",
+                        "status": "failed",
+                        "error_type": "MESSAGE_FETCH_FAILED",
+                    }
+                ]
+            return [{"group_name": "群A", "status": "ready_to_send"}]
+
+    monkeypatch.setattr(daily, "DailyScheduleState", TempState)
+    monkeypatch.setattr(daily, "DailyPipeline", RecoveringPipeline)
+    monkeypatch.setattr(daily.repo, "init_db", lambda settings: None)
+    monkeypatch.setattr(daily.repo, "apply_db_settings", lambda settings: [])
+
+    first = daily.run_daily_v2_job("2026-08-27", settings=settings, skip_email=True)
+    after_first = TempState(tmp_path).load("2026-08-27")
+    second = daily.run_daily_v2_job("2026-08-27", settings=settings, skip_email=True)
+    after_second = TempState(tmp_path).load("2026-08-27")
+
+    assert first["status"] == "failed"
+    assert after_first["generation_invocation_completed_at"]
+    assert "generation_completed_at" not in after_first
+    assert after_first["generation_hold"] is True
+    assert second["status"] == "success"
+    assert after_second["generation_completed_at"]
+    assert calls == ["2026-08-27", "2026-08-27"]
+
+
+def test_daily_v2_job_reports_busy_as_not_executed(tmp_path, monkeypatch):
+    from app.config.settings import Settings
+    from app.scheduler import daily_v2_job as daily
+    from app.services.generation_runtime import GenerationBusyError
+
+    class BusyContext:
+        def __enter__(self):
+            raise GenerationBusyError("已有实例")
+
+        def __exit__(self, *_args):
+            return False
+
+    real_state_class = daily.DailyScheduleState
+
+    class TempState(real_state_class):
+        def __init__(self, _output_root):
+            super().__init__(tmp_path)
+
+    monkeypatch.setattr(daily, "_daily_mutex", lambda: BusyContext())
+    monkeypatch.setattr(daily, "DailyScheduleState", TempState)
+
+    result = daily.run_daily_v2_job(
+        "2026-08-25",
+        settings=Settings(_env_file=None),
+        skip_email=True,
+    )
+
+    assert result["status"] == "already_running"
+    assert result["outcome_status"] == "already_running"
+    assert result["exit_code"] == 4
+    state = TempState(tmp_path).load("2026-08-25")
+    assert state["owner_busy_count"] == 1
+    assert state["owner_busy_at"]
+    assert state["next_retry_at"]
+    assert state["last_invocation_status"] == "already_running"
+
+
+def test_partial_generation_stays_partial_even_when_email_succeeds(tmp_path, monkeypatch):
+    from app.config.settings import Settings
+    from app.scheduler import daily_v2_job as daily
+
+    settings = Settings(
+        _env_file=None,
+        email_enabled=True,
+        email_smtp_host="smtp.example.com",
+        email_recipient="to@example.com",
+        email_from="from@example.com",
+        email_send_partial_report=True,
+    )
+    real_state_class = daily.DailyScheduleState
+
+    class TempState(real_state_class):
+        def __init__(self, _output_root):
+            super().__init__(tmp_path)
+
+    class PartialPipeline:
+        def __init__(self, settings):
+            pass
+
+        def generate_all(self, run_date, acquire_lock=True):
+            return [
+                {"group_name": "群A", "status": "ready_to_send"},
+                {"group_name": "群B", "status": "failed"},
+            ]
+
+    monkeypatch.setattr(daily, "DailyScheduleState", TempState)
+    monkeypatch.setattr(daily, "DailyPipeline", PartialPipeline)
+    monkeypatch.setattr(daily.repo, "init_db", lambda settings: None)
+    monkeypatch.setattr(daily.repo, "apply_db_settings", lambda settings: [])
+    monkeypatch.setattr(
+        daily.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout="sent", stderr=""),
+    )
+
+    result = daily.run_daily_v2_job("2026-08-25", settings=settings)
+
+    assert result["status"] == "partial"
+    assert result["outcome_status"] == "partial"
+    assert result["exit_code"] == 2
+    assert result["email_status"] == "sent"
+
+
+def test_completed_partial_run_reconciles_thread_image_and_emails_only_recovered_group(
+    tmp_path, monkeypatch
+):
+    from app.config.settings import Settings
+    from app.scheduler import daily_v2_job as daily
+    from app.v2.constants import IMAGE_GENERATION_FAILED
+
+    settings = Settings(
+        _env_file=None,
+        email_enabled=True,
+        email_smtp_host="smtp.example.com",
+        email_recipient="to@example.com",
+        email_from="from@example.com",
+    )
+    real_state_class = daily.DailyScheduleState
+
+    class TempState(real_state_class):
+        def __init__(self, _output_root):
+            super().__init__(tmp_path)
+
+    run_date = "2026-08-25"
+    state = TempState(tmp_path)
+    state.update(
+        run_date,
+        generation_started_at="2026-08-25T00:15:00+08:00",
+        generation_completed_at="2026-08-25T00:20:00+08:00",
+        generation_status="partial",
+        generation_results=[
+            {"group_name": "群A", "status": "ready_to_send"},
+            {
+                "group_name": "群B",
+                "status": "failed",
+                "error_type": IMAGE_GENERATION_FAILED,
+                "detail": "原始失败必须保留",
+            },
+        ],
+        email_started_at="2026-08-25T00:21:00+08:00",
+        email_completed_at="2026-08-25T00:22:00+08:00",
+        email_status="sent",
+        email_detail="群A 已发送，群B 当时没有图片且不在发送集合",
+    )
+    prompt_path = tmp_path / "群B" / run_date / "image_prompt.txt"
+    prompt_path.parent.mkdir(parents=True)
+    prompt_path.write_text("test prompt", encoding="utf-8")
+    generation_calls = []
+    commands = []
+
+    class FakeGenerator:
+        def can_reconcile_without_generation(self, candidate_prompt, job_id):
+            assert candidate_prompt == prompt_path
+            assert job_id == "recovery_job_123"
+            return True
+
+    class FakeStore:
+        def load_run(self, group_name, candidate_date):
+            assert (group_name, candidate_date) == ("群B", run_date)
+            return {"image_job": {"job_id": "recovery_job_123"}}
+
+        def prompt_path(self, group_name, candidate_date):
+            assert (group_name, candidate_date) == ("群B", run_date)
+            return prompt_path
+
+    class RecoveryPipeline:
+        def __init__(self, settings):
+            self.image_generator = FakeGenerator()
+            self.store = FakeStore()
+
+        def _load_groups(self):
+            return [SimpleNamespace(id=2, display_name="群B", wechat_group_name="")]
+
+        def generate_all(self, run_date, group_ids=None, force=False, acquire_lock=True):
+            generation_calls.append((run_date, group_ids, force, acquire_lock))
+            return [
+                {
+                    "group_name": "群B",
+                    "status": "ready_to_send",
+                    "receipt_source": "codex_thread_scan",
+                    "recovery_status": "recovered_from_result_unknown",
+                    "codex_thread_id": "thread-12345678",
+                }
+            ]
+
+    def fake_subprocess_run(command, **_kwargs):
+        commands.append(command)
+        return SimpleNamespace(returncode=0, stdout="sent", stderr="")
+
+    monkeypatch.setattr(daily, "DailyScheduleState", TempState)
+    monkeypatch.setattr(daily, "DailyPipeline", RecoveryPipeline)
+    monkeypatch.setattr(daily.repo, "init_db", lambda settings: None)
+    monkeypatch.setattr(daily.repo, "apply_db_settings", lambda settings: [])
+    monkeypatch.setattr(daily.subprocess, "run", fake_subprocess_run)
+
+    result = daily.run_daily_v2_job(run_date, settings=settings)
+    saved = state.load(run_date)
+
+    assert result["status"] == "success"
+    assert result["email_status"] == "sent"
+    assert generation_calls == [(run_date, [2], False, False)]
+    assert commands and commands[0][-2:] == ["--group", "群B"]
+    assert commands[0].count("--group") == 1
+    assert saved["generation_original_status"] == "partial"
+    assert saved["generation_history"][-1]["results"][1]["detail"] == "原始失败必须保留"
+    assert saved["generation_results"][1]["receipt_source"] == "codex_thread_scan"
+    assert saved["email_history"][-1]["status"] == "sent"
+    assert saved["email_recovery_required"] is False
+    assert saved["email_recovered_at"]
+
+
+def test_invalid_email_config_fails_before_subprocess(tmp_path, monkeypatch):
+    from app.config.settings import Settings
+    from app.scheduler import daily_v2_job as daily
+
+    settings = Settings(
+        _env_file=None,
+        email_enabled=True,
+        email_smtp_host="smtp.example.com",
+        email_recipient="",
+        email_from="from@example.com",
+    )
+    real_state_class = daily.DailyScheduleState
+
+    class TempState(real_state_class):
+        def __init__(self, _output_root):
+            super().__init__(tmp_path)
+
+    class SuccessPipeline:
+        def __init__(self, settings):
+            pass
+
+        def generate_all(self, run_date, acquire_lock=True):
+            return [{"group_name": "群A", "status": "ready_to_send"}]
+
+    monkeypatch.setattr(daily, "DailyScheduleState", TempState)
+    monkeypatch.setattr(daily, "DailyPipeline", SuccessPipeline)
+    monkeypatch.setattr(daily.repo, "init_db", lambda settings: None)
+    monkeypatch.setattr(daily.repo, "apply_db_settings", lambda settings: [])
+    monkeypatch.setattr(
+        daily.subprocess,
+        "run",
+        lambda *args, **kwargs: pytest.fail("配置无效时不得启动邮件子进程"),
+    )
+
+    result = daily.run_daily_v2_job("2026-08-25", settings=settings)
+
+    assert result["status"] == "partial"
+    assert result["error_type"] == "EMAIL_PROVIDER_CONFIG_INVALID"
+    assert result["email_status"] == "failed_config"
+
+
+def test_no_groups_is_not_run_and_never_calls_email(tmp_path, monkeypatch):
+    from app.config.settings import Settings
+    from app.scheduler import daily_v2_job as daily
+
+    settings = Settings(
+        _env_file=None,
+        email_enabled=True,
+        email_smtp_host="smtp.example.com",
+        email_recipient="to@example.com",
+        email_from="from@example.com",
+    )
+    real_state_class = daily.DailyScheduleState
+
+    class TempState(real_state_class):
+        def __init__(self, _output_root):
+            super().__init__(tmp_path)
+
+    class EmptyPipeline:
+        def __init__(self, settings):
+            pass
+
+        def generate_all(self, run_date, acquire_lock=True):
+            return [{"status": "no_groups", "reason": "无启用群"}]
+
+    monkeypatch.setattr(daily, "DailyScheduleState", TempState)
+    monkeypatch.setattr(daily, "DailyPipeline", EmptyPipeline)
+    monkeypatch.setattr(daily.repo, "init_db", lambda settings: None)
+    monkeypatch.setattr(daily.repo, "apply_db_settings", lambda settings: [])
+    monkeypatch.setattr(
+        daily.subprocess,
+        "run",
+        lambda *args, **kwargs: pytest.fail("no_groups 不得调用邮件"),
+    )
+
+    result = daily.run_daily_v2_job("2026-08-25", settings=settings)
+
+    assert result["status"] == "not_run"
+    assert result["exit_code"] == 5
+    assert result["email_status"] == "skipped_generation_not_successful"
+
+
+@pytest.mark.parametrize(
+    ("results", "expected"),
+    [
+        ([{"status": "ready_to_send"}], "success"),
+        ([{"status": "no_groups"}], "not_run"),
+        ([{"status": "blocked"}], "blocked"),
+        ([{"status": "held"}], "blocked"),
+        ([{"status": "unexpected"}], "failed"),
+    ],
+)
+def test_generation_status_fails_closed(results, expected):
+    from app.scheduler.daily_v2_job import _generation_status
+
+    assert _generation_status(results) == expected
+
+
+def test_apscheduler_daily_wrapper_raises_for_partial(monkeypatch):
+    from app.scheduler import manager
+    from app.scheduler.outcome import SchedulerOutcomeError
+
+    monkeypatch.setattr(
+        manager,
+        "run_daily_v2_job",
+        lambda *args, **kwargs: {"status": "partial", "outcome_status": "partial", "exit_code": 2},
+    )
+
+    with pytest.raises(SchedulerOutcomeError):
+        manager.run_scheduled_daily_v2_job("2026-08-25")
+
+
+def test_send_due_scheduler_allows_empty_scan_but_rejects_failure(monkeypatch):
+    from app.scheduler import send_job
+    from app.scheduler.outcome import SchedulerOutcomeError
+
+    class EmptyPipeline:
+        def __init__(self, settings):
+            pass
+
+        def send_due(self):
+            return []
+
+    monkeypatch.setattr(send_job, "DailyPipeline", EmptyPipeline)
+    assert send_job.run_send_due_job()["outcome_status"] == "not_run"
+
+    class FailedPipeline(EmptyPipeline):
+        def send_due(self):
+            return [{"group_name": "群A", "status": "failed"}]
+
+    monkeypatch.setattr(send_job, "DailyPipeline", FailedPipeline)
+    with pytest.raises(SchedulerOutcomeError):
+        send_job.run_send_due_job()
+
+    class BrokenPipeline(EmptyPipeline):
+        def send_due(self):
+            raise RuntimeError("simulated send scan failure")
+
+    monkeypatch.setattr(send_job, "DailyPipeline", BrokenPipeline)
+    with pytest.raises(RuntimeError, match="simulated send scan failure"):
+        send_job.run_send_due_job()
+
+
+def test_corrupt_scheduler_state_blocks_generation_email_and_overwrite(tmp_path, monkeypatch):
+    import pytest
+
+    from app.config.settings import Settings
+    from app.scheduler import daily_v2_job as daily
+
+    settings = Settings(_env_file=None, email_enabled=True, email_smtp_host="smtp.example.com")
+    real_state_class = daily.DailyScheduleState
+
+    class TempState(real_state_class):
+        def __init__(self, _output_root):
+            super().__init__(tmp_path)
+
+    state = TempState(tmp_path)
+    path = state.path("2026-08-25")
+    path.parent.mkdir(parents=True)
+    original = b"{broken"
+    path.write_bytes(original)
+
+    monkeypatch.setattr(daily, "DailyScheduleState", TempState)
+    monkeypatch.setattr(
+        daily,
+        "DailyPipeline",
+        lambda settings: pytest.fail("损坏调度状态不得启动 Pipeline"),
+    )
+    monkeypatch.setattr(
+        daily.repo,
+        "init_db",
+        lambda settings: pytest.fail("损坏调度状态应在数据库初始化前阻断"),
+    )
+    monkeypatch.setattr(
+        daily.subprocess,
+        "run",
+        lambda *args, **kwargs: pytest.fail("损坏调度状态不得启动邮件子进程"),
+    )
+
+    result = daily.run_daily_v2_job("2026-08-25", settings=settings)
+
+    assert result["status"] == "blocked"
+    assert result["error_type"] == "SCHEDULER_STATE_CORRUPT"
+    with pytest.raises(daily.ScheduleStateCorruptionError):
+        state.update("2026-08-25", generation_status="running")
+    assert path.read_bytes() == original
+
+
+def test_scheduler_schema_corruption_is_not_treated_as_new_run(tmp_path, monkeypatch):
+    from app.config.settings import Settings
+    from app.scheduler import daily_v2_job as daily
+
+    settings = Settings(_env_file=None, email_enabled=False, email_smtp_host="")
+    real_state_class = daily.DailyScheduleState
+
+    class TempState(real_state_class):
+        def __init__(self, _output_root):
+            super().__init__(tmp_path)
+
+    state = TempState(tmp_path)
+    path = state.path("2026-08-25")
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        '{"run_date":"2026-08-25","generation_started_at":"2026-08-25T00:15:00+08:00",'
+        '"generation_status":"running","generation_results":"not-a-list"}',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(daily, "DailyScheduleState", TempState)
+
+    result = daily.run_daily_v2_job("2026-08-25", settings=settings)
+
+    assert result["status"] == "blocked"
+    assert result["error_type"] == "SCHEDULER_STATE_CORRUPT"
+
+
+def test_email_started_without_completion_remains_result_unknown(tmp_path, monkeypatch):
+    from app.config.settings import Settings
+    from app.scheduler import daily_v2_job as daily
+
+    settings = Settings(
+        _env_file=None,
+        email_enabled=True,
+        email_smtp_host="smtp.example.com",
+        email_recipient="to@example.com",
+        email_from="from@example.com",
+    )
+    real_state_class = daily.DailyScheduleState
+
+    class TempState(real_state_class):
+        def __init__(self, _output_root):
+            super().__init__(tmp_path)
+
+    state = TempState(tmp_path)
+    state.update(
+        "2026-08-25",
+        generation_started_at="2026-08-25T00:15:00+08:00",
+        generation_completed_at="2026-08-25T00:20:00+08:00",
+        generation_status="success",
+        generation_results=[],
+        email_started_at="2026-08-25T08:30:00+08:00",
+        email_status="running",
+    )
+    monkeypatch.setattr(daily, "DailyScheduleState", TempState)
+    monkeypatch.setattr(daily.repo, "init_db", lambda settings: None)
+    monkeypatch.setattr(daily.repo, "apply_db_settings", lambda settings: [])
+    monkeypatch.setattr(
+        daily.subprocess,
+        "run",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("结果未知时不得重发邮件")),
+    )
+
+    result = daily.run_daily_v2_job("2026-08-25", settings=settings)
+    saved = state.load("2026-08-25")
+
+    assert result["status"] == "blocked"
+    assert result["error_type"] == "EMAIL_RESULT_UNKNOWN"
+    assert saved["email_status"] == "unknown"
+    assert saved["email_hold"] is True
+
+
+def test_startup_recovery_is_single_date_trigger():
+    from app.config.settings import Settings
+
+    settings = Settings(_env_file=None, reliability_watchdog_enabled=True)
     captured = []
 
     class FakeScheduler:
         def add_job(self, *args, **kwargs):
             captured.append((args, kwargs))
 
-    class IncompleteState:
-        def __init__(self, output_root):
-            pass
-
-        def load(self, run_date):
-            return {"run_date": run_date}
-
-    monkeypatch.setattr(manager, "DailyScheduleState", IncompleteState)
     before = datetime(2026, 8, 21, 0, 14, 59, tzinfo=ZoneInfo("Asia/Shanghai"))
-    assert _schedule_startup_catchup(FakeScheduler(), settings, now=before) is False
-    assert captured == []
-
-    now = datetime(2026, 8, 21, 0, 15, tzinfo=ZoneInfo("Asia/Shanghai"))
-
-    added = _schedule_startup_catchup(FakeScheduler(), settings, now=now)
+    added = _schedule_startup_recovery(FakeScheduler(), settings, now=before)
 
     assert added is True
-    assert captured[0][1]["id"] == "daily_v2_startup_catchup"
-    assert captured[0][1]["kwargs"] == {"skip_email": True}
+    assert captured[0][1]["id"] == "startup_recovery"
+    assert captured[0][1]["name"] == "StartupRecovery"
+    assert captured[0][1]["trigger"].__class__.__name__ == "DateTrigger"
 
-    class CompletedState(IncompleteState):
-        def load(self, run_date):
-            return {"run_date": run_date, "generation_completed_at": "done"}
+    disabled = Settings(_env_file=None, reliability_watchdog_enabled=False)
+    assert _schedule_startup_recovery(FakeScheduler(), disabled, now=before) is False
+    assert len(captured) == 1
 
-    monkeypatch.setattr(manager, "DailyScheduleState", CompletedState)
-    assert _schedule_startup_catchup(FakeScheduler(), settings, now=now) is False
+
+def test_on_demand_ready_send_is_deduplicated_and_unknown_is_not_rescheduled(tmp_path):
+    from app.config.settings import Settings
+    from app.scheduler.manager import _schedule_on_demand_jobs
+    from app.v2.constants import READY_TO_SEND
+    from app.v2.run_store import RunStore
+
+    settings = Settings(_env_file=None, output_root_override=str(tmp_path / "output"))
+    store = RunStore(settings.output_dir)
+    run_date = "2026-08-29"
+    now = datetime(2026, 8, 29, 8, 40, tzinfo=ZoneInfo("Asia/Shanghai"))
+    store.save_run(
+        "群一",
+        run_date,
+        {
+            "group_id": "1",
+            "status": READY_TO_SEND,
+            "wechat_send_enabled": True,
+            "send_hold": False,
+        },
+    )
+
+    class FakeScheduler:
+        def __init__(self):
+            self.jobs = {}
+
+        def add_job(self, func, **kwargs):
+            self.jobs[kwargs["id"]] = (func, kwargs)
+
+    scheduler = FakeScheduler()
+    first = _schedule_on_demand_jobs(
+        scheduler,
+        settings,
+        now=now,
+        run_dates=[run_date],
+    )
+    second = _schedule_on_demand_jobs(
+        scheduler,
+        settings,
+        now=now,
+        run_dates=[run_date],
+    )
+
+    assert first == ["daily_send_once_20260829"]
+    assert second == first
+    assert list(scheduler.jobs) == ["daily_send_once_20260829"]
+    assert scheduler.jobs[first[0]][1]["trigger"].__class__.__name__ == "DateTrigger"
+
+    store.update(
+        "群一",
+        run_date,
+        send_hold=True,
+        send_state="unknown",
+        send_hold_reason="SEND_RESULT_UNKNOWN",
+    )
+    held_scheduler = FakeScheduler()
+    assert _schedule_on_demand_jobs(
+        held_scheduler,
+        settings,
+        now=now,
+        run_dates=[run_date],
+    ) == []
+    assert held_scheduler.jobs == {}
+
+
+def test_on_demand_rebuilds_only_persisted_generation_and_send_retries(tmp_path):
+    from app.config.settings import Settings
+    from app.scheduler.daily_v2_job import DailyScheduleState
+    from app.scheduler.manager import _schedule_on_demand_jobs
+    from app.v2.constants import READY_TO_SEND
+    from app.v2.run_store import RunStore
+
+    settings = Settings(_env_file=None, output_root_override=str(tmp_path / "output"))
+    state = DailyScheduleState(settings.output_dir)
+    store = RunStore(settings.output_dir)
+    now = datetime(2026, 8, 29, 8, 40, tzinfo=ZoneInfo("Asia/Shanghai"))
+    state.update(
+        "2026-08-28",
+        generation_started_at="2026-08-28T00:15:00+08:00",
+        generation_status="retry_pending",
+        next_retry_at="2026-08-29T08:45:00+08:00",
+    )
+    store.save_run(
+        "群二",
+        "2026-08-29",
+        {
+            "group_id": "2",
+            "status": READY_TO_SEND,
+            "wechat_send_enabled": True,
+            "send_next_retry_at": "2026-08-29T08:46:00+08:00",
+        },
+    )
+
+    class FakeScheduler:
+        def __init__(self):
+            self.jobs = {}
+
+        def add_job(self, func, **kwargs):
+            self.jobs[kwargs["id"]] = (func, kwargs)
+
+    scheduler = FakeScheduler()
+    scheduled = _schedule_on_demand_jobs(
+        scheduler,
+        settings,
+        now=now,
+        run_dates=["2026-08-28", "2026-08-29"],
+        include_newly_ready_send=False,
+    )
+
+    assert scheduled == ["daily_v2_retry_20260828", "daily_send_once_20260829"]
+    generation_at = scheduler.jobs[scheduled[0]][1]["trigger"].run_date
+    send_at = scheduler.jobs[scheduled[1]][1]["trigger"].run_date
+    assert generation_at.isoformat() == "2026-08-29T08:45:00+08:00"
+    assert send_at.isoformat() == "2026-08-29T08:46:00+08:00"
