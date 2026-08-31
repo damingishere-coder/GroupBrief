@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
+from sqlalchemy.exc import SQLAlchemyError
 from sqlmodel import Session, select
 
 from app.ai.image_themes import (
@@ -96,6 +97,21 @@ class GroupImagePromptUpdate(BaseModel):
     image_theme: str
     image_theme_custom: str = ""
     expected_revision: str = ""
+
+
+class BatchImageThemeUpdate(BaseModel):
+    group_ids: list[int] = Field(min_length=1)
+    image_theme: str
+    image_theme_custom: str = ""
+
+    @field_validator("group_ids")
+    @classmethod
+    def validate_group_ids(cls, values: list[int]) -> list[int]:
+        if any(group_id <= 0 for group_id in values):
+            raise ValueError("群 ID 必须是正整数")
+        if len(set(values)) != len(values):
+            raise ValueError("群 ID 不能重复")
+        return values
 
 
 def _validate_group_theme(theme: object, custom: object = "") -> tuple[str, str]:
@@ -272,6 +288,71 @@ def create_group(
     group = Group(**values)
     group = repo.save_group(session, group)
     return {"id": group.id, "restored": False}
+
+
+@router.put("/batch/image-theme")
+def batch_update_group_image_theme(
+    payload: BatchImageThemeUpdate,
+    session: Session = Depends(repo.get_session),
+):
+    """按请求顺序独立保存群主题；单群失败不回滚已经成功的群。"""
+
+    theme, custom = _validate_group_theme(payload.image_theme, payload.image_theme_custom)
+    successes: list[dict] = []
+    failures: list[dict] = []
+
+    for group_id in payload.group_ids:
+        group = repo.get_group(session, group_id)
+        if group is None:
+            failures.append({
+                "group_id": group_id,
+                "code": "GROUP_NOT_FOUND",
+                "reason": "群不存在",
+            })
+            continue
+        if group.deleted_at is not None:
+            failures.append({
+                "group_id": group_id,
+                "code": "GROUP_DELETED",
+                "reason": "群已移入回收站",
+            })
+            continue
+
+        group_name = group.display_name or group.wechat_group_name or f"群 {group_id}"
+        try:
+            updated = repo.update_group_image_theme(
+                session,
+                group_id,
+                image_theme=theme,
+                image_theme_custom=custom,
+            )
+        except SQLAlchemyError:
+            session.rollback()
+            failures.append({
+                "group_id": group_id,
+                "code": "DATABASE_SAVE_FAILED",
+                "reason": "数据库保存失败，请重试",
+            })
+            continue
+        if not updated:
+            failures.append({
+                "group_id": group_id,
+                "code": "GROUP_DELETED",
+                "reason": "群已不存在或移入回收站",
+            })
+            continue
+        successes.append({
+            "group_id": group_id,
+            "group_name": group_name,
+        })
+
+    status = "success" if not failures else "partial" if successes else "failed"
+    return {
+        "status": status,
+        "requested_count": len(payload.group_ids),
+        "success": successes,
+        "failed": failures,
+    }
 
 
 @router.put("/{group_id}")

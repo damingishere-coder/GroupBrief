@@ -1,17 +1,16 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { FloppyDisk, Sparkle } from "@phosphor-icons/react";
+import { useEffect, useMemo, useState } from "react";
+import { CheckCircle, FloppyDisk, MagnifyingGlass, Sparkle, WarningCircle } from "@phosphor-icons/react";
 
 import {
-  getGroupImagePrompt,
-  GroupImagePromptConfig,
-  GroupV2,
-  ImageThemeOption,
+  batchUpdateGroupImageTheme,
+  type BatchImageThemeResponse,
+  type GroupV2,
+  type ImageThemeOption,
   resolveImageTheme,
-  updateGroup,
 } from "../../../api";
 import { Button, EmptyState, LoadingState } from "../../../components/common";
 import { ImageThemePicker } from "../../../components/ImageThemePicker";
-import { describeLoadError, renderGroupPreview } from "./model";
+import { describeApiError } from "./model";
 import type { ToastFn } from "./useAIImageCatalogs";
 
 interface ImageStylePanelProps {
@@ -20,10 +19,17 @@ interface ImageStylePanelProps {
   catalogLoading: boolean;
   groupsError: string;
   themesError: string;
-  globalDefaultPrompt: string;
-  defaultTemplateError: string;
   loadCatalogs: () => Promise<void>;
   toast: ToastFn;
+}
+
+function groupName(group: GroupV2): string {
+  return group.display_name || group.wechat_group_name || `群 ${group.id}`;
+}
+
+function themeLabel(group: GroupV2, themes: ImageThemeOption[]): string {
+  if (group.image_theme === "custom") return group.image_theme_custom || "自定义描述";
+  return themes.find((theme) => theme.key === group.image_theme)?.label || group.image_theme || "AI 自由发挥";
 }
 
 export function ImageStylePanel({
@@ -32,170 +38,174 @@ export function ImageStylePanel({
   catalogLoading,
   groupsError,
   themesError,
-  globalDefaultPrompt,
-  defaultTemplateError,
   loadCatalogs,
   toast,
 }: ImageStylePanelProps) {
-  const [defaultGroupId, setDefaultGroupId] = useState<number | null>(null);
-  const [defaultConfig, setDefaultConfig] = useState<GroupImagePromptConfig | null>(null);
-  const [defaultTheme, setDefaultTheme] = useState("ai_free");
-  const [defaultCustom, setDefaultCustom] = useState("");
-  const [defaultThemeText, setDefaultThemeText] = useState("");
-  const [defaultThemeError, setDefaultThemeError] = useState("");
-  const [defaultStyleTouched, setDefaultStyleTouched] = useState(false);
-  const defaultStyleTouchedRef = useRef(false);
-  const [defaultLoading, setDefaultLoading] = useState(false);
-  const [defaultSaving, setDefaultSaving] = useState(false);
-  const [defaultError, setDefaultError] = useState("");
-  const [defaultReloadVersion, setDefaultReloadVersion] = useState(0);
+  const [selectedIds, setSelectedIds] = useState<number[]>([]);
+  const [groupQuery, setGroupQuery] = useState("");
+  const [theme, setTheme] = useState("ai_free");
+  const [custom, setCustom] = useState("");
+  const [themeText, setThemeText] = useState("");
+  const [themeConfirmed, setThemeConfirmed] = useState(false);
+  const [themeError, setThemeError] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [result, setResult] = useState<BatchImageThemeResponse | null>(null);
 
   useEffect(() => {
-    setDefaultGroupId((current) => groups.some((group) => group.id === current)
-      ? current
-      : null);
+    const available = new Set(groups.map((group) => group.id));
+    setSelectedIds((current) => current.filter((groupId) => available.has(groupId)));
   }, [groups]);
 
-  useEffect(() => {
-    if (defaultGroupId === null) {
-      setDefaultConfig(null);
-      setDefaultError("");
-      return;
-    }
-    let cancelled = false;
-    setDefaultLoading(true);
-    setDefaultConfig(null);
-    setDefaultError("");
-    getGroupImagePrompt(defaultGroupId)
-      .then((config) => {
-        if (cancelled) return;
-        setDefaultConfig(config);
-        if (!defaultStyleTouchedRef.current) {
-          setDefaultTheme(config.image_theme || "ai_free");
-          const savedCustom = config.image_theme === "custom" ? config.image_theme_custom || "" : "";
-          setDefaultCustom(savedCustom);
-          setDefaultThemeText(config.resolved_theme?.theme_text || "");
-        }
-      })
-      .catch((reason: unknown) => {
-        if (cancelled) return;
-        const message = describeLoadError("群级 Prompt", reason);
-        setDefaultError(message);
-        toast(message);
-      })
-      .finally(() => {
-        if (!cancelled) setDefaultLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [defaultGroupId, defaultReloadVersion, toast]);
+  const filteredGroups = useMemo(() => {
+    const normalized = groupQuery.trim().toLocaleLowerCase();
+    if (!normalized) return groups;
+    return groups.filter((group) => `${groupName(group)} ${group.id} ${group.wechat_group_id}`.toLocaleLowerCase().includes(normalized));
+  }, [groupQuery, groups]);
+  const selectedSet = useMemo(() => new Set(selectedIds), [selectedIds]);
+  const selectedVisibleCount = filteredGroups.filter((group) => selectedSet.has(group.id)).length;
+  const selectedThemeLabel = theme === "custom"
+    ? custom.trim() || "自定义描述"
+    : themes.find((item) => item.key === theme)?.label || theme;
+  const sharedPreview = themeConfirmed
+    ? `【共享视觉风格】\n${themeText || selectedThemeLabel}\n\n【应用范围】\n仅更新所选群的生图风格配置。每个群原有 Prompt 模板、群名、统计周期与内容变量均保持不变。`
+    : "请先在上方打开风格中心并点击“使用这个风格”。确认后再选择需要同步的群。";
 
-  const selectedDefaultGroup = groups.find((group) => group.id === defaultGroupId);
-  const savedDefaultTheme = defaultConfig?.image_theme || "ai_free";
-  const savedDefaultCustom = defaultConfig?.image_theme === "custom"
-    ? defaultConfig.image_theme_custom.trim()
-    : "";
-  const currentDefaultCustom = defaultTheme === "custom" ? defaultCustom.trim() : "";
-  const defaultDirty = Boolean(defaultConfig)
-    && (defaultTheme !== savedDefaultTheme || currentDefaultCustom !== savedDefaultCustom);
-  const defaultPreviewTheme = defaultTheme === "custom" && currentDefaultCustom
-    ? defaultThemeText || `指定风格「${currentDefaultCustom}」（正在生成完整约束）`
-    : defaultThemeText;
-  const defaultPreview = useMemo(
-    () => renderGroupPreview(defaultConfig?.content || globalDefaultPrompt, selectedDefaultGroup, defaultPreviewTheme),
-    [defaultConfig?.content, defaultPreviewTheme, globalDefaultPrompt, selectedDefaultGroup],
-  );
-
-  const applyDefaultTheme = async (key: string, custom = "") => {
-    defaultStyleTouchedRef.current = true;
-    setDefaultStyleTouched(true);
-    setDefaultTheme(key);
-    setDefaultCustom(key === "custom" ? custom : "");
-    setDefaultThemeError("");
+  const applyTheme = async (key: string, customValue = "") => {
+    const normalizedCustom = key === "custom" ? customValue.trim() : "";
+    setTheme(key);
+    setCustom(normalizedCustom);
+    setThemeConfirmed(true);
+    setThemeError("");
+    setResult(null);
     try {
       const resolved = await resolveImageTheme({
         image_theme: key,
-        image_theme_custom: key === "custom" ? custom : "",
-        group_id: defaultGroupId ?? undefined,
+        image_theme_custom: normalizedCustom,
       });
-      setDefaultThemeText(resolved.theme_text);
+      setThemeText(resolved.theme_text);
     } catch (reason) {
-      setDefaultThemeText("");
-      setDefaultThemeError(`风格预览失败：${String(reason)}`);
+      setThemeText("");
+      setThemeError(`风格预览失败：${describeApiError(reason)}`);
     }
   };
 
-  const saveDefaultStyle = async () => {
-    if (!defaultConfig || defaultGroupId === null) return;
-    setDefaultSaving(true);
+  const toggleGroup = (groupId: number) => {
+    setResult(null);
+    setSelectedIds((current) => current.includes(groupId)
+      ? current.filter((item) => item !== groupId)
+      : [...current, groupId]);
+  };
+
+  const selectVisible = () => {
+    setResult(null);
+    setSelectedIds((current) => Array.from(new Set([
+      ...current,
+      ...filteredGroups.map((group) => group.id),
+    ])));
+  };
+
+  const clearSelection = () => {
+    setResult(null);
+    setSelectedIds([]);
+  };
+
+  const saveStyle = async () => {
+    if (!themeConfirmed || !selectedIds.length) return;
+    const requestedIds = [...selectedIds];
+    setSaving(true);
     try {
-      const custom = defaultTheme === "custom" ? defaultCustom.trim() : "";
-      await updateGroup(defaultGroupId, {
-        image_theme: defaultTheme,
-        image_theme_custom: custom,
+      const response = await batchUpdateGroupImageTheme({
+        group_ids: requestedIds,
+        image_theme: theme,
+        image_theme_custom: theme === "custom" ? custom.trim() : "",
       });
-      const refreshed = await getGroupImagePrompt(defaultGroupId);
-      setDefaultConfig(refreshed);
-      setDefaultTheme(refreshed.image_theme || "ai_free");
-      setDefaultCustom(refreshed.image_theme === "custom" ? refreshed.image_theme_custom || "" : "");
-      setDefaultThemeText(refreshed.resolved_theme?.theme_text || "");
-      defaultStyleTouchedRef.current = false;
-      setDefaultStyleTouched(false);
-      const selectedThemeLabel = themes.find((theme) => theme.key === defaultTheme)?.label || "生图风格";
-      toast(`已把「${selectedThemeLabel}」保存到「${selectedDefaultGroup?.display_name || selectedDefaultGroup?.wechat_group_name || `群 ${defaultGroupId}`}」`);
+      setResult(response);
+      setSelectedIds(response.failed.map((item) => item.group_id));
+      await loadCatalogs();
+      if (response.status === "success") {
+        toast(`已把「${selectedThemeLabel}」应用到 ${response.success.length} 个群`);
+      } else if (response.status === "partial") {
+        toast(`已保存 ${response.success.length} 个群，${response.failed.length} 个群需要重试`);
+      } else {
+        toast(`${response.failed.length} 个群保存失败，已保留为重试项`);
+      }
     } catch (reason) {
-      toast(`生图风格保存失败：${String(reason)}`);
+      const message = `批量保存失败：${describeApiError(reason)}`;
+      setResult(null);
+      toast(message);
     } finally {
-      setDefaultSaving(false);
+      setSaving(false);
     }
   };
+
+  const retryingFailures = Boolean(result?.failed.length) && selectedIds.length === result?.failed.length;
+  const saveDisabled = saving
+    || !themeConfirmed
+    || !selectedIds.length
+    || Boolean(themeError)
+    || (theme === "custom" && !custom.trim());
 
   return (
     <section className="ai-images-theme-card" aria-label="群聊指定风格">
       <div className="ai-images-theme-heading">
-        <div><h2>设置群聊生图风格</h2><p>默认由 AI 按聊天内容自由发挥；手动选择后才注入预设或自定义风格。</p></div>
+        <div><h2>设置群聊生图风格</h2><p>先确认一套共享风格，再勾选一个或多个群同步应用；停用群也可以预先配置。</p></div>
         <Sparkle size={22} />
       </div>
-      {catalogLoading && !groups.length ? <LoadingState label="正在读取群配置与主题目录…" /> : groupsError && !groups.length ? <EmptyState title="群配置加载失败" description={groupsError} action={<Button tone="secondary" onClick={loadCatalogs}>重新加载</Button>} /> : !groups.length ? <EmptyState title="暂无群配置" description="当前数据库中确实没有群，请先在群聊配置中创建群。" /> : (
-        <>
-          <ImageThemePicker
-            themes={themes}
-            value={defaultTheme}
-            customValue={defaultCustom}
-            onConfirm={(key, custom) => applyDefaultTheme(key, custom)}
-            label="风格模式"
-            loading={catalogLoading}
-            error={themesError}
-            disabled={defaultSaving}
-          />
-          <div className="ai-images-prompt-preview ai-images-default-preview">
-            <span>生成时使用的 Prompt 预览</span>
-            <pre aria-live="polite">{defaultPreview || "Prompt 预览暂不可用"}</pre>
-          </div>
-          <div className="ai-images-style-target-row">
-            <label className="ai-images-theme-group-field">
-              <span>目标群</span>
-              <select
-                value={defaultGroupId ?? ""}
-                disabled={defaultSaving}
-                onChange={(event) => setDefaultGroupId(event.target.value ? Number(event.target.value) : null)}
-              >
-                <option value="">请选择要保存到的群聊</option>
-                {groups.map((group) => <option key={group.id} value={group.id}>{group.display_name || group.wechat_group_name || `群 ${group.id}`} · ID {group.id}</option>)}
-              </select>
-            </label>
-            <Button tone="primary" onClick={saveDefaultStyle} busy={defaultSaving} disabled={defaultGroupId === null || defaultLoading || !defaultConfig || !defaultDirty || Boolean(defaultThemeError) || (defaultTheme === "custom" && !defaultCustom.trim())}><FloppyDisk size={16} />保存到目标群</Button>
-          </div>
-          {defaultStyleTouched && defaultGroupId !== null && defaultDirty && <div className="ai-images-style-draft-note">风格草稿已保留，切换目标群不会覆盖；明确保存后才会应用。</div>}
-          {groupsError && <div className="ai-images-run-error">{groupsError}</div>}
-          {themesError && <div className="ai-images-run-error">{themesError} <Button tone="ghost" className="ui-button-compact" onClick={loadCatalogs}>重新加载</Button></div>}
-          {defaultTemplateError && <div className="ai-images-run-error">{defaultTemplateError}</div>}
-          {defaultThemeError && <div className="ai-images-run-error">{defaultThemeError}</div>}
-          {defaultLoading && <div className="ai-images-style-status">正在读取所选群聊的 Prompt…</div>}
-          {defaultError && <div className="ai-images-run-error">{defaultError} <Button tone="ghost" className="ui-button-compact" onClick={() => setDefaultReloadVersion((current) => current + 1)}>重试</Button></div>}
-        </>
-      )}
+      {catalogLoading && !groups.length ? <LoadingState label="正在读取群配置与主题目录…" />
+        : groupsError && !groups.length ? <EmptyState title="群配置加载失败" description={groupsError} action={<Button tone="secondary" onClick={loadCatalogs}>重新加载</Button>} />
+          : !groups.length ? <EmptyState title="暂无群配置" description="当前数据库中确实没有群，请先在群聊配置中创建群。" />
+            : (
+              <>
+                <div className="ai-images-style-layout">
+                  <div className="ai-images-style-config">
+                    <ImageThemePicker themes={themes} value={theme} customValue={custom} onConfirm={applyTheme} label="共享风格" loading={catalogLoading} error={themesError} disabled={saving} />
+                    <div className={`ai-images-style-confirmation ${themeConfirmed ? "is-confirmed" : ""}`}>
+                      {themeConfirmed ? <CheckCircle size={18} weight="fill" /> : <WarningCircle size={18} />}
+                      <span>{themeConfirmed ? `已确认：${selectedThemeLabel}` : "尚未确认风格，群选择不会触发保存"}</span>
+                    </div>
+                    <div className="ai-images-prompt-preview ai-images-default-preview">
+                      <span>共享风格注入预览</span>
+                      <pre aria-live="polite">{sharedPreview}</pre>
+                      <small>各群原有 Prompt 模板不会被覆盖；新配置只从后续新建运行开始生效。</small>
+                    </div>
+                  </div>
+
+                  <section className="ai-images-group-picker" aria-label="选择目标群">
+                    <div className="ai-images-group-picker-head">
+                      <div><b>选择目标群</b><span>已选 {selectedIds.length} 个</span></div>
+                      <div><button type="button" disabled={!filteredGroups.length || selectedVisibleCount === filteredGroups.length} onClick={selectVisible}>全选当前列表</button><button type="button" disabled={!selectedIds.length} onClick={clearSelection}>清空</button></div>
+                    </div>
+                    <label className="ai-images-group-search"><MagnifyingGlass size={16} /><input type="search" value={groupQuery} placeholder="搜索群名或 ID" onChange={(event) => setGroupQuery(event.target.value)} /></label>
+                    <div className="ai-images-group-checklist">
+                      {filteredGroups.map((group) => (
+                        <label key={group.id} className={selectedSet.has(group.id) ? "is-selected" : ""}>
+                          <input type="checkbox" checked={selectedSet.has(group.id)} disabled={saving} onChange={() => toggleGroup(group.id)} />
+                          <span className="ai-images-group-copy"><b>{groupName(group)}</b><small>ID {group.id} · 当前：{themeLabel(group, themes)}</small></span>
+                          <em className={group.enabled ? "is-enabled" : "is-disabled"}>{group.enabled ? "已启用" : "已停用"}</em>
+                        </label>
+                      ))}
+                      {!filteredGroups.length && <div className="image-theme-picker-state">没有匹配的群。</div>}
+                    </div>
+                  </section>
+                </div>
+
+                <div className="ai-images-style-submit-row">
+                  <span>{themeConfirmed ? `将「${selectedThemeLabel}」应用到后续新运行` : "请先确认共享风格"}</span>
+                  <Button tone="primary" onClick={saveStyle} busy={saving} disabled={saveDisabled}><FloppyDisk size={16} />{retryingFailures ? "重试失败群" : `应用到 ${selectedIds.length} 个群`}</Button>
+                </div>
+
+                {result && (
+                  <div className={`ai-images-batch-result is-${result.status}`} role="status">
+                    <strong>{result.status === "success" ? "全部保存成功" : result.status === "partial" ? "部分群保存成功" : "本次保存失败"}</strong>
+                    {result.success.length > 0 && <div><b>成功（{result.success.length}）</b><ul>{result.success.map((item) => <li key={item.group_id}>{item.group_name} · ID {item.group_id}</li>)}</ul></div>}
+                    {result.failed.length > 0 && <div><b>失败（{result.failed.length}）</b><ul>{result.failed.map((item) => <li key={item.group_id}>ID {item.group_id}：{item.reason}</li>)}</ul><small>失败群已保留为选中状态，可直接点击“重试失败群”。</small></div>}
+                  </div>
+                )}
+                {groupsError && <div className="ai-images-run-error">{groupsError}</div>}
+                {themesError && <div className="ai-images-run-error">{themesError} <Button tone="ghost" className="ui-button-compact" onClick={loadCatalogs}>重新加载</Button></div>}
+                {themeError && <div className="ai-images-run-error">{themeError}</div>}
+              </>
+            )}
     </section>
   );
 }

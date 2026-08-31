@@ -7,7 +7,7 @@ from functools import partial
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import event
+from sqlalchemy import event, update
 from sqlmodel import Session, SQLModel, create_engine, select
 
 from app.config.settings import Settings
@@ -521,6 +521,28 @@ def save_group(session: Session, group: Group) -> Group:
     session.commit()
     session.refresh(group)
     return group
+
+
+def update_group_image_theme(
+    session: Session,
+    group_id: int,
+    *,
+    image_theme: str,
+    image_theme_custom: str,
+) -> bool:
+    """独立事务只更新群生图主题字段，避免通用保存路径带入其他配置。"""
+
+    result = session.execute(
+        update(Group)
+        .where(Group.id == group_id, Group.deleted_at.is_(None))
+        .values(
+            image_theme=image_theme,
+            image_theme_custom=image_theme_custom,
+            updated_at=_now(),
+        )
+    )
+    session.commit()
+    return result.rowcount == 1
 
 
 def delete_group(session: Session, group_id: int) -> Group | None:

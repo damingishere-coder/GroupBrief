@@ -18,6 +18,7 @@ import {
   saveRunPrompt,
   V2Run,
 } from "../../../api";
+import { shanghaiDateInputValue } from "../../../date";
 import {
   describeLoadError,
   ImageDetail,
@@ -28,7 +29,7 @@ import type { ToastFn } from "./useAIImageCatalogs";
 
 export function useAIImageRuns(groups: GroupV2[], toast: ToastFn) {
   const [runs, setRuns] = useState<V2Run[]>([]);
-  const [dateFilter, setDateFilter] = useState("");
+  const [dateFilter, setDateFilter] = useState(shanghaiDateInputValue);
   const [groupFilter, setGroupFilter] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
   const [selectedKey, setSelectedKey] = useState("");
