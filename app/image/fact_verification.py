@@ -89,7 +89,9 @@ def _canonical_number(value: str) -> str:
     normalized = normalized.replace("块", "元")
     if re.fullmatch(r"0+", normalized):
         return "0"
-    return normalized
+    # OCR 常保留日期、分镜或昵称中的整数前导零；它们不应把
+    # 05/09 之类的版式数字与已允许的 5/9 判为两个不同事实。
+    return re.sub(r"^0+(?=\d)", "", normalized)
 
 
 def _numeric_facts(value: str) -> set[str]:

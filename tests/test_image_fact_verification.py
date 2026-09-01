@@ -94,6 +94,19 @@ def test_numeric_units_do_not_join_across_ocr_lines(tmp_path):
     assert review.unknown_numeric == ()
 
 
+def test_allows_zero_padded_layout_numbers(tmp_path):
+    prompt, image = _evidence(tmp_path)
+
+    review = review_image_facts(
+        prompt,
+        image,
+        ocr_text="分镜 01\n成员 05\n日期 09\n体重 078.8万元",
+    )
+
+    assert review.ok
+    assert review.unknown_numeric == ()
+
+
 def test_allows_deterministic_header_numbers_and_currency_alias(tmp_path):
     prompt = tmp_path / "image_prompt.txt"
     prompt.write_text(
