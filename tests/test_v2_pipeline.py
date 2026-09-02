@@ -107,9 +107,10 @@ class FakeSource(WeChatDataSource):
 
 
 class FakePrompt:
-    def __init__(self, fail=False, failure_meta=None):
+    def __init__(self, fail=False, failure_meta=None, topic_selection=None):
         self.fail = fail
         self.failure_meta = failure_meta
+        self.topic_selection = topic_selection
         self.inputs = []
 
     def build(self, data):
@@ -123,7 +124,7 @@ class FakePrompt:
                 error="DeepSeek 失败",
                 meta=self.failure_meta,
             )
-        topic_selection = data.persisted_topic_selection or {
+        topic_selection = data.persisted_topic_selection or self.topic_selection or {
             "topic_selection_version": "4.0",
             "selected_topic_ids": ["topic-01", "topic-02"],
             "selected_count": 2,
@@ -146,6 +147,8 @@ class FakePrompt:
         topic_selection = dict(topic_selection)
         topic_selection.setdefault("message_snapshot_sha256", snapshot_hash)
         topic_selection.setdefault("speaker_fingerprint", speaker_fingerprint)
+        selected_topic_ids = list(topic_selection.get("selected_topic_ids") or [])
+        single_topic = len(selected_topic_ids) == 1
         return PromptOutput(
             True,
             "【任务】\n生成图片\n【主标题】今天热聊",
@@ -156,13 +159,16 @@ class FakePrompt:
                 "speaker_fingerprint": speaker_fingerprint,
                 "speaker_bindings": [],
                 "layout_catalog_version": "comic-panels-v3",
-                "layout_id": "split_focus",
-                "structure_mode": "dual_rhythm",
-                "featured_topic_ids": ["topic-01", "topic-02"],
-                "topic_order": ["topic-01", "topic-02"],
+                "layout_id": "hero_with_insets" if single_topic else "split_focus",
+                "structure_mode": "hero_rhythm" if single_topic else "dual_rhythm",
+                "featured_topic_ids": selected_topic_ids[:1] if single_topic else selected_topic_ids[:2],
+                "topic_order": selected_topic_ids,
                 "panel_beats": [
-                    {"topic_id": "topic-01", "shots": ["establishing", "reaction"]},
-                    {"topic_id": "topic-02", "shots": ["dialogue"]},
+                    {
+                        "topic_id": topic_id,
+                        "shots": ["establishing", "reaction"] if index == 0 else ["dialogue"],
+                    }
+                    for index, topic_id in enumerate(selected_topic_ids)
                 ],
             },
         )
@@ -818,7 +824,13 @@ def test_generate_data_failure_marks_failed(tmp_path):
 
 def test_generate_prompt_failure_uses_local_infographic(tmp_path):
     preserved_meta = {
-        "topic_selection": {"selected_topic_ids": ["topic-01"]},
+        "topic_selection": {
+            "political_keyword_policy_version": "political-keywords-v1",
+            "selected_topic_ids": [],
+            "safe_candidate_count": 0,
+            "blocked_candidate_count": 2,
+            "blocked_topic_ids": ["topic-01", "topic-02"],
+        },
         "layout_id": "split_focus",
     }
     pipeline, group = _make_pipeline(
@@ -836,6 +848,52 @@ def test_generate_prompt_failure_uses_local_infographic(tmp_path):
     assert run["prompt_meta"]["layout_id"] == "split_focus"
     assert run["prompt_meta"]["mode"] == "local_infographic"
     assert pipeline.store.image_path("测试群", "2026-08-18").is_file()
+
+
+def test_generate_one_safe_topic_still_calls_normal_image_generator(tmp_path):
+    topic_selection = {
+        "topic_selection_version": "7.0",
+        "political_keyword_policy_version": "political-keywords-v1",
+        "selected_topic_ids": ["topic-02"],
+        "selected_count": 1,
+        "safe_candidate_count": 1,
+        "blocked_candidate_count": 1,
+        "blocked_topic_ids": ["topic-01"],
+        "candidates": [
+            {
+                "topic_id": "topic-01",
+                "selected": False,
+                "image_eligible": False,
+                "political_keyword_matches": ["总统"],
+            },
+            {
+                "topic_id": "topic-02",
+                "selected": True,
+                "image_eligible": True,
+                "title": "票房",
+                "summary": "张三聊票房",
+                "message_ids": ["m1"],
+                "quotes": ["今天聊了票房"],
+                "visible_participants": ["张三"],
+            },
+        ],
+    }
+    generator = FakeGenerator()
+    pipeline, _ = _make_pipeline(
+        tmp_path,
+        prompt=FakePrompt(topic_selection=topic_selection),
+        gen=generator,
+    )
+
+    results = pipeline.generate_all(run_date="2026-08-18")
+
+    assert results[0]["status"] == "ready_to_send"
+    assert len(generator.calls) == 1
+    run = pipeline.store.load_run("测试群", "2026-08-18")
+    assert run["prompt_fallback_level"] == 0
+    assert run["image_fallback_level"] == 0
+    assert run["prompt_meta"]["topic_selection"]["selected_topic_ids"] == ["topic-02"]
+    assert run["prompt_meta"]["structure_mode"] == "hero_rhythm"
 
 
 def test_image_disabled_goes_ready_to_send_without_image(tmp_path):

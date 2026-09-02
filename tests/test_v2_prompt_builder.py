@@ -167,6 +167,90 @@ class FakeSummaryProvider:
         return json.dumps({"events": []}, ensure_ascii=False)
 
 
+class DuplicateIdentitySummaryProvider(FakeSummaryProvider):
+    """复现三个候选人物条目实际只对应两个 sender_id 的 Eason 结构。"""
+
+    def _chat(self, messages: list[dict], **kwargs) -> str:
+        user = messages[1]["content"]
+        if '"copy_version":"fixed-chat-comic-v2"' in user:
+            self.calls.append((messages[0]["content"], user))
+            source = _raw_json_from_user(user)
+            topic = source["topics"][0]
+            bindings = topic["speaker_bindings"]
+            return json.dumps(
+                {
+                    "title": "票房火箭",
+                    "subtitle": "票房讨论接成火箭",
+                    "panels": [
+                        {
+                            "topic_id": topic["topic_id"],
+                            "title": "票房火箭",
+                            "event_summary": topic["source_summary"],
+                            "composition": "两位群友站在火箭走势图两侧接话",
+                            "participants": [
+                                {
+                                    "message_id": binding["message_id"],
+                                    "action": "站在走势图旁接话",
+                                    "quote": binding["text"],
+                                }
+                                for binding in bindings
+                            ],
+                            "visual_gag": topic["source_visual_gag"],
+                            "fact_line": topic["source_summary"],
+                        }
+                    ],
+                    "footer_summary": "票房讨论接成火箭",
+                },
+                ensure_ascii=False,
+            )
+        if "可选分镜骨架" in user and "已入选主题" in user:
+            self.calls.append((messages[0]["content"], user))
+            topic_id = re.search(r'"topic_id":"(topic-[^"]+)"', user).group(1)
+            return json.dumps(
+                {
+                    "layout_id": "hero_with_insets",
+                    "structure_mode": "hero_rhythm",
+                    "featured_topic_ids": [topic_id],
+                    "topic_order": [topic_id],
+                    "panel_beats": [
+                        {"topic_id": topic_id, "shots": ["dialogue", "reaction"]}
+                    ],
+                    "comedy_device": "接话反差",
+                    "layout_reason": "单一真实话题使用头条节奏",
+                },
+                ensure_ascii=False,
+            )
+        if '"candidates"' in user:
+            self.calls.append((messages[0]["content"], user))
+            ids = list(
+                dict.fromkeys(
+                    re.findall(r"消息ID:([^\]#]+)(?:#片段\d+/\d+)?\]", user)
+                )
+            )
+            return json.dumps(
+                {
+                    "candidates": [
+                        {
+                            "topic_id": "topic-01",
+                            "title": "票房火箭",
+                            "summary": "票房讨论中，两位群友把走势接成火箭笑点。",
+                            "start_time": "2026-08-17 10:30",
+                            "end_time": "2026-08-17 10:30",
+                            "message_ids": ids[:3],
+                            "comedy_score": 35,
+                            "group_recognition_score": 18,
+                            "visual_score": 18,
+                            "comedy_angle": "真实接话形成反差",
+                            "visual_gag": "把票房走势画成火箭",
+                            "score_reason": "同一人连续发言后由另一人接话",
+                        }
+                    ]
+                },
+                ensure_ascii=False,
+            )
+        return super()._chat(messages, **kwargs)
+
+
 def _builder(provider: FakeSummaryProvider | None = None, tmp_path=None):
     return DeepSeekImagePromptBuilder(
         provider=provider or FakeSummaryProvider(),
@@ -206,6 +290,27 @@ def test_build_renders_only_fixed_sections_and_real_multi_person_dialogue():
         assert quote in output.prompt
     for hidden in ("topic-", "message_id", "participant_options", "evidence_dialogue"):
         assert hidden not in output.prompt
+
+
+def test_builder_repairs_duplicate_sender_identity_and_records_prompt_meta():
+    output = _builder(DuplicateIdentitySummaryProvider()).build(_input())
+
+    assert output.success
+    assert validate_fixed_prompt_contract(output.prompt, expected_panel_count=1) == 1
+    assert output.meta["political_keyword_policy_version"] == "political-keywords-v1"
+    assert output.meta["poster_visible_participant_count"] == 2
+    assert output.meta["poster_participant_repairs"] == [
+        {
+            "panel_index": 1,
+            "topic_id": "topic-01",
+            "deduplicated_count": 1,
+            "trimmed_count": 0,
+            "filled_count": 0,
+            "final_participant_count": 2,
+        }
+    ]
+    assert output.prompt.count("人物旁清晰标注“张三”") == 1
+    assert output.prompt.count("人物旁清晰标注“李四”") == 1
 
 
 def test_summary_and_prompt_phases_use_independent_provider_instances():
@@ -462,6 +567,105 @@ def test_poster_name_is_derived_from_message_id_when_quotes_are_identical():
     ]
 
 
+def _participant_repair_fixture() -> tuple[dict, dict]:
+    source = {
+        "topics": [
+            {
+                "topic_id": "topic-repair",
+                "source_title": "同一身份连续接话",
+                "source_summary": "甲和乙参与讨论，甲连续说了两句。",
+                "source_visual_gag": "两人站在同一张桌边接话",
+                "participant_options": ["甲", "乙"],
+                "participant_min": 2,
+                "participant_max": 2,
+                "evidence_dialogue": [
+                    {"message_id": "m-a1", "sender_id": "WXID-A", "speaker": "甲", "text": "第一句"},
+                    {"message_id": "m-a2", "sender_id": "wxid-a", "speaker": "甲", "text": "第二句"},
+                    {"message_id": "m-b", "sender_id": "wxid-b", "speaker": "乙", "text": "收到"},
+                ],
+                "speaker_bindings": [
+                    {"message_id": "m-a1", "sender_id": "WXID-A", "speaker": "甲", "text": "第一句"},
+                    {"message_id": "m-a2", "sender_id": "wxid-a", "speaker": "甲", "text": "第二句"},
+                    {"message_id": "m-b", "sender_id": "wxid-b", "speaker": "乙", "text": "收到"},
+                ],
+                "shot_hints": ["对白"],
+            }
+        ]
+    }
+    payload = {
+        "title": "同一身份连续接话",
+        "subtitle": "甲和乙参与讨论",
+        "panels": [
+            {
+                "topic_id": "topic-repair",
+                "title": "同一身份连续接话",
+                "event_summary": "甲和乙参与讨论，甲连续说了两句。",
+                "composition": "两人站在同一张桌边接话",
+                "participants": [
+                    {"message_id": "m-a1", "action": "站在左侧发言", "quote": "第一句"},
+                    {"message_id": "m-a2", "action": "继续站在左侧", "quote": "第二句"},
+                    {"message_id": "m-b", "action": "站在右侧回应", "quote": "收到"},
+                ],
+                "visual_gag": "两人站在同一张桌边接话",
+                "fact_line": "甲和乙参与讨论，甲连续说了两句。",
+            }
+        ],
+        "footer_summary": "甲和乙参与讨论",
+    }
+    return source, payload
+
+
+def test_poster_deduplicates_three_bindings_to_two_real_sender_identities():
+    source, payload = _participant_repair_fixture()
+    repairs: list[dict] = []
+
+    copy = parse_poster_copy(
+        json.dumps(payload, ensure_ascii=False), source, repair_log=repairs
+    )
+
+    assert [(item.message_id, item.name) for item in copy.panels[0].participants] == [
+        ("m-a1", "甲"),
+        ("m-b", "乙"),
+    ]
+    assert repairs == [
+        {
+            "panel_index": 1,
+            "topic_id": "topic-repair",
+            "deduplicated_count": 1,
+            "trimmed_count": 0,
+            "filled_count": 0,
+            "final_participant_count": 2,
+        }
+    ]
+
+
+def test_poster_fills_missing_identity_from_same_topic_without_inventing_quote():
+    source, payload = _participant_repair_fixture()
+    payload["panels"][0]["participants"] = payload["panels"][0]["participants"][:1]
+    repairs: list[dict] = []
+
+    copy = parse_poster_copy(
+        json.dumps(payload, ensure_ascii=False), source, repair_log=repairs
+    )
+
+    added = copy.panels[0].participants[1]
+    assert (added.message_id, added.name, added.action, added.quote) == (
+        "m-b",
+        "乙",
+        "参与本话题讨论",
+        "",
+    )
+    assert repairs[0]["filled_count"] == 1
+
+
+def test_poster_repair_still_rejects_message_id_outside_topic_bindings():
+    source, payload = _participant_repair_fixture()
+    payload["panels"][0]["participants"][0]["message_id"] = "m-unauthorized"
+
+    with pytest.raises(PosterCopyError, match="未授权的消息ID"):
+        parse_poster_copy(json.dumps(payload, ensure_ascii=False), source)
+
+
 def test_poster_source_keeps_each_message_scoped_name_for_same_sender():
     selection = {
         "candidates": [
@@ -506,6 +710,8 @@ def test_poster_source_keeps_each_message_scoped_name_for_same_sender():
     source = build_poster_editor_source(selection, layout)
     bindings = source["topics"][0]["speaker_bindings"]
 
+    assert source["topics"][0]["participant_min"] == 1
+    assert source["topics"][0]["participant_max"] == 1
     assert [(item["message_id"], item["speaker"]) for item in bindings] == [
         ("m-old", "早些时候的名字"),
         ("m-new", "后来改的名字"),
@@ -542,10 +748,10 @@ def test_default_template_file_and_builtin_are_synchronized():
     assert file_body.count("【漫画分镜】") == 1
 
 
-def test_fixed_storyboard_contract_supports_two_five_and_seven_panels():
+def test_fixed_storyboard_contract_supports_one_two_five_and_seven_panels():
     output = _builder().build(_input())
     assert output.success
-    for panel_count in (2, 5, 7):
+    for panel_count in (1, 2, 5, 7):
         panels = "\n\n".join(
             f"【版面{index}】\n真实话题{index}"
             for index in range(1, panel_count + 1)

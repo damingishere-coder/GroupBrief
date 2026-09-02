@@ -19,6 +19,7 @@ import re
 from copy import deepcopy
 from time import perf_counter
 from datetime import datetime
+from typing import Any
 
 from app.ai.prompt_templates import (
     ImagePromptTemplateError,
@@ -396,6 +397,10 @@ class DeepSeekImagePromptBuilder:
                 selection["speaker_fingerprint"] = speaker_fingerprint
             meta["topic_selection_version"] = selection["topic_selection_version"]
             meta["topic_selection"] = selection
+            if selection.get("political_keyword_policy_version"):
+                meta["political_keyword_policy_version"] = selection[
+                    "political_keyword_policy_version"
+                ]
             selected_payload = selected_topics_json(selection)
             topic_ids = selected_topic_ids(selection)
             recent_history = tuple(data.recent_layout_history or ())[:3]
@@ -456,6 +461,7 @@ class DeepSeekImagePromptBuilder:
             text = ""
             final_calls = 0
             last_violations: list[str] = []
+            participant_repairs: list[dict[str, Any]] = []
             for attempt in range(FINAL_PROMPT_MAX_ATTEMPTS):
                 prompt = final_user_prompt
                 if attempt:
@@ -473,8 +479,13 @@ class DeepSeekImagePromptBuilder:
                     max_tokens=6000,
                 )
                 final_calls += 1
+                attempt_repairs: list[dict[str, Any]] = []
                 try:
-                    copy = parse_poster_copy(raw_copy, editor_source)
+                    copy = parse_poster_copy(
+                        raw_copy,
+                        editor_source,
+                        repair_log=attempt_repairs,
+                    )
                     candidate_text = render_poster_prompt(
                         copy,
                         group_name=visible_group_name,
@@ -495,11 +506,13 @@ class DeepSeekImagePromptBuilder:
                     )
                     continue
                 text = candidate_text
+                participant_repairs = attempt_repairs
                 meta["poster_copy_version"] = POSTER_COPY_VERSION
                 meta["poster_topic_count"] = len(copy.panels)
                 meta["poster_visible_participant_count"] = sum(
                     len(panel.participants) for panel in copy.panels
                 )
+                meta["poster_participant_repairs"] = participant_repairs
                 break
             if not text:
                 raise ValueError("最终生图 Prompt 未通过固定漫画合同：" + "；".join(last_violations[:8]))

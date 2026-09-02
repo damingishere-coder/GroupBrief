@@ -116,14 +116,114 @@ def test_high_volume_chat_does_not_reduce_topic_density():
     assert selection["thresholds"]["high_volume_message_threshold"] == 200
 
 
-def test_single_candidate_fails_instead_of_splitting_one_topic_to_fill_quota():
-    with pytest.raises(TopicSelectionError, match="TOPIC_CANDIDATES_INSUFFICIENT"):
-        score_and_select_topics([_candidate(1, ["m0", "m1"])], _messages(2))
+def test_single_candidate_is_selected_without_splitting_or_padding():
+    selection = score_and_select_topics(
+        [_candidate(1, ["m0", "m1"])], _messages(2)
+    )
+
+    assert selection["selected_count"] == 1
+    assert selection["selected_topic_ids"] == ["topic-01"]
 
 
-def test_single_message_fails_without_fabricating_second_topic():
-    with pytest.raises(TopicSelectionError, match="TOPIC_CANDIDATES_INSUFFICIENT"):
-        score_and_select_topics([_candidate(1, ["m0"])], _messages(1))
+def test_single_message_keeps_one_real_topic_without_fabricating_second_topic():
+    selection = score_and_select_topics([_candidate(1, ["m0"])], _messages(1))
+
+    assert selection["selected_count"] == 1
+    assert selection["candidates"][0]["evidence_message_count"] == 1
+
+
+def test_high_scoring_political_topic_is_blocked_and_safe_topic_is_promoted():
+    political = _candidate(1, ["m0", "m1"], comedy=40, visual=20, recognition=20)
+    political.update(title="总统大选", summary="围绕总统大选展开讨论。")
+    safe = _candidate(2, ["m2", "m3"], comedy=20, visual=10, recognition=10)
+
+    selection = score_and_select_topics([political, safe], _messages(4))
+    by_id = {item["topic_id"]: item for item in selection["candidates"]}
+
+    assert selection["selected_topic_ids"] == ["topic-02"]
+    assert selection["safe_candidate_count"] == 1
+    assert selection["blocked_topic_ids"] == ["topic-01"]
+    assert selection["political_keyword_hits"] == [
+        {
+            "topic_id": "topic-01",
+            "title": "总统大选",
+            "matched_keywords": ["大选", "总统"],
+        }
+    ]
+    assert by_id["topic-01"]["rank"] == 1
+    assert by_id["topic-01"]["selected"] is False
+    assert by_id["topic-01"]["image_eligible"] is False
+    assert set(by_id["topic-01"]["political_keyword_matches"]) == {"总统", "大选"}
+    assert by_id["topic-02"]["eligible_rank"] == 1
+
+
+@pytest.mark.parametrize(
+    ("title", "summary"),
+    [
+        ("实弹卡弹成真伪证明", "射击体验中遇到卡弹。"),
+        ("拿破仑轶事", "群友分享一个只含人物姓名的历史故事。"),
+        ("公司主席投票", "公司内部投票讨论由谁主持会议。"),
+        ("周末 party", "群友商量周末聚会安排。"),
+        ("company party", "The company party starts after work."),
+    ],
+)
+def test_non_political_or_broad_terms_are_not_blocked(title: str, summary: str):
+    candidate = _candidate(1, ["m0"])
+    candidate.update(title=title, summary=summary)
+
+    selection = score_and_select_topics([candidate], _messages(1))
+
+    assert selection["selected_topic_ids"] == ["topic-01"]
+    assert selection["blocked_topic_ids"] == []
+    assert selection["candidates"][0]["image_eligible"] is True
+
+
+def test_explicit_english_political_term_is_blocked():
+    candidate = _candidate(1, ["m0"])
+    candidate.update(
+        title="Ruling party election",
+        summary="The ruling party prepared for a general election.",
+    )
+
+    selection = score_and_select_topics([candidate], _messages(1))
+
+    assert selection["selected_count"] == 0
+    assert set(selection["candidates"][0]["political_keyword_matches"]) == {
+        "ruling party",
+        "general election",
+    }
+
+
+def test_verified_evidence_text_is_checked_for_political_keywords():
+    messages = _messages(1)
+    messages[0] = PromptMessage(
+        messages[0].message_id,
+        messages[0].timestamp,
+        messages[0].sender_name,
+        "讨论全国人大相关消息",
+        messages[0].sender_id,
+    )
+
+    selection = score_and_select_topics([_candidate(1, ["m0"])], messages)
+
+    assert selection["selected_count"] == 0
+    assert selection["candidates"][0]["political_keyword_matches"] == ["全国人大"]
+
+
+def test_all_political_candidates_keep_audit_data_and_stop_prompt_selection():
+    first = _candidate(1, ["m0"])
+    first.update(title="总统竞选", summary="总统竞选相关讨论。")
+    second = _candidate(2, ["m1"])
+    second.update(title="议会选举", summary="议会选举相关讨论。")
+
+    selection = score_and_select_topics([first, second], _messages(2))
+
+    assert selection["candidate_count"] == 2
+    assert selection["safe_candidate_count"] == 0
+    assert selection["blocked_candidate_count"] == 2
+    assert selection["selected_count"] == 0
+    with pytest.raises(TopicSelectionError, match="TOPIC_CANDIDATES_POLITICAL"):
+        selected_topics_json(selection)
 
 
 def test_parse_filters_duplicate_and_invalid_message_ids():

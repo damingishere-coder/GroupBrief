@@ -228,6 +228,9 @@ LAYOUT_DIRECTOR_SYSTEM = """你是 GroupBrief 的漫画分镜导演。
 dialogue、reaction、close_up、punchline、insert。全部话题必须恰好出现一次于 panel_beats，
 topic_order 也必须恰好覆盖全部话题。
 
+只有 1 个入选话题时必须使用 hero_rhythm，并把该话题作为唯一 featured_topic_id；
+不得为了满足双焦点结构复制或虚构第二个话题。
+
 根据内容选择 hero_rhythm、dual_rhythm 或 ensemble_rhythm。无论哪种模式，都必须保留明显的
 大/中/小格层级，禁止等宽等高列表。指定风格只控制配色、画材、造型、纹理和光影；版式不能改写画风。
 优先选择最符合笑点节奏的分镜骨架；不得选择前一次使用的骨架，并尽量避开最近三次。"""
@@ -334,8 +337,8 @@ def build_layout_director_prompt(
 
 def _expected_topic_ids(topic_ids: Iterable[str]) -> list[str]:
     expected = [str(topic_id) for topic_id in topic_ids if str(topic_id)]
-    if not (2 <= len(expected) <= 7) or len(set(expected)) != len(expected):
-        raise LayoutPlanError("入选主题必须是 2～7 个不重复 ID")
+    if not (1 <= len(expected) <= 7) or len(set(expected)) != len(expected):
+        raise LayoutPlanError("入选主题必须是 1～7 个不重复 ID")
     return expected
 
 

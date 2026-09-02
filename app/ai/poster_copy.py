@@ -106,6 +106,16 @@ def _selected_topics(selection: dict, topic_order: Iterable[str]) -> list[dict[s
     return ordered
 
 
+def _participant_identity(sender_id: object, speaker: object) -> tuple[str, str]:
+    normalized_sender_id = str(sender_id or "").strip().casefold()
+    normalized_speaker = str(speaker or "").strip()
+    return (
+        ("id", normalized_sender_id)
+        if normalized_sender_id
+        else ("name", normalized_speaker)
+    )
+
+
 def build_poster_editor_source(
     selection: dict,
     layout: LayoutPlan,
@@ -142,6 +152,12 @@ def build_poster_editor_source(
             name = entry["speaker"]
             if name not in participants:
                 participants.append(name)
+        available_identities = {
+            _participant_identity(entry["sender_id"], entry["speaker"])
+            for entry in evidence_dialogue
+        }
+        participant_min = 2 if len(available_identities) >= 2 else 1
+        participant_max = min(MAX_VISIBLE_PARTICIPANTS, len(available_identities))
         beat = beats.get(topic_id)
         topics.append(
             {
@@ -150,6 +166,8 @@ def build_poster_editor_source(
                 "source_summary": str(item.get("summary") or "").strip(),
                 "source_visual_gag": str(item.get("visual_gag") or "").strip(),
                 "participant_options": participants,
+                "participant_min": participant_min,
+                "participant_max": participant_max,
                 "evidence_dialogue": evidence_dialogue,
                 "speaker_bindings": evidence_dialogue,
                 "shot_hints": [
@@ -173,7 +191,8 @@ def build_poster_editor_source(
 POSTER_EDITOR_SYSTEM = """你是「群报 GroupBrief」的漫画日报内容编辑。
 你只能根据给定的 evidence package 写一个 JSON 对象，不得输出 Markdown 或解释。
 所有事实、姓名和对白必须来自对应 topic；不得改变金额、时间、地点和人物关系。
-每个 panel 必须对应一个 topic_id，顺序不得改变。优先使用 2～4 位 participant_options；
+每个 panel 必须对应一个 topic_id，顺序不得改变。participants 数量必须严格落在对应 topic 的
+participant_min～participant_max 范围内；同一 sender_id 只能出现一次；
 每位人物都要从 speaker_bindings 选择一个真实 message_id，并写可绘制的动作、站位或反应。
 不得输出或改写人物姓名；程序会从 message_id 绑定中填入姓名。quote 只能逐字复制同一
 message_id 的完整原消息或其中连续、语义完整的片段，不得跨消息拼接，不得改写，
@@ -334,7 +353,12 @@ def _assert_text_grounded(text: str, evidence: str, label: str) -> None:
         raise PosterCopyError(f"{label}没有回收到对应真实话题")
 
 
-def parse_poster_copy(raw: str, source: dict[str, Any]) -> DailyPosterCopy:
+def parse_poster_copy(
+    raw: str,
+    source: dict[str, Any],
+    *,
+    repair_log: list[dict[str, Any]] | None = None,
+) -> DailyPosterCopy:
     try:
         payload = json.loads(_strip_json_fence(raw))
     except json.JSONDecodeError as exc:
@@ -390,9 +414,7 @@ def parse_poster_copy(raw: str, source: dict[str, Any]) -> DailyPosterCopy:
         participant_options = [str(value).strip() for value in topic.get("participant_options") or [] if str(value).strip()]
         bindings = _bindings_by_message_id(topic)
         available_identities = {
-            ("id", binding["sender_id"].casefold())
-            if binding["sender_id"]
-            else ("name", binding["speaker"])
+            _participant_identity(binding["sender_id"], binding["speaker"])
             for binding in bindings.values()
         }
         raw_participants = raw_panel.get("participants")
@@ -400,12 +422,13 @@ def parse_poster_copy(raw: str, source: dict[str, Any]) -> DailyPosterCopy:
             raise PosterCopyError(f"版面{index}缺少 participants")
         minimum = 2 if len(available_identities) >= 2 else 1
         maximum = min(MAX_VISIBLE_PARTICIPANTS, len(available_identities))
-        if not bindings or not (minimum <= len(raw_participants) <= maximum):
+        if not bindings:
             raise PosterCopyError(f"版面{index}应使用 {minimum}～{maximum} 位真实参与者")
 
-        participants: list[ParticipantCopy] = []
-        identities: set[tuple[str, str]] = set()
-        quoted_speakers: set[tuple[str, str]] = set()
+        participants_by_identity: dict[tuple[str, str], ParticipantCopy] = {}
+        identity_order: list[tuple[str, str]] = []
+        duplicate_count = 0
+        trimmed_count = 0
         for person_index, raw_person in enumerate(raw_participants, start=1):
             if not isinstance(raw_person, dict):
                 raise PosterCopyError(f"版面{index}第{person_index}位人物格式无效")
@@ -417,10 +440,9 @@ def parse_poster_copy(raw: str, source: dict[str, Any]) -> DailyPosterCopy:
                 raise PosterCopyError(f"版面{index}包含未授权的消息ID：{message_id or '空'}")
             name = binding["speaker"]
             sender_id = binding["sender_id"]
-            identity = ("id", sender_id.casefold()) if sender_id else ("name", name)
-            if name not in participant_options or identity in identities:
-                raise PosterCopyError(f"版面{index}包含未授权或重复的群友身份：{name}")
-            identities.add(identity)
+            identity = _participant_identity(sender_id, name)
+            if name not in participant_options:
+                raise PosterCopyError(f"版面{index}包含未授权的群友身份：{name}")
             action = _clean_text(raw_person.get("action"), maximum=120, label=f"版面{index}人物动作")
             quote = re.sub(r"\s+", " ", str(raw_person.get("quote") or "")).strip().strip("“”\"")
             if quote:
@@ -442,20 +464,68 @@ def parse_poster_copy(raw: str, source: dict[str, Any]) -> DailyPosterCopy:
                         source_messages,
                     ),
                 )
-                quoted_speakers.add(identity)
-            participants.append(
-                ParticipantCopy(
-                    message_id=message_id,
-                    sender_id=sender_id,
-                    name=name,
-                    action=action,
-                    quote=quote,
-                )
+            participant = ParticipantCopy(
+                message_id=message_id,
+                sender_id=sender_id,
+                name=name,
+                action=action,
+                quote=quote,
             )
+            if identity in participants_by_identity:
+                duplicate_count += 1
+                if not participants_by_identity[identity].quote and participant.quote:
+                    participants_by_identity[identity] = participant
+                continue
+            if len(identity_order) >= maximum:
+                trimmed_count += 1
+                continue
+            identity_order.append(identity)
+            participants_by_identity[identity] = participant
 
-        required_quotes = 2 if len(available_identities) >= 2 and len(participants) >= 2 else 1
+        model_identity_count = len(identity_order)
+        filled_count = 0
+        if len(identity_order) < minimum:
+            for binding in bindings.values():
+                name = binding["speaker"]
+                identity = _participant_identity(binding["sender_id"], name)
+                if identity in participants_by_identity or name not in participant_options:
+                    continue
+                identity_order.append(identity)
+                participants_by_identity[identity] = ParticipantCopy(
+                    message_id=binding["message_id"],
+                    sender_id=binding["sender_id"],
+                    name=name,
+                    action="参与本话题讨论",
+                    quote="",
+                )
+                filled_count += 1
+                if len(identity_order) >= minimum:
+                    break
+        if not (minimum <= len(identity_order) <= maximum):
+            raise PosterCopyError(f"版面{index}应使用 {minimum}～{maximum} 位真实参与者")
+
+        participants = [participants_by_identity[identity] for identity in identity_order]
+        quoted_speakers = {
+            _participant_identity(participant.sender_id, participant.name)
+            for participant in participants
+            if participant.quote
+        }
+        # 自动补齐的人物对白保持为空，不能伪造原话；模型至少仍须提供一位真实气泡。
+        required_quotes = 2 if model_identity_count >= 2 else 1
         if len(quoted_speakers) < required_quotes:
             raise PosterCopyError(f"版面{index}缺少足够的真实多人对白")
+
+        if repair_log is not None and (duplicate_count or trimmed_count or filled_count):
+            repair_log.append(
+                {
+                    "panel_index": index,
+                    "topic_id": topic_id,
+                    "deduplicated_count": duplicate_count,
+                    "trimmed_count": trimmed_count,
+                    "filled_count": filled_count,
+                    "final_participant_count": len(participants),
+                }
+            )
 
         panels.append(
             PanelCopy(
@@ -501,7 +571,7 @@ def _overall_visual(style_text: str, *, explicit_style: bool) -> str:
             "生成一张适合微信手机端阅读的竖版漫画群报，优先采用 1024×1536、2:3 画布；其他完整可读的竖版尺寸也可以采用，不要为了匹配尺寸裁切或拉伸。",
             style_line,
             "整张图像一页热闹的群聊漫画：顶部是群名称、完整统计时间、主标题和副标题，中间由多个大小错落的话题漫画格组成，底部展示当天总结和统计数据。",
-            "每个话题都要画成一个真实的“群友讨论现场”，而不是单人物插画。每个话题优先选择 2～4 位真正参与该段聊天的群友出镜，人物旁边直接标注对应的真实群昵称。",
+            "每个话题都要画成一个真实的“群友讨论现场”。严格按对应版面已经列出的真实参与者出镜，不重复人物、不补无关群友；有多位真实参与者时通常展示 2～4 位，只有 1 位时就只画该人物。人物旁边直接标注对应的真实群昵称。",
             "不同群友使用不同动作、表情和站位，以真实聊天气泡、人物反应、道具、动作线和视觉笑点表现讨论过程。所有剧情、人物关系和聊天内容均来自当天真实群聊，不额外编造新的聊天事实。",
         )
     )
@@ -621,8 +691,8 @@ def validate_fixed_prompt_contract(
     headings = _section_headings(prompt)
     panel_headings = [heading for heading in headings if re.fullmatch(r"版面\d+", heading)]
     panel_count = len(panel_headings)
-    if not 2 <= panel_count <= 7:
-        raise PosterCopyError("最终 Prompt 必须包含连续的 2～7 个版面")
+    if not 1 <= panel_count <= 7:
+        raise PosterCopyError("最终 Prompt 必须包含连续的 1～7 个版面")
     if expected_panel_count is not None and panel_count != expected_panel_count:
         raise PosterCopyError("版面数量与本次已校验入选话题数量不一致")
     expected = [
