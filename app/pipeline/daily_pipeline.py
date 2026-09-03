@@ -38,6 +38,7 @@ from app.db import repository as repo
 from app.db.models import Group
 from app.db.resilience import run_with_sqlite_retry
 from app.image.codex_generator import CodexImageGenerator
+from app.image.delivery_guard import image_delivery_eligible
 from app.image.image_task import ImageJob
 from app.pipeline.delivery_stages import DeliveryStages
 from app.pipeline.generation_stages import GenerationStages
@@ -62,6 +63,7 @@ from app.providers.history.wechat_cli import WechatCliProvider
 from app.v2.constants import (
     CORRUPT,
     FAILED,
+    IMAGE_FALLBACK_NOT_SENDABLE,
     IMAGE_GENERATION_FAILED,
     IMAGE_READY,
     PROMPT_FAILED,
@@ -628,6 +630,31 @@ class DailyPipeline:
                     continue  # 已发送，绝不重复
                 if run.get("send_hold"):
                     continue  # unknown / 手工审核必须保持 fail-closed
+                if not image_delivery_eligible(run):
+                    detail = "Level 3/Pillow 诊断图不可发送，已在发送扫描阶段拦截"
+                    self.store.update(
+                        group_name,
+                        run_date,
+                        status=FAILED,
+                        failed_stage="image",
+                        error=detail,
+                        error_type=IMAGE_FALLBACK_NOT_SENDABLE,
+                        send_state="held",
+                        send_hold=True,
+                        send_hold_reason=IMAGE_FALLBACK_NOT_SENDABLE,
+                        needs_manual_send=False,
+                        send_error=detail,
+                        send_error_type=IMAGE_FALLBACK_NOT_SENDABLE,
+                    )
+                    results.append(
+                        {
+                            "group_name": group_name,
+                            "status": "failed",
+                            "error_type": IMAGE_FALLBACK_NOT_SENDABLE,
+                            "detail": detail,
+                        }
+                    )
+                    continue
                 send_time = parse_send_time(self.settings.schedule_send_time)
                 due_at = datetime.combine(report_date, send_time, tzinfo=now.tzinfo)
                 if now < due_at:
@@ -1465,6 +1492,12 @@ class DailyPipeline:
             return {"status": "failed", "error": f"群不存在 {group_id}"}
         group_name = group.display_name or group.wechat_group_name
         run = self.store.load_run(group_name, run_date)
+        if not image_delivery_eligible(run):
+            return {
+                "status": "failed",
+                "error_type": IMAGE_FALLBACK_NOT_SENDABLE,
+                "error": "Level 3/Pillow 诊断图不可发送",
+            }
         can_resend_review = (
             run.get("status") == SENT
             and run.get("image_regen_status") == "ready_for_review"

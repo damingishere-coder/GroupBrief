@@ -70,6 +70,11 @@ const dashboard = {
       message_count: 12,
       speaker_count: 3,
       image_url: "",
+      image_status: "",
+      image_fallback_level: 0,
+      image_fallback_reason: "",
+      image_variant: "normal",
+      image_delivery_eligible: true,
       ranking_preview: [{ rank: 1, name: "成员甲", count: 8 }],
       ranking_error: "",
       error: "",
@@ -94,7 +99,7 @@ async function json(route: Route, body: unknown) {
   });
 }
 
-async function installFakeApi(page: Page, held = false) {
+async function installFakeApi(page: Page, held = false, diagnostic = false) {
   const calls: { path: string; search: string; body: unknown }[] = [];
   await page.route("**/api/**", async (route) => {
     const request = route.request();
@@ -103,11 +108,33 @@ async function installFakeApi(page: Page, held = false) {
     const body = request.postDataJSON?.() ?? null;
     calls.push({ path, search: url.search, body });
 
-    if (path === "/api/v2/dashboard") return json(route, held ? {
-      ...dashboard,
-      counts: { ...dashboard.counts, generated: 0, held: 1 },
-      cards: dashboard.cards.map((card) => ({ ...card, send_hold: true, send_state: "unknown", send_hold_reason: "SEND_RESULT_UNKNOWN", error: "发送结果需要人工核对" })),
-    } : dashboard);
+    if (path === "/api/v2/dashboard") {
+      if (diagnostic) {
+        return json(route, {
+          ...dashboard,
+          counts: { ...dashboard.counts, generated: 0, sent: 1 },
+          next_send: "",
+          cards: dashboard.cards.map((card) => ({
+            ...card,
+            image_enabled: true,
+            status: "SENT",
+            sent_at: "2026-08-25T08:36:00+08:00",
+            image_url: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+            image_status: "failed",
+            image_fallback_level: 3,
+            image_fallback_reason: "PROMPT_FAILED",
+            image_variant: "pillow",
+            image_delivery_eligible: false,
+            error: "Prompt 连续校验失败",
+          })),
+        });
+      }
+      return json(route, held ? {
+        ...dashboard,
+        counts: { ...dashboard.counts, generated: 0, held: 1 },
+        cards: dashboard.cards.map((card) => ({ ...card, send_hold: true, send_state: "unknown", send_hold_reason: "SEND_RESULT_UNKNOWN", error: "发送结果需要人工核对" })),
+      } : dashboard);
+    }
     if (path === "/api/v2/runtime/logs") {
       return json(route, {
         run_date: runDate,
@@ -209,6 +236,21 @@ test("Dashboard 人工核对只写状态，不调用发送接口", async ({ page
     resolution: "all_sent",
     expected_updated_at: "2026-08-25 08:00:00",
   });
+  expect(calls.some((call) => call.path === "/api/v2/pipeline/send")).toBe(false);
+});
+
+test("Dashboard 对历史已发送诊断图同时显示失败事实且不提供重发", async ({ page }) => {
+  const calls = await installFakeApi(page, false, true);
+  await page.goto("/#/dashboard");
+
+  await expect(page.getByText("已发送", { exact: true })).toBeVisible();
+  await expect(page.getByText("图片生成失败（已发送）", { exact: true })).toBeVisible();
+  await expect(page.getByText("诊断图不可发送", { exact: true })).toBeVisible();
+  const image = page.getByAltText("测试群 不可发送诊断图");
+  await expect(image).toBeVisible();
+  expect(await image.evaluate((element) => getComputedStyle(element).objectFit)).toBe("contain");
+  await expect(page.getByRole("button", { name: "立即发送" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "人工核对" })).toHaveCount(0);
   expect(calls.some((call) => call.path === "/api/v2/pipeline/send")).toBe(false);
 });
 

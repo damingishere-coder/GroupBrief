@@ -75,19 +75,23 @@ interface ViewerImage {
 
 function ImagePreview({ card, onOpen }: { card: DashboardCard; onOpen: (image: ViewerImage) => void }) {
   const [imageBroken, setImageBroken] = useState(false);
+  const diagnostic = card.image_delivery_eligible === false;
 
   if (card.image_url) {
-    const alt = `${card.group_name} 日报图片`;
+    const alt = diagnostic ? `${card.group_name} 不可发送诊断图` : `${card.group_name} 日报图片`;
     if (!imageBroken) {
       return (
-        <ImagePreviewTrigger
-          src={card.image_url}
-          alt={alt}
-          imageClassName="dashboard-task-image"
-          className="dashboard-task-image-trigger"
-          onError={() => setImageBroken(true)}
-          onOpen={() => onOpen({ src: card.image_url, alt, filename: "daily_image.png", title: alt })}
-        />
+        <div className={`dashboard-image-frame${diagnostic ? " is-diagnostic" : ""}`}>
+          {diagnostic && <StatusBadge tone="danger">诊断图不可发送</StatusBadge>}
+          <ImagePreviewTrigger
+            src={card.image_url}
+            alt={alt}
+            imageClassName="dashboard-task-image"
+            className="dashboard-task-image-trigger"
+            onError={() => setImageBroken(true)}
+            onOpen={() => onOpen({ src: card.image_url, alt, filename: "daily_image.png", title: alt })}
+          />
+        </div>
       );
     }
   }
@@ -124,7 +128,10 @@ function TaskActions({
 }: TaskActionsProps) {
   const canGenerate = card.status !== "SENT" && !card.prompt_hold;
   const canResolvePrompt = card.prompt_hold && card.prompt_hold_reason === "PROMPT_RESULT_UNKNOWN";
-  const canSend = ["IMAGE_READY", "READY_TO_SEND"].includes(card.status) && !card.sent_at && !card.send_hold;
+  const canSend = ["IMAGE_READY", "READY_TO_SEND"].includes(card.status)
+    && !card.sent_at
+    && !card.send_hold
+    && card.image_delivery_eligible !== false;
 
   return (
     <div className="dashboard-task-actions">
@@ -171,7 +178,7 @@ function TaskActions({
           微信发送未启用
         </Button>
       )}
-      {card.send_hold && (
+      {card.send_hold && card.image_delivery_eligible !== false && (
         <Button tone="secondary" className="ui-button-compact" onClick={onResolve}>
           <WarningCircle size={16} aria-hidden="true" />
           人工核对
@@ -555,7 +562,12 @@ export default function Dashboard() {
                     <h3>{card.group_name}</h3>
                     <span>{formatPeriod(card)} · 更新 {formatDateTime(card.updated_at)}</span>
                   </div>
-                  {card.prompt_hold ? <StatusBadge tone="warning">暂停待核对</StatusBadge> : <StatusPill status={card.status} />}
+                  <div className="dashboard-task-statuses">
+                    {card.prompt_hold ? <StatusBadge tone="warning">暂停待核对</StatusBadge> : <StatusPill status={card.status} />}
+                    {card.image_enabled && card.image_delivery_eligible === false && (
+                      <StatusBadge tone="danger">{card.sent_at || card.status === "SENT" ? "图片生成失败（已发送）" : "图片生成失败"}</StatusBadge>
+                    )}
+                  </div>
                 </div>
                 <div className="dashboard-task-content">
                   <section className="dashboard-ranking-preview" aria-label={`${card.group_name} Top 5 排行榜`}>

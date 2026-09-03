@@ -216,3 +216,40 @@ def test_build_daily_status_keeps_queued_image_pending_instead_of_claiming_runni
     assert group["image"]["job_status"] == "queued"
     assert group["image"]["status"] == "pending"
     assert group["node_status"] == "pending"
+
+
+def test_runtime_status_preserves_sent_truth_but_marks_diagnostic_image_failed(tmp_path):
+    store = RunStore(tmp_path / "output")
+    store.save_run(
+        "历史诊断图群",
+        "2026-09-03",
+        {
+            "group_id": "23",
+            "status": SENT,
+            "sent_at": "2026-09-03T08:36:00+08:00",
+            "image_status": "success",
+            "image_fallback_level": 3,
+            "image_fallback_reason": "PROMPT_FAILED",
+            "image_variant": "pillow",
+            "prompt_original_error": "Prompt 连续校验失败",
+        },
+    )
+
+    payload = build_daily_status(store, "2026-09-03")
+    group = payload["groups"][0]
+    by_node = {item["id"]: item for item in group["nodes"]}
+
+    assert group["run_status"] == SENT
+    assert group["node_status"] == "success"
+    assert group["send"]["status"] == "success"
+    assert by_node["image"]["status"] == "failed"
+    assert group["image"] == {
+        "status": "failed",
+        "job_status": "",
+        "attempts": 0,
+        "fallback_level": 3,
+        "fallback_reason": "PROMPT_FAILED",
+        "variant": "pillow",
+        "delivery_eligible": False,
+    }
+    assert group["last_error_summary"] == "Prompt 连续校验失败"

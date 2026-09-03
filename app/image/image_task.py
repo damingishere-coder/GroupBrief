@@ -24,6 +24,7 @@ from app.v2.constants import (
     IMAGE_FILE_MISSING,
     PROMPT_FAILED,
 )
+from app.image.delivery_guard import image_delivery_eligible
 from app.image.fallback import (
     image_failure_code,
     image_result_is_unknown,
@@ -206,19 +207,36 @@ class ImageJob:
                     self.output_path.unlink()
                 raise ValueError(verification_detail)
             detail["fact_verification"] = verification_detail
+        error_type = (
+            failure_class
+            if failure_class
+            in {
+                PROMPT_FAILED,
+                IMAGE_CONTENT_VERIFICATION_FAILED,
+                IMAGE_FILE_MISSING,
+            }
+            else IMAGE_GENERATION_FAILED
+        )
         return {
             "group_name": self.group_name,
-            "status": "success",
-            "success": True,
-            "detail": f"外部生图失败，已生成本地简化信息图：{self.output_path}",
-            "error_type": "",
+            "status": "diagnostic_fallback",
+            "success": False,
+            "detail": f"图片生成失败，已保留不可发送的本地诊断图：{self.output_path}",
+            "error_type": error_type,
             "generator_detail": detail,
         }
 
     def run(self) -> dict:
         """执行生图并验证落盘。返回结构化结果。"""
-        # 已存在有效图片且非 force：跳过，不重复生成
-        if not self.force:
+        try:
+            run_state = json.loads(
+                (self.output_path.parent / "run.json").read_text(encoding="utf-8")
+            )
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            run_state = {}
+        # 已存在的 Level 3/Pillow 文件虽然是合法 PNG，但只是诊断产物，不能
+        # 被重试流程误认成真实成功。只有来源可发送的旧图才允许跳过。
+        if not self.force and image_delivery_eligible(run_state):
             ok, _ = verify_image_contract(self.prompt_file, self.output_path)
             if ok:
                 return {
@@ -228,12 +246,6 @@ class ImageJob:
                     "detail": "图片已存在，跳过生成",
                     "error_type": "",
                 }
-        try:
-            run_state = json.loads(
-                (self.output_path.parent / "run.json").read_text(encoding="utf-8")
-            )
-        except (OSError, UnicodeError, json.JSONDecodeError):
-            run_state = {}
         if isinstance(run_state, dict) and run_state.get("image_force_local_fallback"):
             try:
                 return self._local_fallback(

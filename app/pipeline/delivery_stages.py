@@ -10,11 +10,18 @@ from zoneinfo import ZoneInfo
 from app.config.settings import Settings
 from app.core.observability import log_event
 from app.db.models import Group
+from app.image.delivery_guard import image_delivery_eligible
 from app.image.image_task import verify_image
 from app.pipeline.stage_result import StageResult
 from app.sender.base import WechatSender
 from app.services.group_name_sync import effective_send_target, send_target_mode
-from app.v2.constants import FAILED, IMAGE_FILE_MISSING, READY_TO_SEND, SENT
+from app.v2.constants import (
+    FAILED,
+    IMAGE_FALLBACK_NOT_SENDABLE,
+    IMAGE_FILE_MISSING,
+    READY_TO_SEND,
+    SENT,
+)
 from app.v2.run_store import RunStore
 
 
@@ -118,6 +125,15 @@ class DeliveryStages:
             allow_sent=context.allow_sent,
         )
         if not claim_id:
+            if claim_reason == IMAGE_FALLBACK_NOT_SENDABLE:
+                return StageResult.stop(
+                    {
+                        "group_name": context.group_name,
+                        "status": "failed",
+                        "error_type": IMAGE_FALLBACK_NOT_SENDABLE,
+                        "detail": "Level 3/Pillow 诊断图不可发送",
+                    }
+                )
             if claim_reason == "result_unknown":
                 return StageResult.stop(
                     {
@@ -160,6 +176,31 @@ class DeliveryStages:
         self,
         context: DeliveryContext,
     ) -> StageResult[DeliveryContext]:
+        if not image_delivery_eligible(context.run):
+            detail = "Level 3/Pillow 诊断图不可发送，已在发送前预检阶段拦截"
+            self.store.finish_send_claim(
+                context.group_name,
+                context.run_date,
+                context.claim_id,
+                send_state="held",
+                send_hold=True,
+                send_hold_reason=IMAGE_FALLBACK_NOT_SENDABLE,
+                needs_manual_send=False,
+                status=FAILED,
+                failed_stage="image",
+                error=detail,
+                error_type=IMAGE_FALLBACK_NOT_SENDABLE,
+                send_error=detail,
+                send_error_type=IMAGE_FALLBACK_NOT_SENDABLE,
+            )
+            return StageResult.stop(
+                {
+                    "group_name": context.group_name,
+                    "status": "failed",
+                    "error_type": IMAGE_FALLBACK_NOT_SENDABLE,
+                    "detail": detail,
+                }
+            )
         ranking_path = self.store.ranking_txt_path(
             context.group_name,
             context.run_date,
