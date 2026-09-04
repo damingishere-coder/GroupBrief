@@ -107,6 +107,69 @@ def test_allows_zero_padded_layout_numbers(tmp_path):
     assert review.unknown_numeric == ()
 
 
+def test_allows_local_fallback_header_from_trusted_run_metadata(tmp_path):
+    prompt = tmp_path / "image_prompt.txt"
+    prompt.write_text(
+        "【任务】\n外部内容整理失败，仅使用当天 ranking.json 生成本地简化信息图。",
+        encoding="utf-8",
+    )
+    (tmp_path / "messages.json").write_text(
+        json.dumps([{"sender_name": "群友甲", "content": "测试消息"}], ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (tmp_path / "ranking.json").write_text(
+        json.dumps({"message_count": 161, "speaker_count": 20}),
+        encoding="utf-8",
+    )
+    (tmp_path / "run.json").write_text(
+        json.dumps(
+            {
+                "group_name": "茶馆V3.0（三周年纪念）🐮🐴",
+                "run_date": "2026-09-04",
+                "message_count": 161,
+                "speaker_count": 20,
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    image = tmp_path / "daily_image.png"
+    Image.new("RGB", (16, 16), "white").save(image)
+
+    review = review_image_facts(
+        prompt,
+        image,
+        ocr_text="茶馆V3.0（三周年纪念）\n2026．09．04 · 简化版数据卡片\n消息 161\n参与 20",
+    )
+
+    assert review.ok
+    assert review.unknown_numeric == ()
+
+
+def test_rejects_local_fallback_header_for_a_different_run_date(tmp_path):
+    prompt = tmp_path / "image_prompt.txt"
+    prompt.write_text("【任务】\n生成本地简化信息图。", encoding="utf-8")
+    (tmp_path / "messages.json").write_text(
+        json.dumps([{"sender_name": "群友甲", "content": "测试消息"}], ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (tmp_path / "run.json").write_text(
+        json.dumps({"run_date": "2026-09-04"}),
+        encoding="utf-8",
+    )
+    image = tmp_path / "daily_image.png"
+    Image.new("RGB", (16, 16), "white").save(image)
+
+    review = review_image_facts(
+        prompt,
+        image,
+        ocr_text="2026．09．11 · 简化版数据卡片",
+    )
+
+    assert not review.ok
+    assert "11" in review.unknown_numeric
+
+
 def test_allows_deterministic_header_numbers_and_currency_alias(tmp_path):
     prompt = tmp_path / "image_prompt.txt"
     prompt.write_text(
