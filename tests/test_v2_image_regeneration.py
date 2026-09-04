@@ -94,6 +94,26 @@ def test_success_atomically_replaces_image_backs_up_old_and_holds_send(tmp_path)
     assert run["image_force_local_fallback"] is False
 
 
+def test_success_clears_image_content_verification_failure(tmp_path):
+    settings, store, group, run_date = _run(tmp_path, status="FAILED")
+    store.update(
+        group,
+        run_date,
+        failed_stage="image",
+        error="图片事实校验失败：无证据数字：05",
+        error_type="IMAGE_CONTENT_VERIFICATION_FAILED",
+    )
+
+    run = run_regeneration_now(settings, group, run_date, SuccessGenerator())
+
+    assert run["status"] == "READY_TO_SEND"
+    assert run["error"] is None
+    assert run["error_type"] is None
+    assert run["failed_stage"] is None
+    assert run["send_hold"] is True
+    assert run["needs_manual_send"] is True
+
+
 def test_cli_failure_keeps_old_image_and_fails_closed(tmp_path):
     settings, store, group, run_date = _run(tmp_path)
 

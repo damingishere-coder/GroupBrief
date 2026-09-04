@@ -21,6 +21,7 @@ from app.image.codex_generator import CodexImageGenerator
 from app.image.fact_verification import strict_fact_verification_enabled
 from app.image.image_task import ImageTaskResult, verify_image_contract
 from app.v2.constants import (
+    IMAGE_CONTENT_VERIFICATION_FAILED,
     IMAGE_FILE_MISSING,
     IMAGE_GENERATION_FAILED,
     READY_TO_SEND,
@@ -244,7 +245,11 @@ def _promote_image(
     current = store.load_run(group_name, run_date)
     next_status = SENT if current.get("status") == SENT else READY_TO_SEND
     success_fields: dict[str, Any] = {}
-    if str(current.get("error_type") or "") in {IMAGE_GENERATION_FAILED, IMAGE_FILE_MISSING}:
+    if str(current.get("error_type") or "") in {
+        IMAGE_CONTENT_VERIFICATION_FAILED,
+        IMAGE_GENERATION_FAILED,
+        IMAGE_FILE_MISSING,
+    }:
         success_fields.update(error=None, error_type=None, failed_stage=None)
     store.update(
         group_name,

@@ -89,7 +89,9 @@ def _canonical_number(value: str) -> str:
     normalized = normalized.replace("块", "元")
     if re.fullmatch(r"0+", normalized):
         return "0"
-    return normalized
+    # OCR 常保留日期、分镜或昵称中的整数前导零；它们不应把
+    # 05/09 之类的版式数字与已允许的 5/9 判为两个不同事实。
+    return re.sub(r"^0+(?=\d)", "", normalized)
 
 
 def _numeric_facts(value: str) -> set[str]:
@@ -120,6 +122,28 @@ def _load_evidence(prompt_file: Path) -> tuple[list[str], str, int]:
         line.strip() for line in visible_prompt.splitlines() if line.strip()
     ]
     numeric_evidence_lines: list[str] = []
+    # Level 3 本地信息图会直接渲染 run.json 中的群名、运行日期和人数，
+    # 而简化 Prompt 不一定重复这些字段。把渲染所依赖的确定性元数据加入
+    # 证据，避免日期 04/11 等被误判，同时仍拒绝不属于本次运行的数字。
+    run_path = prompt_file.with_name("run.json")
+    try:
+        run = json.loads(run_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        run = {}
+    if isinstance(run, dict):
+        trusted_run_fields = (
+            "group_name",
+            "run_date",
+            "period_start",
+            "period_end",
+            "message_count",
+            "speaker_count",
+        )
+        for field in trusted_run_fields:
+            value = str(run.get(field) or "").strip()
+            if value:
+                evidence_lines.append(value)
+                numeric_evidence_lines.append(value)
     for heading in ("群名称", "统计时间", "数据"):
         match = re.search(
             rf"【{heading}】\s*(.*?)(?=\n【|\Z)",
