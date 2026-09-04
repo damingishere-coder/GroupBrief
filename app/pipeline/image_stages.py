@@ -7,12 +7,14 @@ import hashlib
 from typing import Callable
 import uuid
 
+from app.image.delivery_guard import image_delivery_eligible
 from app.image.image_task import ImageJob, SerialImageQueue
 from app.image.regeneration import normalize_candidate_diagnostics
 from app.core.logging import get_logger
 from app.core.observability import log_event
 from app.v2.constants import (
     FAILED,
+    IMAGE_FALLBACK_NOT_SENDABLE,
     IMAGE_GENERATION_FAILED,
     IMAGE_READY,
     READY_TO_SEND,
@@ -93,31 +95,44 @@ class ImageStages:
         stage_timings = dict(current.get("stage_timings") or {})
         imagegen_ms = int(result.get("imagegen_ms") or 0)
         stage_timings["imagegen_ms"] = imagegen_ms
-        image_size_bytes = (
-            job.output_path.stat().st_size
-            if result["success"] and job.output_path.is_file()
-            else 0
-        )
         generator_detail = result.get("generator_detail")
         if not isinstance(generator_detail, dict):
             generator_detail = {}
+        image_metadata = {
+            "image_fallback_level": generator_detail.get("fallback_level"),
+            "image_variant": generator_detail.get("image_variant"),
+        }
+        diagnostic_fallback = not image_delivery_eligible(image_metadata)
+        image_size_bytes = (
+            job.output_path.stat().st_size
+            if (result["success"] or diagnostic_fallback) and job.output_path.is_file()
+            else 0
+        )
+        finished_at = datetime.now().astimezone().isoformat()
         image_job = current.get("image_job") if isinstance(current.get("image_job"), dict) else {}
         candidates = normalize_candidate_diagnostics(generator_detail)
+        if result["success"]:
+            image_job_status = "completed"
+        elif diagnostic_fallback:
+            image_job_status = "diagnostic_fallback"
+        elif generator_detail.get("outcome_unknown"):
+            image_job_status = "result_unknown"
+        elif generator_detail.get("stage") == "ambiguous" or candidates:
+            image_job_status = "ambiguous_result"
+        else:
+            image_job_status = "failed"
         next_job = {
             **image_job,
-            "status": "completed" if result["success"] else (
-                "result_unknown"
-                if generator_detail.get("outcome_unknown")
-                else "ambiguous_result"
-                if generator_detail.get("stage") == "ambiguous" or candidates
-                else "failed"
-            ),
-            "finished_at": datetime.now().astimezone().isoformat(),
+            "status": image_job_status,
+            "finished_at": finished_at,
             "receipt": {
                 "job_id": job.job_id,
                 "revision": job.revision,
                 "prompt_sha256": job.prompt_sha256,
                 "image_path": str(job.output_path.resolve()) if result["success"] else "",
+                "diagnostic_path": (
+                    str(job.output_path.resolve()) if diagnostic_fallback else ""
+                ),
                 "sha256": str(generator_detail.get("sha256") or ""),
                 "source": str(generator_detail.get("receipt_source") or ""),
             },
@@ -136,9 +151,16 @@ class ImageStages:
             stage_timings=stage_timings,
             imagegen_ms=imagegen_ms,
             image_generated_at=(
-                datetime.now().astimezone().isoformat()
+                finished_at
                 if result["success"]
                 else current.get("image_generated_at")
+            ),
+            image_diagnostic_generated_at=(
+                finished_at
+                if diagnostic_fallback
+                else ""
+                if result["success"]
+                else current.get("image_diagnostic_generated_at", "")
             ),
             image_size_bytes=image_size_bytes,
             image_attempt_count=int(generator_detail.get("attempt_count") or 0),
@@ -185,6 +207,17 @@ class ImageStages:
     def advance_ready(self, job: ImageJob, run_date: str) -> None:
         run = self.store.load_run(job.group_name, run_date)
         if run.get("status") == IMAGE_READY:
+            if not image_delivery_eligible(run):
+                self.store.update(
+                    job.group_name,
+                    run_date,
+                    status=FAILED,
+                    failed_stage="image",
+                    error="Level 3/Pillow 诊断图不可进入发送流程",
+                    image_error="Level 3/Pillow 诊断图不可进入发送流程",
+                    error_type=IMAGE_FALLBACK_NOT_SENDABLE,
+                )
+                return
             self.store.update(job.group_name, run_date, status=READY_TO_SEND)
 
     def run_jobs(

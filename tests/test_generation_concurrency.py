@@ -7,6 +7,7 @@ import time
 from datetime import datetime
 
 import pytest
+from PIL import Image
 from sqlmodel import Session, SQLModel, create_engine
 
 from app.ai.concurrency import bounded_slot
@@ -170,10 +171,7 @@ class ImmediateFakeImageGenerator:
         try:
             self.barrier.wait(timeout=5)
             output_path.parent.mkdir(parents=True, exist_ok=True)
-            output_path.write_bytes(bytes.fromhex(
-                "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489"
-                "0000000d4944415478da63f8cfc0f80100050001fff83f240000000049454e44ae426082"
-            ))
+            Image.new("RGBA", (1, 1), (0, 0, 0, 0)).save(output_path, format="PNG")
         finally:
             with self.lock:
                 self.active -= 1

@@ -20,6 +20,7 @@ from app.api.v2_ui_common import (
 )
 from app.config.settings import Settings, get_settings
 from app.db import repository as repo
+from app.image.delivery_guard import image_delivery_eligible, image_fallback_level
 from app.scheduler.period import PeriodResolver
 from app.scheduler.runtime_status import build_daily_status
 from app.services.runtime_logs import read_runtime_logs
@@ -60,6 +61,14 @@ def dashboard(
         runtime_run.setdefault("group_name", name)
         runtime_runs.append(runtime_run)
         status = run.get("status", "PENDING")
+        fallback_level = image_fallback_level(run)
+        image_variant = str(run.get("image_variant") or "normal")
+        image_can_deliver = image_delivery_eligible(run)
+        image_status = (
+            "failed"
+            if not image_can_deliver
+            else str(run.get("image_status") or "")
+        )
         image_path = store.image_path(name, selected_run_date)
         image_url = ""
         if image_path.exists() and Path(image_path).stat().st_size > 0:
@@ -115,11 +124,17 @@ def dashboard(
                 "message_count": run.get("message_count", 0),
                 "speaker_count": run.get("speaker_count", 0),
                 "image_url": image_url,
+                "image_status": image_status,
+                "image_fallback_level": fallback_level,
+                "image_fallback_reason": str(run.get("image_fallback_reason") or ""),
+                "image_variant": image_variant,
+                "image_delivery_eligible": image_can_deliver,
                 "ranking_preview": ranking_preview,
                 "ranking_error": ranking_error,
                 "error": (
                     run.get("error")
                     or run.get("image_error")
+                    or run.get("prompt_original_error")
                     or run.get("send_error")
                     or run.get("error_type")
                     or ""
@@ -155,6 +170,7 @@ def dashboard(
         and not card["sent_at"]
         and card["wechat_send_enabled"]
         and not card["send_hold"]
+        and card["image_delivery_eligible"]
         for card in cards
     ):
         next_send = f"{settings.schedule_send_time}（按群 ID 串行批次）"

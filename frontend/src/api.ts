@@ -134,6 +134,11 @@ export interface DashboardCard {
   message_count: number;
   speaker_count: number;
   image_url: string;
+  image_status: string;
+  image_fallback_level: number;
+  image_fallback_reason: string;
+  image_variant: string;
+  image_delivery_eligible: boolean;
   ranking_preview: {
     rank: number;
     name: string;

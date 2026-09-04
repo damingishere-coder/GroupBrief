@@ -172,6 +172,67 @@ def test_dashboard_counts_prompt_unknown_as_held(tmp_path, monkeypatch) -> None:
     assert result["cards"][0]["prompt_operation_id"] == "operation-123"
 
 
+def test_dashboard_preserves_sent_truth_and_exposes_diagnostic_image_failure(
+    tmp_path, monkeypatch
+) -> None:
+    group = SimpleNamespace(
+        id=23,
+        display_name="历史诊断图群",
+        wechat_group_name="历史诊断图群",
+        send_time="08:30",
+        schedule_rule="daily",
+        image_enabled=True,
+        wechat_send_enabled=True,
+        ranking_template="",
+        image_prompt_template="",
+    )
+    image_path = Path(tmp_path) / "daily_image.png"
+    image_path.write_bytes(b"diagnostic-png-placeholder")
+
+    class FakeStore:
+        root = Path(tmp_path)
+
+        def load_run(self, _group_name, _run_date):
+            return {
+                "status": "SENT",
+                "sent_at": "2026-09-03T08:36:00+08:00",
+                "image_status": "success",
+                "image_fallback_level": 3,
+                "image_fallback_reason": "PROMPT_FAILED",
+                "image_variant": "pillow",
+                "prompt_original_error": "Prompt 连续校验失败",
+            }
+
+        def image_path(self, _group_name, _run_date):
+            return image_path
+
+        def ranking_json_path(self, _group_name, _run_date):
+            return Path(tmp_path) / "missing-ranking.json"
+
+    monkeypatch.setattr(v2_ui_read, "_store", lambda _settings: FakeStore())
+    monkeypatch.setattr(v2_ui_read.repo, "list_groups", lambda *_args, **_kwargs: [group])
+
+    result = v2_ui_read.dashboard(
+        session=object(),
+        settings=Settings(_env_file=None, output_dir=tmp_path),
+        run_date="2026-09-03",
+    )
+    card = result["cards"][0]
+    runtime_group = result["runtime"]["groups"][0]
+
+    assert result["counts"]["sent"] == 1
+    assert card["status"] == "SENT"
+    assert card["image_status"] == "failed"
+    assert card["image_fallback_level"] == 3
+    assert card["image_fallback_reason"] == "PROMPT_FAILED"
+    assert card["image_variant"] == "pillow"
+    assert card["image_delivery_eligible"] is False
+    assert card["error"] == "Prompt 连续校验失败"
+    assert runtime_group["run_status"] == "SENT"
+    assert runtime_group["image"]["status"] == "failed"
+    assert runtime_group["send"]["status"] == "success"
+
+
 def test_dashboard_accepts_run_date_and_returns_top_five_ranking_preview(
     tmp_path, monkeypatch
 ) -> None:

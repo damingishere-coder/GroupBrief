@@ -1,4 +1,4 @@
-"""有证据、喜剧优先的日报候选主题评分与 5～7 个高密度动态选题。"""
+"""有证据、喜剧优先的日报候选主题评分与 1～7 个高密度动态选题。"""
 
 from __future__ import annotations
 
@@ -14,9 +14,9 @@ from app.services.speaker_identity import build_speaker_stats, speaker_name_sort
 
 from app.ai.conversation_segments import ConversationChunk, PromptMessage
 
-TOPIC_SELECTION_VERSION = "6.0"
+TOPIC_SELECTION_VERSION = "7.0"
 MAX_CANDIDATES = 10
-MIN_SELECTED = 2
+MIN_SELECTED = 1
 TARGET_SELECTED = 5
 MAX_SELECTED = 7
 HIGH_VOLUME_MESSAGE_THRESHOLD = 200
@@ -25,6 +25,92 @@ SELECTION_MAX_GAP = 15.0
 VISIBLE_PARTICIPANT_LIMIT = 4
 VISIBLE_PARTICIPANT_CHAR_BUDGET = 48
 UNRESOLVED_PARTICIPANT_LABEL = "群友（昵称未识别）"
+
+POLITICAL_KEYWORD_POLICY_VERSION = "political-keywords-v1"
+# 仅包含明确政治名词，不维护人物姓名，也不使用容易误伤日常聊天的宽泛词。
+POLITICAL_TOPIC_KEYWORDS: tuple[str, ...] = (
+    "地缘政治",
+    "外交制裁",
+    "主权争议",
+    "人大常委会",
+    "全国人大",
+    "人大代表",
+    "全国政协",
+    "政协委员",
+    "国家主席",
+    "副总统",
+    "执政党",
+    "在野党",
+    "党代会",
+    "总书记",
+    "参议院",
+    "众议院",
+    "政治",
+    "政党",
+    "两会",
+    "选举",
+    "大选",
+    "竞选",
+    "公投",
+    "总统",
+    "总理",
+    "首相",
+    "国会",
+    "议会",
+    "内阁",
+    "弹劾",
+    "政变",
+    "示威",
+    "抗议",
+    "台独",
+    "港独",
+    "藏独",
+    "疆独",
+    "standing committee of the national people's congress",
+    "chinese people's political consultative conference",
+    "national people's congress",
+    "house of representatives",
+    "hong kong independence",
+    "taiwan independence",
+    "tibetan independence",
+    "xinjiang independence",
+    "presidential election",
+    "diplomatic sanctions",
+    "sovereignty dispute",
+    "opposition party",
+    "political party",
+    "political campaign",
+    "party congress",
+    "general election",
+    "general secretary",
+    "vice president",
+    "prime minister",
+    "ruling party",
+    "cppcc member",
+    "npc deputy",
+    "head of state",
+    "military coup",
+    "political protest",
+    "political demonstration",
+    "geopolitics",
+    "geopolitical",
+    "referendum",
+    "impeachment",
+    "parliament",
+    "president",
+    "premier",
+    "election",
+    "campaign",
+    "congress",
+    "senate",
+    "cabinet",
+    "protest",
+    "demonstration",
+    "politics",
+    "political",
+    "cppcc",
+    "coup",
+)
 
 SCORE_WEIGHTS = {
     "comedy": 40.0,
@@ -344,6 +430,45 @@ def _log_normalized(value: float, maximum: float, weight: float) -> float:
     return round(weight * math.log1p(value) / math.log1p(maximum), 1)
 
 
+def _political_keyword_matches(
+    candidate: dict[str, Any], evidence_dialogue: Iterable[dict[str, Any]]
+) -> list[str]:
+    evidence_text = " ".join(
+        str(entry.get("original_text") or entry.get("text") or "")
+        for entry in evidence_dialogue
+        if isinstance(entry, dict)
+    )
+    combined = " ".join(
+        (
+            str(candidate.get("title") or ""),
+            str(candidate.get("summary") or ""),
+            str(candidate.get("visual_gag") or ""),
+            evidence_text,
+        )
+    )
+    normalized = unicodedata.normalize("NFKC", combined).casefold()
+    matches: list[str] = []
+    normalized_matches: list[str] = []
+    for keyword in POLITICAL_TOPIC_KEYWORDS:
+        normalized_keyword = unicodedata.normalize("NFKC", keyword).casefold()
+        if normalized_keyword.isascii():
+            matched = bool(
+                re.search(
+                    rf"(?<![a-z0-9_]){re.escape(normalized_keyword)}(?![a-z0-9_])",
+                    normalized,
+                )
+            )
+        else:
+            matched = normalized_keyword in normalized
+        if not matched or any(
+            normalized_keyword in existing for existing in normalized_matches
+        ):
+            continue
+        matches.append(keyword)
+        normalized_matches.append(normalized_keyword)
+    return matches
+
+
 def score_and_select_topics(
     candidates: list[dict[str, Any]], messages: Iterable[PromptMessage]
 ) -> dict[str, Any]:
@@ -352,7 +477,7 @@ def score_and_select_topics(
     if len(candidates) < MIN_SELECTED:
         raise TopicSelectionError(
             "TOPIC_CANDIDATES_INSUFFICIENT",
-            "无法从真实消息中取得至少两个拥有独立证据的主题",
+            "无法从真实消息中取得至少一个拥有独立证据的主题",
         )
 
     metrics: list[dict[str, Any]] = []
@@ -377,6 +502,9 @@ def score_and_select_topics(
                 f"候选主题“{candidate['title']}”没有可回查的原话证据",
             )
         evidence_dialogue = _evidence_dialogue(items)
+        political_keyword_matches = _political_keyword_matches(
+            candidate, evidence_dialogue
+        )
         dialogue_speaker_count = len(
             {
                 str(entry.get("speaker") or "").strip()
@@ -391,6 +519,11 @@ def score_and_select_topics(
                 "people": attribution["participants"],
                 "quotes": verified_quotes,
                 "evidence_dialogue": evidence_dialogue,
+                "image_eligible": not political_keyword_matches,
+                "political_keyword_matches": political_keyword_matches,
+                "selection_exclusion_reason": (
+                    "POLITICAL_KEYWORD_MATCH" if political_keyword_matches else ""
+                ),
                 "dialogue_speaker_count": dialogue_speaker_count,
                 "evidence_message_count": len(ids),
                 **attribution,
@@ -418,13 +551,30 @@ def score_and_select_topics(
         scores["total"] = round(sum(scores.values()), 1)
         scored.append({**item, "scores": scores})
 
-    scored.sort(key=lambda item: (-item["scores"]["total"], item["start_time"] or "", item["topic_id"]))
+    scored.sort(
+        key=lambda item: (
+            -item["scores"]["total"],
+            item["start_time"] or "",
+            item["topic_id"],
+        )
+    )
+    for rank, item in enumerate(scored, start=1):
+        item["rank"] = rank
+        item["eligible_rank"] = None
+        item["selected"] = False
+
+    eligible_scored = [item for item in scored if item["image_eligible"]]
     selected_ids: list[str] = []
     previous_total: float | None = None
-    guaranteed_selected = min(TARGET_SELECTED, len(scored))
-    for rank, item in enumerate(scored, start=1):
-        selected = rank <= guaranteed_selected
-        if guaranteed_selected < rank <= MAX_SELECTED:
+    guaranteed_selected = min(TARGET_SELECTED, len(eligible_scored))
+    additional_selection_open = True
+    for eligible_rank, item in enumerate(eligible_scored, start=1):
+        item["eligible_rank"] = eligible_rank
+        selected = eligible_rank <= guaranteed_selected
+        if (
+            guaranteed_selected < eligible_rank <= MAX_SELECTED
+            and additional_selection_open
+        ):
             total = item["scores"]["total"]
             gap = (previous_total - total) if previous_total is not None else 0.0
             selected = (
@@ -434,19 +584,14 @@ def score_and_select_topics(
                 and item["dialogue_speaker_count"] >= 2
             )
             if not selected:
-                # 分数降序；第一个不满足后，后续候选也不再入选。
-                for tail in scored[rank - 1 :]:
-                    tail["selected"] = False
-                break
-        item["rank"] = rank
+                # 合格候选按分数降序；第一个不满足后，后续候选也不再入选。
+                additional_selection_open = False
         item["selected"] = selected
         if selected:
             selected_ids.append(item["topic_id"])
         previous_total = item["scores"]["total"]
 
     for rank, item in enumerate(scored, start=1):
-        item.setdefault("rank", rank)
-        item.setdefault("selected", False)
         item.pop("interestingness_score", None)
         item.pop("comedy_score", None)
         item.pop("group_recognition_score", None)
@@ -454,6 +599,7 @@ def score_and_select_topics(
 
     return {
         "topic_selection_version": TOPIC_SELECTION_VERSION,
+        "political_keyword_policy_version": POLITICAL_KEYWORD_POLICY_VERSION,
         "weights": SCORE_WEIGHTS,
         "thresholds": {
             "max_candidates": MAX_CANDIDATES,
@@ -465,6 +611,20 @@ def score_and_select_topics(
             "additional_max_gap": SELECTION_MAX_GAP,
         },
         "candidate_count": len(scored),
+        "safe_candidate_count": len(eligible_scored),
+        "blocked_candidate_count": len(scored) - len(eligible_scored),
+        "blocked_topic_ids": [
+            item["topic_id"] for item in scored if not item["image_eligible"]
+        ],
+        "political_keyword_hits": [
+            {
+                "topic_id": item["topic_id"],
+                "title": item["title"],
+                "matched_keywords": item["political_keyword_matches"],
+            }
+            for item in scored
+            if not item["image_eligible"]
+        ],
         "selected_count": len(selected_ids),
         "selected_topic_ids": selected_ids,
         "candidates": scored,
@@ -473,6 +633,13 @@ def score_and_select_topics(
 
 def selected_topics_json(selection: dict[str, Any]) -> str:
     selected = [item for item in selection.get("candidates", []) if item.get("selected")]
+    if not selected and selection.get("blocked_candidate_count"):
+        raise TopicSelectionError(
+            "TOPIC_CANDIDATES_POLITICAL",
+            "全部候选主题均命中政治关键词，已停止外部生图内容整理",
+        )
     if not (MIN_SELECTED <= len(selected) <= MAX_SELECTED):
-        raise TopicSelectionError("TOPIC_CANDIDATES_INSUFFICIENT", "最终入选主题数量不在 2～7 范围")
+        raise TopicSelectionError(
+            "TOPIC_CANDIDATES_INSUFFICIENT", "最终入选主题数量不在 1～7 范围"
+        )
     return json.dumps({"selected_topics": selected}, ensure_ascii=False, separators=(",", ":"))

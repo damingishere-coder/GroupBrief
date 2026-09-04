@@ -29,6 +29,7 @@ from app.db.models import Group, GroupRun, Report
 from app.pipeline.daily_pipeline import DailyPipeline
 from app.v2.constants import (
     FAILED,
+    IMAGE_FALLBACK_NOT_SENDABLE,
     IMAGE_FILE_MISSING,
     IMAGE_GENERATION_FAILED,
     IMAGE_READY,
@@ -107,9 +108,10 @@ class FakeSource(WeChatDataSource):
 
 
 class FakePrompt:
-    def __init__(self, fail=False, failure_meta=None):
+    def __init__(self, fail=False, failure_meta=None, topic_selection=None):
         self.fail = fail
         self.failure_meta = failure_meta
+        self.topic_selection = topic_selection
         self.inputs = []
 
     def build(self, data):
@@ -123,7 +125,7 @@ class FakePrompt:
                 error="DeepSeek 失败",
                 meta=self.failure_meta,
             )
-        topic_selection = data.persisted_topic_selection or {
+        topic_selection = data.persisted_topic_selection or self.topic_selection or {
             "topic_selection_version": "4.0",
             "selected_topic_ids": ["topic-01", "topic-02"],
             "selected_count": 2,
@@ -146,6 +148,8 @@ class FakePrompt:
         topic_selection = dict(topic_selection)
         topic_selection.setdefault("message_snapshot_sha256", snapshot_hash)
         topic_selection.setdefault("speaker_fingerprint", speaker_fingerprint)
+        selected_topic_ids = list(topic_selection.get("selected_topic_ids") or [])
+        single_topic = len(selected_topic_ids) == 1
         return PromptOutput(
             True,
             "【任务】\n生成图片\n【主标题】今天热聊",
@@ -156,13 +160,16 @@ class FakePrompt:
                 "speaker_fingerprint": speaker_fingerprint,
                 "speaker_bindings": [],
                 "layout_catalog_version": "comic-panels-v3",
-                "layout_id": "split_focus",
-                "structure_mode": "dual_rhythm",
-                "featured_topic_ids": ["topic-01", "topic-02"],
-                "topic_order": ["topic-01", "topic-02"],
+                "layout_id": "hero_with_insets" if single_topic else "split_focus",
+                "structure_mode": "hero_rhythm" if single_topic else "dual_rhythm",
+                "featured_topic_ids": selected_topic_ids[:1] if single_topic else selected_topic_ids[:2],
+                "topic_order": selected_topic_ids,
                 "panel_beats": [
-                    {"topic_id": "topic-01", "shots": ["establishing", "reaction"]},
-                    {"topic_id": "topic-02", "shots": ["dialogue"]},
+                    {
+                        "topic_id": topic_id,
+                        "shots": ["establishing", "reaction"] if index == 0 else ["dialogue"],
+                    }
+                    for index, topic_id in enumerate(selected_topic_ids)
                 ],
             },
         )
@@ -746,15 +753,23 @@ def test_force_generate_blocks_corrupt_state_before_name_sync(tmp_path, monkeypa
     assert run_path.read_bytes() == original
 
 
-def test_force_generate_image_failure_uses_local_fallback(tmp_path):
+def test_force_generate_image_failure_keeps_diagnostic_fallback_failed(tmp_path):
     gen = FakeGenerator(fail=True)
     pipeline, group = _make_pipeline(tmp_path, gen=gen)
     result = pipeline.force_generate(group.id, "2026-08-18")
-    assert result["status"] == "ready_to_send"
+    assert result["status"] == "failed"
     run = pipeline.store.load_run("测试群", "2026-08-18")
-    assert run["status"] == READY_TO_SEND
+    assert run["status"] == FAILED
+    assert run["failed_stage"] == "image"
+    assert run["error_type"] == IMAGE_GENERATION_FAILED
+    assert run["image_status"] == "diagnostic_fallback"
     assert run["image_fallback_level"] == 3
     assert run["image_variant"] == "pillow"
+    assert run["image_job"]["status"] == "diagnostic_fallback"
+    assert run["image_job"]["receipt"]["image_path"] == ""
+    assert run["image_job"]["receipt"]["diagnostic_path"]
+    assert len(run["image_job"]["receipt"]["sha256"]) == 64
+    assert pipeline.store.image_path("测试群", "2026-08-18").is_file()
 
 
 def test_image_success_clears_stale_failure_fields(tmp_path):
@@ -768,6 +783,9 @@ def test_image_success_clears_stale_failure_fields(tmp_path):
         error="旧生图失败",
         error_type=IMAGE_GENERATION_FAILED,
         image_error="旧生图失败",
+        image_fallback_level=3,
+        image_fallback_reason="PROMPT_FAILED",
+        image_variant="pillow",
     )
     job = pipeline._make_image_job(group, "2026-08-18", force=True)
 
@@ -789,6 +807,9 @@ def test_image_success_clears_stale_failure_fields(tmp_path):
     assert run["error"] is None
     assert run["error_type"] is None
     assert run["image_error"] is None
+    assert run["image_fallback_level"] == 0
+    assert run["image_fallback_reason"] == ""
+    assert run["image_variant"] == "normal"
 
 
 def test_image_job_refuses_stale_prompt_contract(tmp_path):
@@ -816,9 +837,15 @@ def test_generate_data_failure_marks_failed(tmp_path):
     assert run["failed_stage"] == "data"
 
 
-def test_generate_prompt_failure_uses_local_infographic(tmp_path):
+def test_generate_prompt_failure_keeps_local_infographic_as_failed_diagnostic(tmp_path):
     preserved_meta = {
-        "topic_selection": {"selected_topic_ids": ["topic-01"]},
+        "topic_selection": {
+            "political_keyword_policy_version": "political-keywords-v1",
+            "selected_topic_ids": [],
+            "safe_candidate_count": 0,
+            "blocked_candidate_count": 2,
+            "blocked_topic_ids": ["topic-01", "topic-02"],
+        },
         "layout_id": "split_focus",
     }
     pipeline, group = _make_pipeline(
@@ -826,9 +853,12 @@ def test_generate_prompt_failure_uses_local_infographic(tmp_path):
         prompt=FakePrompt(fail=True, failure_meta=preserved_meta),
     )
     results = pipeline.generate_all(run_date="2026-08-18")
-    assert results[0]["status"] == "ready_to_send"
+    assert results[0]["status"] == "failed"
+    assert results[0]["error_type"] == "PROMPT_FAILED"
     run = pipeline.store.load_run("测试群", "2026-08-18")
-    assert run["status"] == READY_TO_SEND
+    assert run["status"] == FAILED
+    assert run["failed_stage"] == "image"
+    assert run["image_status"] == "diagnostic_fallback"
     assert run["prompt_fallback_level"] == 3
     assert run["image_fallback_level"] == 3
     assert run["image_variant"] == "pillow"
@@ -836,6 +866,52 @@ def test_generate_prompt_failure_uses_local_infographic(tmp_path):
     assert run["prompt_meta"]["layout_id"] == "split_focus"
     assert run["prompt_meta"]["mode"] == "local_infographic"
     assert pipeline.store.image_path("测试群", "2026-08-18").is_file()
+
+
+def test_generate_one_safe_topic_still_calls_normal_image_generator(tmp_path):
+    topic_selection = {
+        "topic_selection_version": "7.0",
+        "political_keyword_policy_version": "political-keywords-v1",
+        "selected_topic_ids": ["topic-02"],
+        "selected_count": 1,
+        "safe_candidate_count": 1,
+        "blocked_candidate_count": 1,
+        "blocked_topic_ids": ["topic-01"],
+        "candidates": [
+            {
+                "topic_id": "topic-01",
+                "selected": False,
+                "image_eligible": False,
+                "political_keyword_matches": ["总统"],
+            },
+            {
+                "topic_id": "topic-02",
+                "selected": True,
+                "image_eligible": True,
+                "title": "票房",
+                "summary": "张三聊票房",
+                "message_ids": ["m1"],
+                "quotes": ["今天聊了票房"],
+                "visible_participants": ["张三"],
+            },
+        ],
+    }
+    generator = FakeGenerator()
+    pipeline, _ = _make_pipeline(
+        tmp_path,
+        prompt=FakePrompt(topic_selection=topic_selection),
+        gen=generator,
+    )
+
+    results = pipeline.generate_all(run_date="2026-08-18")
+
+    assert results[0]["status"] == "ready_to_send"
+    assert len(generator.calls) == 1
+    run = pipeline.store.load_run("测试群", "2026-08-18")
+    assert run["prompt_fallback_level"] == 0
+    assert run["image_fallback_level"] == 0
+    assert run["prompt_meta"]["topic_selection"]["selected_topic_ids"] == ["topic-02"]
+    assert run["prompt_meta"]["structure_mode"] == "hero_rhythm"
 
 
 def test_image_disabled_goes_ready_to_send_without_image(tmp_path):
@@ -1014,6 +1090,121 @@ def test_send_due_sends_text_then_image(tmp_path):
     sender = pipeline.sender
     assert len(sender.text_calls) == 1
     assert len(sender.image_calls) == 1
+
+
+@pytest.mark.parametrize(
+    ("fallback_level", "image_variant"),
+    [(3, "normal"), (0, "pillow")],
+)
+def test_send_scan_rejects_diagnostic_fallback_without_sender_calls(
+    tmp_path, fallback_level, image_variant
+):
+    pipeline = _ready_to_send(tmp_path)
+    pipeline.store.update(
+        "测试群",
+        "2026-08-18",
+        status=READY_TO_SEND,
+        image_fallback_level=fallback_level,
+        image_variant=image_variant,
+        image_fallback_reason="PROMPT_FAILED",
+    )
+
+    result = pipeline.send_due(now=datetime(2026, 8, 18, 9, 0, 0))[0]
+    run = pipeline.store.load_run("测试群", "2026-08-18")
+
+    assert result["status"] == "failed"
+    assert result["error_type"] == IMAGE_FALLBACK_NOT_SENDABLE
+    assert run["status"] == FAILED
+    assert run["failed_stage"] == "image"
+    assert run["send_hold_reason"] == IMAGE_FALLBACK_NOT_SENDABLE
+    assert pipeline.sender.text_calls == []
+    assert pipeline.sender.image_calls == []
+
+
+def test_run_store_send_claim_rejects_diagnostic_fallback(tmp_path):
+    store = RunStore(tmp_path / "output")
+    store.save_run(
+        "测试群",
+        "2026-08-18",
+        {
+            **_ready_run_contract(image_enabled=True),
+            "image_fallback_level": 3,
+            "image_variant": "pillow",
+        },
+    )
+
+    claim_id, _, reason = store.claim_send(
+        "测试群",
+        "2026-08-18",
+        now=datetime(2026, 8, 18, 8, 30, 0),
+        lease_seconds=60,
+    )
+
+    assert claim_id is None
+    assert reason == IMAGE_FALLBACK_NOT_SENDABLE
+
+
+def test_force_send_rejects_diagnostic_fallback_before_late_send_checks(tmp_path):
+    pipeline, group = _make_pipeline(tmp_path)
+    pipeline.generate_all(run_date="2026-08-18")
+    pipeline.store.update(
+        "测试群",
+        "2026-08-18",
+        status=READY_TO_SEND,
+        image_fallback_level=3,
+        image_variant="pillow",
+    )
+
+    result = pipeline.force_send(group.id, "2026-08-18")
+
+    assert result["status"] == "failed"
+    assert result["error_type"] == IMAGE_FALLBACK_NOT_SENDABLE
+    assert pipeline.sender.text_calls == []
+    assert pipeline.sender.image_calls == []
+
+
+def test_send_preflight_rejects_diagnostic_fallback_without_sender_calls(
+    tmp_path, monkeypatch
+):
+    pipeline, group = _make_pipeline(tmp_path)
+    pipeline.generate_all(run_date="2026-08-18")
+    now = datetime(2026, 8, 18, 8, 30, 0)
+    claim_id, _, reason = pipeline.store.claim_send(
+        "测试群",
+        "2026-08-18",
+        now=now,
+        lease_seconds=60,
+    )
+    assert claim_id and reason == "claimed"
+    diagnostic_run = pipeline.store.update(
+        "测试群",
+        "2026-08-18",
+        image_fallback_level=3,
+        image_variant="pillow",
+        image_fallback_reason="IMAGE_GENERATION_FAILED",
+    )
+    monkeypatch.setattr(
+        pipeline.store,
+        "claim_send",
+        lambda *_args, **_kwargs: (claim_id, diagnostic_run, "claimed"),
+    )
+
+    result = pipeline._send_one(
+        group,
+        "测试群",
+        diagnostic_run,
+        "2026-08-18",
+        now,
+    )
+    run = pipeline.store.load_run("测试群", "2026-08-18")
+
+    assert result["status"] == "failed"
+    assert result["error_type"] == IMAGE_FALLBACK_NOT_SENDABLE
+    assert run["status"] == FAILED
+    assert run["failed_stage"] == "image"
+    assert run["send_hold_reason"] == IMAGE_FALLBACK_NOT_SENDABLE
+    assert pipeline.sender.text_calls == []
+    assert pipeline.sender.image_calls == []
 
 
 def test_explicit_text_failures_use_backoff_and_stop_after_send_retry_budget(tmp_path):

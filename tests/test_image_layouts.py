@@ -62,8 +62,8 @@ def test_catalog_contains_distinct_comic_panel_grammars():
         assert any(word in combined for word in ("大格", "宽格", "竖格", "特写", "跨格", "尺寸"))
 
 
-@pytest.mark.parametrize("count", [5, 6, 7])
-def test_parse_accepts_five_to_seven_topics_and_expands_panel_count(count: int):
+@pytest.mark.parametrize("count", [1, 5, 6, 7])
+def test_parse_accepts_one_to_seven_topics_and_expands_panel_count(count: int):
     plan = parse_layout_plan(_raw_plan(count), _topic_ids(count))
     assert list(plan.topic_order) == _topic_ids(count)
     assert plan.panel_count == count + 1
@@ -131,6 +131,15 @@ def test_fallback_avoids_recent_three_and_keeps_unequal_storyboard():
     assert "topic-" not in instruction
 
 
+def test_single_topic_fallback_uses_one_featured_topic_without_padding():
+    plan = fallback_layout_plan(_topic_ids(1), seed_text="group|2026-09-02")
+
+    assert plan.topic_order == ("topic-01",)
+    assert plan.featured_topic_ids == ("topic-01",)
+    assert plan.structure_mode == "hero_rhythm"
+    assert plan.panel_count == 2
+
+
 def test_only_current_catalog_with_valid_panel_beats_is_restored():
     plan = parse_layout_plan(_raw_plan(5, layout_id="split_focus"), _topic_ids(5))
     meta = plan.to_meta()
@@ -147,5 +156,5 @@ def test_only_current_catalog_with_valid_panel_beats_is_restored():
 
 
 def test_more_than_seven_topics_is_rejected():
-    with pytest.raises(LayoutPlanError, match="2～7"):
+    with pytest.raises(LayoutPlanError, match="1～7"):
         fallback_layout_plan(_topic_ids(8))

@@ -1927,6 +1927,15 @@ textarea:focus-visible {
   min-width: 0;
 }
 
+.dashboard-task-statuses {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
 .dashboard-task-card h3 {
   overflow: hidden;
   color: var(--text);
@@ -1952,8 +1961,29 @@ textarea:focus-visible {
 
 .dashboard-task-image {
   display: block;
-  object-fit: cover;
+  object-fit: contain;
   background: #edf1f6;
+}
+
+.dashboard-image-frame {
+  position: relative;
+  height: 142px;
+  overflow: hidden;
+  border-radius: 10px;
+  background: #edf1f6;
+}
+
+.dashboard-image-frame.is-diagnostic {
+  outline: 2px solid color-mix(in srgb, var(--danger) 55%, transparent);
+  outline-offset: -2px;
+}
+
+.dashboard-image-frame > .ui-status {
+  position: absolute;
+  z-index: 1;
+  top: 8px;
+  left: 8px;
+  pointer-events: none;
 }
 
 .dashboard-task-image-trigger {

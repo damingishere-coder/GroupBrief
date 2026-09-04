@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Iterable
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from app.image.delivery_guard import image_delivery_eligible, image_fallback_level
 from app.v2.constants import (
     CORRUPT,
     EXECUTION_ACTIVE,
@@ -170,6 +171,9 @@ def _group_node_status(
 ) -> str:
     if node_id == "scheduler":
         return "success" if scheduler_started else "pending"
+    if node_id == "image" and not image_delivery_eligible(run):
+        # 历史 SENT 仍保持发送成功，但图片节点必须呈现诊断失败事实。
+        return "failed"
 
     status = _step_status(run, required_checkpoint, stage)
     if status != "pending":
@@ -333,7 +337,10 @@ def _group_snapshot(
             if isinstance(run.get("image_job"), dict)
             else "",
             "attempts": int(run.get("image_attempt_count") or 0),
-            "fallback_level": int(run.get("image_fallback_level") or 0),
+            "fallback_level": image_fallback_level(run),
+            "fallback_reason": str(run.get("image_fallback_reason") or ""),
+            "variant": str(run.get("image_variant") or "normal"),
+            "delivery_eligible": image_delivery_eligible(run),
         },
         "send": {
             "status": send_status,
@@ -354,6 +361,7 @@ def _group_snapshot(
         "last_error_summary": str(
             run.get("last_error_summary")
             or run.get("error")
+            or run.get("prompt_original_error")
             or run.get("send_error")
             or run.get("prompt_operation_error")
             or run.get("prompt_hold_reason")
