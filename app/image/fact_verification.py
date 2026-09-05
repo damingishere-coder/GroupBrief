@@ -111,6 +111,37 @@ def _numeric_fact_is_allowed(candidate: str, allowed: set[str]) -> bool:
     return False
 
 
+def strip_unverified_prompt_numeric_units(prompt_file: Path) -> tuple[str, tuple[str, ...]]:
+    """去掉摘要擅自附加、但原始证据没有的数字单位。
+
+    例如聊天只写了“大毯子45”，摘要扩写成“45元”时保留数字 45、
+    去掉未经证实的“元”。已有“38块”等同义单位证据时仍允许“38元”。
+    """
+
+    prompt = prompt_file.read_text(encoding="utf-8")
+    _, numeric_evidence, _ = _load_evidence(prompt_file)
+    allowed_numbers = _numeric_facts(numeric_evidence)
+    allowed_numbers.update(str(number) for number in range(0, 11))
+    stripped: list[str] = []
+
+    def replace(match: re.Match[str]) -> str:
+        raw = match.group(0)
+        candidate = _canonical_number(raw)
+        if _numeric_fact_is_allowed(candidate, allowed_numbers):
+            return raw
+        base_match = re.match(r"\d+(?:[.,]\d+)?", raw)
+        if base_match is None or base_match.end() == len(raw):
+            return raw
+        base = base_match.group(0)
+        if not _numeric_fact_is_allowed(_canonical_number(base), allowed_numbers):
+            return raw
+        stripped.append(raw)
+        return base
+
+    sanitized = _NUMERIC_FACT_RE.sub(replace, prompt)
+    return sanitized, tuple(dict.fromkeys(stripped))
+
+
 def _load_evidence(prompt_file: Path) -> tuple[list[str], str, int]:
     prompt = prompt_file.read_text(encoding="utf-8")
     visible_prompt = prompt.split(STRICT_IMAGE_FACT_MARKER, 1)[0]

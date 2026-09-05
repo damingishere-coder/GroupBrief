@@ -68,6 +68,7 @@ describe("frontend API contract", () => {
       group_ids: [7, 8],
       image_theme: "custom",
       image_theme_custom: "低饱和黏土摄影",
+      image_theme_apply_count: 3,
     });
 
     expect(fetchMock).toHaveBeenCalledOnce();
@@ -79,6 +80,7 @@ describe("frontend API contract", () => {
           group_ids: [7, 8],
           image_theme: "custom",
           image_theme_custom: "低饱和黏土摄影",
+          image_theme_apply_count: 3,
         }),
       }),
     );

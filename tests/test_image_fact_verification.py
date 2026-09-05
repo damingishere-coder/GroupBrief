@@ -8,7 +8,10 @@ from pathlib import Path
 from PIL import Image
 
 from app.ai.strict_prompt_contract import append_strict_image_fact_contract
-from app.image.fact_verification import review_image_facts
+from app.image.fact_verification import (
+    review_image_facts,
+    strip_unverified_prompt_numeric_units,
+)
 
 
 def _evidence(tmp_path: Path) -> tuple[Path, Path]:
@@ -207,6 +210,32 @@ Eason张UED-4.1群
 
     assert review.ok
     assert review.unknown_numeric == ()
+
+
+def test_strips_unit_inferred_by_summary_but_keeps_evidenced_currency_alias(tmp_path):
+    prompt = tmp_path / "image_prompt.txt"
+    prompt.write_text(
+        "大毯子的价格为45元。另一个道具价值38元，倍率为1218.2。",
+        encoding="utf-8",
+    )
+    (tmp_path / "messages.json").write_text(
+        json.dumps(
+            [
+                {"sender_name": "甲", "content": "大毯子45"},
+                {"sender_name": "乙", "content": "另一个道具38块"},
+                {"sender_name": "丙", "content": "倍率1218.2"},
+            ],
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    sanitized, stripped = strip_unverified_prompt_numeric_units(prompt)
+
+    assert "大毯子的价格为45。" in sanitized
+    assert "价值38元" in sanitized
+    assert "倍率为1218.2" in sanitized
+    assert stripped == ("45元",)
 
 
 def test_strict_contract_removes_bmi_display_instructions():

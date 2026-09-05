@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import inspect
 import json
+import re
 import shutil
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -28,9 +29,9 @@ from app.image.delivery_guard import image_delivery_eligible
 from app.image.fallback import (
     image_failure_code,
     image_result_is_unknown,
-    render_local_infographic,
     sanitize_image_prompt,
 )
+from app.ai.strict_prompt_contract import STRICT_IMAGE_FACT_MARKER
 
 
 @dataclass
@@ -185,28 +186,10 @@ class ImageJob:
         return self.generator.generate(prompt_file, self.output_path)
 
     def _local_fallback(self, failure_class: str) -> dict:
-        settings = getattr(self.generator, "settings", None)
-        detail = render_local_infographic(
-            group_name=self.group_name,
-            run_date=self.output_path.parent.name,
-            ranking_path=self.output_path.parent / "ranking.json",
-            run_path=self.output_path.parent / "run.json",
-            output_path=self.output_path,
-            font_path=str(getattr(settings, "image_fallback_font_path", "") or ""),
-            failure_class=failure_class,
-        )
-        from app.image.fact_verification import strict_fact_verification_enabled
+        """兼容旧调用点：失败时清理目标文件，不再生成统计信息图。"""
 
-        if strict_fact_verification_enabled(self.prompt_file):
-            ok, verification_detail = verify_image_contract(
-                self.prompt_file,
-                self.output_path,
-            )
-            if not ok:
-                if self.output_path.exists():
-                    self.output_path.unlink()
-                raise ValueError(verification_detail)
-            detail["fact_verification"] = verification_detail
+        if self.output_path.exists():
+            self.output_path.unlink()
         error_type = (
             failure_class
             if failure_class
@@ -219,12 +202,47 @@ class ImageJob:
         )
         return {
             "group_name": self.group_name,
-            "status": "diagnostic_fallback",
+            "status": "failed",
             "success": False,
-            "detail": f"图片生成失败，已保留不可发送的本地诊断图：{self.output_path}",
+            "detail": "正常 AI 生图失败；统计表兜底已停用，本次不生成图片",
             "error_type": error_type,
-            "generator_detail": detail,
+            "generator_detail": {
+                "fallback_level": 0,
+                "image_variant": "normal",
+                "local_infographic_disabled": True,
+            },
         }
+
+    def _fact_retry_prompt(self, verification_detail: str) -> Path:
+        """为事实校验重画生成一次性纠错 Prompt，不改写原始 Prompt。"""
+
+        original = self.prompt_file.read_text(encoding="utf-8")
+        match = re.search(r"无证据数字：([^；\n]+)", verification_detail)
+        rejected_values: list[str] = []
+        if match:
+            rejected_values = re.findall(
+                r"\d+(?:[.,]\d+)?(?:\s*(?:%|％|kg|KG|公斤|斤|元|块|万元|万|W|w|天|℃|°C|岁|厘米|cm|米|m|小时|分钟))?",
+                match.group(1),
+            )[:12]
+        rejected_text = "、".join(dict.fromkeys(rejected_values)) or "上一张中无法核验的数字或事实文字"
+        correction = (
+            "【事实校验重画修正｜最高优先级】\n"
+            f"上一张图片的 OCR 拒绝项为：{rejected_text}。\n"
+            "新图不得出现上述字符串；凡涉及这些值的事实说明、气泡、标签和数字特效全部省略，"
+            "改用人物动作、表情和不含文字的图形表达。不要改成近似数字，也不要自行添加单位。\n"
+            "其他数字必须逐字照抄本 Prompt；无法稳定写对时宁可省略。"
+        )
+        if STRICT_IMAGE_FACT_MARKER in original:
+            visible, contract = original.split(STRICT_IMAGE_FACT_MARKER, 1)
+            retry_prompt = (
+                f"{correction}\n\n{visible.rstrip()}\n\n"
+                f"{STRICT_IMAGE_FACT_MARKER}{contract}"
+            )
+        else:
+            retry_prompt = f"{correction}\n\n{original}"
+        retry_path = self.prompt_file.with_name("image_prompt.fact_retry.txt")
+        retry_path.write_text(retry_prompt, encoding="utf-8")
+        return retry_path
 
     def run(self) -> dict:
         """执行生图并验证落盘。返回结构化结果。"""
@@ -245,6 +263,19 @@ class ImageJob:
                     "success": True,
                     "detail": "图片已存在，跳过生成",
                     "error_type": "",
+                }
+        elif not self.force and self.output_path.exists():
+            # 旧 Level 3/Pillow 诊断图不能继续留在默认输出路径，否则底层
+            # 生成器只看到“可解码 PNG”就会走 existing_output_reused。
+            try:
+                self.output_path.unlink()
+            except OSError as exc:
+                return {
+                    "group_name": self.group_name,
+                    "status": "failed",
+                    "success": False,
+                    "detail": f"旧诊断图无法清理，已停止生图：{str(exc)[:160]}",
+                    "error_type": IMAGE_GENERATION_FAILED,
                 }
         if isinstance(run_state, dict) and run_state.get("image_force_local_fallback"):
             try:
@@ -352,8 +383,9 @@ class ImageJob:
                 try:
                     if self.output_path.exists():
                         self.output_path.unlink()
+                    retry_prompt = self._fact_retry_prompt(detail)
                     retry_result = self._call_generator(
-                        self.prompt_file,
+                        retry_prompt,
                         quality_retry=True,
                     )
                 except Exception as exc:
@@ -372,7 +404,7 @@ class ImageJob:
                         }
                 if retry_result.success:
                     retry_ok, retry_detail = verify_image_contract(
-                        self.prompt_file,
+                        retry_prompt,
                         self.output_path,
                     )
                     if retry_ok:

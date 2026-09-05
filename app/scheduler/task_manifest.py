@@ -59,6 +59,9 @@ def build_expected_groups(
                 "image_prompt_template": str(group.image_prompt_template or "default"),
                 "image_theme": str(group.image_theme or "ai_free"),
                 "image_theme_custom": str(group.image_theme_custom or ""),
+                "image_theme_remaining_runs": int(
+                    getattr(group, "image_theme_remaining_runs", 0) or 0
+                ),
                 "image_prompt_override": str(group.image_prompt_override or ""),
                 "send_target": str(group.send_target or ""),
                 "wechat_send_enabled": bool(group.wechat_send_enabled),

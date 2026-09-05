@@ -13,6 +13,7 @@ from app.ai.prompt_builder import GroupSummaryImagePromptBuilder
 from app.ai.prompt_builder_types import PromptInput
 from app.ai.speaker_attribution import build_attribution_contract
 from app.ai.strict_prompt_contract import append_strict_image_fact_contract
+from app.image.fact_verification import strip_unverified_prompt_numeric_units
 from app.config.settings import Settings
 from app.core.observability import log_event
 from app.data_sources.base import V2Message, WeChatDataSource
@@ -307,6 +308,12 @@ class GenerationStages:
             )
         )
         group = context.group
+        snapshot_theme = str(run.get("image_theme") or group.image_theme)
+        snapshot_custom = str(
+            run.get("image_theme_custom")
+            if "image_theme_custom" in run
+            else group.image_theme_custom
+        )
         base = {
             "group_id": str(group.id),
             "wechat_group_id": group.wechat_group_id,
@@ -324,8 +331,8 @@ class GenerationStages:
             ),
             "sender_name_policy": getattr(group, "sender_name_policy", "resolved"),
             "image_prompt_template": group.image_prompt_template,
-            "image_theme": group.image_theme,
-            "image_theme_custom": group.image_theme_custom,
+            "image_theme": snapshot_theme,
+            "image_theme_custom": snapshot_custom,
             "wechat_send_enabled": bool(getattr(group, "wechat_send_enabled", False)),
             "provider": self.data_source.name,
             "failed_stage": None,
@@ -341,6 +348,8 @@ class GenerationStages:
                 retry_stage=str(run.get("failed_stage") or "unknown"),
             )
         self.store.update(context.group_name, context.run_date, status=PENDING, **base)
+        context.run.setdefault("image_theme", snapshot_theme)
+        context.run.setdefault("image_theme_custom", snapshot_custom)
         return StageResult.proceed(context)
 
     def _load_or_fetch_messages(
@@ -699,8 +708,12 @@ class GenerationStages:
             speaker_count=ranking.speaker_count,
             messages=prompt_messages,
             template=group.image_prompt_template,
-            image_theme=group.image_theme,
-            image_theme_custom=group.image_theme_custom,
+            image_theme=str(context.run.get("image_theme") or group.image_theme),
+            image_theme_custom=str(
+                context.run.get("image_theme_custom")
+                if "image_theme_custom" in context.run
+                else group.image_theme_custom
+            ),
             template_override=getattr(group, "image_prompt_override", "") or "",
             previous_theme_signature=self.store.previous_theme_signature(
                 context.group_name,
@@ -809,39 +822,6 @@ class GenerationStages:
                     error=prompt_out.error,
                 )
                 self._record_prompt_timing(context, started_at)
-                if bool(context.group.image_enabled) and not context.reuse_persisted_topic_selection:
-                    fallback_meta = dict(prompt_out.meta or {})
-                    fallback_meta.update(
-                        mode="local_infographic",
-                        fallback_level=3,
-                        fallback_reason=PROMPT_FAILED,
-                    )
-                    fallback_prompt = (
-                        "【任务】\n"
-                        "外部内容整理失败，仅使用当天 ranking.json 生成本地简化信息图。\n"
-                        "【画布】\n优先 1024×1536；其他完整可读的竖版尺寸也可接受\n"
-                    )
-                    self.store.prompt_path(context.group_name, context.run_date).write_text(
-                        fallback_prompt,
-                        encoding="utf-8",
-                    )
-                    self.store.update(
-                        context.group_name,
-                        context.run_date,
-                        status=PROMPT_READY,
-                        failed_stage=None,
-                        error=None,
-                        error_type=None,
-                        prompt_fallback_level=3,
-                        image_force_local_fallback=True,
-                        prompt_fallback_reason=PROMPT_FAILED,
-                        prompt_original_error=str(prompt_out.error)[:300],
-                    )
-                    return StageResult.proceed(
-                        PromptStageOutput(
-                            prompt_meta=fallback_meta,
-                        )
-                    )
                 self.store.update(
                     context.group_name,
                     context.run_date,
@@ -849,6 +829,10 @@ class GenerationStages:
                     failed_stage="prompt",
                     error=prompt_out.error,
                     error_type=PROMPT_FAILED,
+                    prompt_fallback_level=0,
+                    image_force_local_fallback=False,
+                    prompt_fallback_reason="",
+                    prompt_original_error=str(prompt_out.error)[:300],
                 )
                 return StageResult.stop(
                     {
@@ -881,10 +865,15 @@ class GenerationStages:
                 prompt_path.read_text(encoding="utf-8")
             )
             prompt_path.write_text(strict_prompt, encoding="utf-8")
+            strict_prompt, stripped_units = strip_unverified_prompt_numeric_units(
+                prompt_path
+            )
+            prompt_path.write_text(strict_prompt, encoding="utf-8")
             self.store.update(
                 context.group_name,
                 context.run_date,
                 image_fact_contract="strict_evidence_v1",
+                prompt_stripped_numeric_units=list(stripped_units),
             )
         return StageResult.proceed(
             PromptStageOutput(

@@ -246,7 +246,7 @@ class SubmittedFailureTextSender(FakeSender):
         )
 
 
-def _make_pipeline(tmp_path, source=None, prompt=None, gen=None, sender=None, image_enabled=True, send_time="08:30", image_theme="blue_white", image_theme_custom="", schedule_rule="daily_previous_day"):
+def _make_pipeline(tmp_path, source=None, prompt=None, gen=None, sender=None, image_enabled=True, send_time="08:30", image_theme="blue_white", image_theme_custom="", image_theme_remaining_runs=0, schedule_rule="daily_previous_day"):
     from app.config.settings import get_settings
 
     source = source or FakeSource()
@@ -271,6 +271,7 @@ def _make_pipeline(tmp_path, source=None, prompt=None, gen=None, sender=None, im
                 image_enabled=image_enabled,
                 image_theme=image_theme,
                 image_theme_custom=image_theme_custom,
+                image_theme_remaining_runs=image_theme_remaining_runs,
                 wechat_send_enabled=True,
             )
         else:
@@ -282,6 +283,7 @@ def _make_pipeline(tmp_path, source=None, prompt=None, gen=None, sender=None, im
             group.send_time = send_time
             group.image_theme = image_theme
             group.image_theme_custom = image_theme_custom
+            group.image_theme_remaining_runs = image_theme_remaining_runs
             group.wechat_send_enabled = True
         group = repo.save_group(session, group)
 
@@ -678,6 +680,56 @@ def test_pipeline_passes_group_theme_and_records_request_metadata(tmp_path):
     assert run["image_theme_custom"] == "可切回的旧主题"
 
 
+def test_custom_theme_consumes_once_per_new_run_and_then_returns_to_random(tmp_path):
+    prompt = FakePrompt()
+    pipeline, group = _make_pipeline(
+        tmp_path,
+        prompt=prompt,
+        image_theme="custom",
+        image_theme_custom="奥特曼",
+        image_theme_remaining_runs=2,
+    )
+
+    first = pipeline.generate_all(run_date="2099-01-05")
+    repeated = pipeline.generate_all(run_date="2099-01-05", force=True)
+    with Session(repo.engine) as session:
+        after_first = repo.get_group(session, group.id)
+        assert after_first.image_theme == "custom"
+        assert after_first.image_theme_remaining_runs == 1
+
+    second = pipeline.generate_all(run_date="2099-01-06")
+    with Session(repo.engine) as session:
+        after_second = repo.get_group(session, group.id)
+
+    assert first[0]["status"] == "ready_to_send"
+    assert repeated[0]["status"] == "ready_to_send"
+    assert second[0]["status"] == "ready_to_send"
+    assert [item.image_theme for item in prompt.inputs] == ["custom", "custom", "custom"]
+    assert all(item.image_theme_custom == "奥特曼" for item in prompt.inputs)
+    assert after_second.image_theme == "random_preset"
+    assert after_second.image_theme_custom == ""
+    assert after_second.image_theme_remaining_runs == 0
+
+
+def test_failed_image_does_not_consume_custom_theme(tmp_path):
+    pipeline, group = _make_pipeline(
+        tmp_path,
+        gen=FakeGenerator(fail=True),
+        image_theme="custom",
+        image_theme_custom="奥特曼",
+        image_theme_remaining_runs=1,
+    )
+
+    result = pipeline.generate_all(run_date="2099-01-07")
+    with Session(repo.engine) as session:
+        after_failure = repo.get_group(session, group.id)
+
+    assert result[0]["status"] == "failed"
+    assert after_failure.image_theme == "custom"
+    assert after_failure.image_theme_custom == "奥特曼"
+    assert after_failure.image_theme_remaining_runs == 1
+
+
 def test_prompt_visible_group_name_prefers_name_saved_in_run(tmp_path):
     prompt = FakePrompt()
     pipeline, group = _make_pipeline(tmp_path, prompt=prompt, image_enabled=False)
@@ -753,7 +805,7 @@ def test_force_generate_blocks_corrupt_state_before_name_sync(tmp_path, monkeypa
     assert run_path.read_bytes() == original
 
 
-def test_force_generate_image_failure_keeps_diagnostic_fallback_failed(tmp_path):
+def test_force_generate_image_failure_does_not_create_statistical_fallback(tmp_path):
     gen = FakeGenerator(fail=True)
     pipeline, group = _make_pipeline(tmp_path, gen=gen)
     result = pipeline.force_generate(group.id, "2026-08-18")
@@ -762,14 +814,13 @@ def test_force_generate_image_failure_keeps_diagnostic_fallback_failed(tmp_path)
     assert run["status"] == FAILED
     assert run["failed_stage"] == "image"
     assert run["error_type"] == IMAGE_GENERATION_FAILED
-    assert run["image_status"] == "diagnostic_fallback"
-    assert run["image_fallback_level"] == 3
-    assert run["image_variant"] == "pillow"
-    assert run["image_job"]["status"] == "diagnostic_fallback"
+    assert run["image_status"] == "failed"
+    assert run["image_fallback_level"] == 0
+    assert run["image_variant"] == "normal"
+    assert run["image_job"]["status"] == "failed"
     assert run["image_job"]["receipt"]["image_path"] == ""
-    assert run["image_job"]["receipt"]["diagnostic_path"]
-    assert len(run["image_job"]["receipt"]["sha256"]) == 64
-    assert pipeline.store.image_path("测试群", "2026-08-18").is_file()
+    assert run["image_job"]["receipt"]["diagnostic_path"] == ""
+    assert not pipeline.store.image_path("测试群", "2026-08-18").exists()
 
 
 def test_image_success_clears_stale_failure_fields(tmp_path):
@@ -837,7 +888,7 @@ def test_generate_data_failure_marks_failed(tmp_path):
     assert run["failed_stage"] == "data"
 
 
-def test_generate_prompt_failure_keeps_local_infographic_as_failed_diagnostic(tmp_path):
+def test_generate_prompt_failure_stops_without_local_infographic(tmp_path):
     preserved_meta = {
         "topic_selection": {
             "political_keyword_policy_version": "political-keywords-v1",
@@ -857,15 +908,10 @@ def test_generate_prompt_failure_keeps_local_infographic_as_failed_diagnostic(tm
     assert results[0]["error_type"] == "PROMPT_FAILED"
     run = pipeline.store.load_run("测试群", "2026-08-18")
     assert run["status"] == FAILED
-    assert run["failed_stage"] == "image"
-    assert run["image_status"] == "diagnostic_fallback"
-    assert run["prompt_fallback_level"] == 3
-    assert run["image_fallback_level"] == 3
-    assert run["image_variant"] == "pillow"
-    assert run["prompt_meta"]["topic_selection"] == preserved_meta["topic_selection"]
-    assert run["prompt_meta"]["layout_id"] == "split_focus"
-    assert run["prompt_meta"]["mode"] == "local_infographic"
-    assert pipeline.store.image_path("测试群", "2026-08-18").is_file()
+    assert run["failed_stage"] == "prompt"
+    assert run["prompt_fallback_level"] == 0
+    assert run["image_force_local_fallback"] is False
+    assert not pipeline.store.image_path("测试群", "2026-08-18").exists()
 
 
 def test_generate_one_safe_topic_still_calls_normal_image_generator(tmp_path):
@@ -1117,6 +1163,26 @@ def test_send_scan_rejects_diagnostic_fallback_without_sender_calls(
     assert run["status"] == FAILED
     assert run["failed_stage"] == "image"
     assert run["send_hold_reason"] == IMAGE_FALLBACK_NOT_SENDABLE
+    assert pipeline.sender.text_calls == []
+    assert pipeline.sender.image_calls == []
+
+
+def test_send_scan_rejects_diagnostic_image_reused_after_metadata_reset(tmp_path):
+    pipeline = _ready_to_send(tmp_path)
+    pipeline.store.update(
+        "测试群",
+        "2026-08-18",
+        status=READY_TO_SEND,
+        image_fallback_level=0,
+        image_variant="normal",
+        image_recovery_status="existing_output_reused",
+        last_error_summary="图片生成失败，已保留不可发送的本地诊断图",
+    )
+
+    result = pipeline.send_due(now=datetime(2026, 8, 18, 9, 0, 0))[0]
+
+    assert result["status"] == "failed"
+    assert result["error_type"] == IMAGE_FALLBACK_NOT_SENDABLE
     assert pipeline.sender.text_calls == []
     assert pipeline.sender.image_calls == []
 
