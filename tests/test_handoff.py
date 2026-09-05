@@ -107,11 +107,25 @@ def test_generate_writes_files():
 def test_two_groups_isolated():
     with Session(repo.engine) as session:
         # 本用例必须可独立运行，不能依赖 test_generate_writes_files 先创建 A 群。
-        _get_or_create_group(session, "示例UED-4群", "group-a")
-        _get_or_create_group(session, "产品经理交流群", "group-b")
+        first_group = _get_or_create_group(session, "示例UED-4群", "group-a")
+        second_group = _get_or_create_group(session, "产品经理交流群", "group-b")
         service = _test_report_service()
-        run = service.generate(session, report_date="2026-08-13", trigger_type="auto", force=True)
-        assert run.status == "success"
+        first_run = service.generate(
+            session,
+            group=first_group,
+            report_date="2026-08-13",
+            trigger_type="auto",
+            force=True,
+        )
+        second_run = service.generate(
+            session,
+            group=second_group,
+            report_date="2026-08-13",
+            trigger_type="auto",
+            force=True,
+        )
+        assert first_run.status == "success"
+        assert second_run.status == "success"
 
         day_dir = settings.output_dir / "2026-08-13"
         dirs = {p.name for p in day_dir.iterdir() if p.is_dir()}
