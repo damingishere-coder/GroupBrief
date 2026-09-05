@@ -280,6 +280,47 @@ def test_strict_verification_known_failure_does_not_create_statistical_fallback(
     assert not job.output_path.exists()
 
 
+def test_fact_verification_retry_uses_correction_prompt(tmp_path, monkeypatch):
+    from app.image.image_task import ImageTaskResult
+
+    class CapturingGenerator:
+        def __init__(self):
+            self.prompts: list[Path] = []
+
+        def generate(self, prompt_file, output_path, **_kwargs):
+            self.prompts.append(Path(prompt_file))
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_bytes(_PNG_1PX)
+            return ImageTaskResult(True, image_path=output_path)
+
+    generator = CapturingGenerator()
+    job = _job(tmp_path, "纠错重画群", generator)
+    verification_results = iter(
+        [
+            (False, "图片文件不存在"),
+            (False, "图片事实校验失败：无证据数字：45元, 11218"),
+            (True, "OK"),
+        ]
+    )
+    monkeypatch.setattr(
+        "app.image.image_task.verify_image_contract",
+        lambda *_args, **_kwargs: next(verification_results),
+    )
+    monkeypatch.setattr(
+        "app.image.fact_verification.strict_fact_verification_enabled",
+        lambda _path: True,
+    )
+
+    result = job.run()
+
+    assert result["status"] == "success"
+    assert len(generator.prompts) == 2
+    assert generator.prompts[1].name == "image_prompt.fact_retry.txt"
+    correction = generator.prompts[1].read_text(encoding="utf-8")
+    assert "新图不得出现上述字符串" in correction
+    assert "45元、11218" in correction
+
+
 def test_retry_does_not_treat_existing_diagnostic_png_as_success(tmp_path):
     generator = FakeGenerator()
     job = _job(tmp_path, "诊断图重试群", generator)

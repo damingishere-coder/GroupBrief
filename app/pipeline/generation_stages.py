@@ -13,6 +13,7 @@ from app.ai.prompt_builder import GroupSummaryImagePromptBuilder
 from app.ai.prompt_builder_types import PromptInput
 from app.ai.speaker_attribution import build_attribution_contract
 from app.ai.strict_prompt_contract import append_strict_image_fact_contract
+from app.image.fact_verification import strip_unverified_prompt_numeric_units
 from app.config.settings import Settings
 from app.core.observability import log_event
 from app.data_sources.base import V2Message, WeChatDataSource
@@ -864,10 +865,15 @@ class GenerationStages:
                 prompt_path.read_text(encoding="utf-8")
             )
             prompt_path.write_text(strict_prompt, encoding="utf-8")
+            strict_prompt, stripped_units = strip_unverified_prompt_numeric_units(
+                prompt_path
+            )
+            prompt_path.write_text(strict_prompt, encoding="utf-8")
             self.store.update(
                 context.group_name,
                 context.run_date,
                 image_fact_contract="strict_evidence_v1",
+                prompt_stripped_numeric_units=list(stripped_units),
             )
         return StageResult.proceed(
             PromptStageOutput(
