@@ -111,6 +111,31 @@ def _numeric_fact_is_allowed(candidate: str, allowed: set[str]) -> bool:
     return False
 
 
+def _unverified_numeric_facts(
+    ocr_text: str,
+    allowed_numbers: set[str],
+    evidence_lines: list[str],
+) -> tuple[str, ...]:
+    """逐行判断数字，允许 OCR 仅在真实字母数字昵称中插入空格。"""
+
+    allowed_line_compacts = {
+        compact
+        for line in evidence_lines
+        if len(compact := _compact_text(line)) >= 4
+    }
+    unknown: set[str] = set()
+    for line in ocr_text.splitlines():
+        line_compact = _compact_text(line)
+        exact_evidence_line = line_compact in allowed_line_compacts
+        for candidate in _numeric_facts(line):
+            if _numeric_fact_is_allowed(candidate, allowed_numbers):
+                continue
+            if exact_evidence_line:
+                continue
+            unknown.add(candidate)
+    return tuple(sorted(unknown, key=lambda item: (len(item), item)))
+
+
 def strip_unverified_prompt_numeric_units(prompt_file: Path) -> tuple[str, tuple[str, ...]]:
     """去掉摘要擅自附加、但原始证据没有的数字单位。
 
@@ -275,15 +300,10 @@ def review_image_facts(
     allowed_numbers = _numeric_facts(numeric_evidence)
     # 分镜序号属于版式，不是聊天事实。
     allowed_numbers.update(str(number) for number in range(0, 11))
-    unknown_numeric = tuple(
-        sorted(
-            (
-                item
-                for item in _numeric_facts(text)
-                if not _numeric_fact_is_allowed(item, allowed_numbers)
-            ),
-            key=lambda item: (len(item), item),
-        )
+    unknown_numeric = _unverified_numeric_facts(
+        text,
+        allowed_numbers,
+        evidence_lines,
     )
 
     normalized_lines = [line.strip() for line in text.splitlines() if line.strip()]

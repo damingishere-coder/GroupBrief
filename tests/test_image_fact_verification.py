@@ -84,6 +84,32 @@ def test_allows_ocr_fragments_of_known_numbers_and_ignores_name_garble(tmp_path)
     assert review.unknown_text == ()
 
 
+def test_allows_ocr_space_inside_evidenced_alphanumeric_sender_name(tmp_path):
+    prompt, image = _evidence(tmp_path)
+    messages_path = tmp_path / "messages.json"
+    messages = json.loads(messages_path.read_text(encoding="utf-8"))
+    messages.append({"sender_name": "Gaosong925", "content": "推荐 Grok App"})
+    messages_path.write_text(json.dumps(messages, ensure_ascii=False), encoding="utf-8")
+
+    review = review_image_facts(prompt, image, ocr_text="Gaosong 925")
+
+    assert review.ok
+    assert review.unknown_numeric == ()
+
+
+def test_rejects_changed_number_in_alphanumeric_sender_name(tmp_path):
+    prompt, image = _evidence(tmp_path)
+    messages_path = tmp_path / "messages.json"
+    messages = json.loads(messages_path.read_text(encoding="utf-8"))
+    messages.append({"sender_name": "Gaosong925", "content": "推荐 Grok App"})
+    messages_path.write_text(json.dumps(messages, ensure_ascii=False), encoding="utf-8")
+
+    review = review_image_facts(prompt, image, ocr_text="Gaosong 926")
+
+    assert not review.ok
+    assert review.unknown_numeric == ("926",)
+
+
 def test_numeric_units_do_not_join_across_ocr_lines(tmp_path):
     prompt, image = _evidence(tmp_path)
 
