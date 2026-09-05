@@ -57,6 +57,7 @@ class GroupCreate(BaseModel):
     image_prompt_template: str = "default"
     image_theme: str = DEFAULT_IMAGE_THEME
     image_theme_custom: str = ""
+    image_theme_apply_count: int | None = Field(default=None, ge=1, le=30)
     image_prompt_override: str = ""
     wechat_send_enabled: bool = False
 
@@ -82,6 +83,7 @@ class GroupUpdate(BaseModel):
     image_prompt_template: str | None = None
     image_theme: str | None = None
     image_theme_custom: str | None = None
+    image_theme_apply_count: int | None = Field(default=None, ge=1, le=30)
     image_prompt_override: str | None = None
     wechat_send_enabled: bool | None = None
 
@@ -96,6 +98,7 @@ class GroupImagePromptUpdate(BaseModel):
     inherit_global: bool = False
     image_theme: str
     image_theme_custom: str = ""
+    image_theme_apply_count: int = Field(default=1, ge=1, le=30)
     expected_revision: str = ""
 
 
@@ -103,6 +106,7 @@ class BatchImageThemeUpdate(BaseModel):
     group_ids: list[int] = Field(min_length=1)
     image_theme: str
     image_theme_custom: str = ""
+    image_theme_apply_count: int = Field(default=1, ge=1, le=30)
 
     @field_validator("group_ids")
     @classmethod
@@ -120,6 +124,14 @@ def _validate_group_theme(theme: object, custom: object = "") -> tuple[str, str]
         return validate_image_theme_config(theme, custom)
     except ImageThemeError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+def _theme_remaining_runs(theme: str, apply_count: int | None) -> int:
+    """自由/每日随机持续生效；任何手动主题默认只用于下一次成功生图。"""
+
+    if theme in {"ai_free", "random_preset"}:
+        return 0
+    return int(apply_count or 1)
 
 
 def _validate_output_group_name(value: object, *, field_name: str) -> str:
@@ -175,6 +187,7 @@ def _group_prompt_payload(group: Group) -> dict:
         "revision": prompt_revision(content),
         "image_theme": group.image_theme or DEFAULT_IMAGE_THEME,
         "image_theme_custom": group.image_theme_custom or "",
+        "image_theme_remaining_runs": int(group.image_theme_remaining_runs or 0),
         "resolved_theme": theme.to_meta(),
         "preview": preview,
     }
@@ -237,6 +250,7 @@ def list_groups(
             "image_prompt_template": g.image_prompt_template,
             "image_theme": g.image_theme,
             "image_theme_custom": g.image_theme_custom,
+            "image_theme_remaining_runs": int(g.image_theme_remaining_runs or 0),
             "has_image_prompt_override": bool((g.image_prompt_override or "").strip()),
             "wechat_send_enabled": bool(g.wechat_send_enabled),
             "created_at": g.created_at.isoformat(),
@@ -270,8 +284,12 @@ def create_group(
             values["wechat_group_name"], field_name="wechat_group_name"
         )
     values["send_target"] = str(values.get("send_target") or "").strip()
+    apply_count = values.pop("image_theme_apply_count", None)
     values["image_theme"], values["image_theme_custom"] = _validate_group_theme(
         values.get("image_theme", DEFAULT_IMAGE_THEME), values.get("image_theme_custom", "")
+    )
+    values["image_theme_remaining_runs"] = _theme_remaining_runs(
+        values["image_theme"], apply_count
     )
     values["image_prompt_override"] = _validate_prompt_override(values.get("image_prompt_override", ""))
     wechat_group_id = str(values.get("wechat_group_id") or "").strip()
@@ -325,6 +343,9 @@ def batch_update_group_image_theme(
                 group_id,
                 image_theme=theme,
                 image_theme_custom=custom,
+                image_theme_remaining_runs=_theme_remaining_runs(
+                    theme, payload.image_theme_apply_count
+                ),
             )
         except SQLAlchemyError:
             session.rollback()
@@ -344,6 +365,9 @@ def batch_update_group_image_theme(
         successes.append({
             "group_id": group_id,
             "group_name": group_name,
+            "remaining_runs": _theme_remaining_runs(
+                theme, payload.image_theme_apply_count
+            ),
         })
 
     status = "success" if not failures else "partial" if successes else "failed"
@@ -369,6 +393,7 @@ def update_group(
         settings,
         explicitly_provided="send_time" in payload.model_fields_set,
     )
+    apply_count = updates.pop("image_theme_apply_count", None)
     try:
         updates = validate_group_provider_values(
             updates,
@@ -389,6 +414,13 @@ def update_group(
         )
         updates["image_theme"] = theme
         updates["image_theme_custom"] = custom
+        updates["image_theme_remaining_runs"] = _theme_remaining_runs(
+            theme, apply_count
+        )
+    elif apply_count is not None:
+        updates["image_theme_remaining_runs"] = _theme_remaining_runs(
+            group.image_theme, apply_count
+        )
     if "image_prompt_override" in updates:
         updates["image_prompt_override"] = _validate_prompt_override(updates["image_prompt_override"])
     if "send_target" in updates:
@@ -423,6 +455,9 @@ def update_group_image_prompt(
         raise HTTPException(status_code=422, detail="群级 Prompt 不能为空；如需继承请使用恢复全局模板")
     group.image_theme = theme
     group.image_theme_custom = custom
+    group.image_theme_remaining_runs = _theme_remaining_runs(
+        theme, payload.image_theme_apply_count
+    )
     group.image_prompt_override = "" if payload.inherit_global else _validate_prompt_override(payload.content)
     repo.save_group(session, group)
     return _group_prompt_payload(group)

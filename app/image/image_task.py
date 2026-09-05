@@ -28,7 +28,6 @@ from app.image.delivery_guard import image_delivery_eligible
 from app.image.fallback import (
     image_failure_code,
     image_result_is_unknown,
-    render_local_infographic,
     sanitize_image_prompt,
 )
 
@@ -185,28 +184,10 @@ class ImageJob:
         return self.generator.generate(prompt_file, self.output_path)
 
     def _local_fallback(self, failure_class: str) -> dict:
-        settings = getattr(self.generator, "settings", None)
-        detail = render_local_infographic(
-            group_name=self.group_name,
-            run_date=self.output_path.parent.name,
-            ranking_path=self.output_path.parent / "ranking.json",
-            run_path=self.output_path.parent / "run.json",
-            output_path=self.output_path,
-            font_path=str(getattr(settings, "image_fallback_font_path", "") or ""),
-            failure_class=failure_class,
-        )
-        from app.image.fact_verification import strict_fact_verification_enabled
+        """兼容旧调用点：失败时清理目标文件，不再生成统计信息图。"""
 
-        if strict_fact_verification_enabled(self.prompt_file):
-            ok, verification_detail = verify_image_contract(
-                self.prompt_file,
-                self.output_path,
-            )
-            if not ok:
-                if self.output_path.exists():
-                    self.output_path.unlink()
-                raise ValueError(verification_detail)
-            detail["fact_verification"] = verification_detail
+        if self.output_path.exists():
+            self.output_path.unlink()
         error_type = (
             failure_class
             if failure_class
@@ -219,11 +200,15 @@ class ImageJob:
         )
         return {
             "group_name": self.group_name,
-            "status": "diagnostic_fallback",
+            "status": "failed",
             "success": False,
-            "detail": f"图片生成失败，已保留不可发送的本地诊断图：{self.output_path}",
+            "detail": "正常 AI 生图失败；统计表兜底已停用，本次不生成图片",
             "error_type": error_type,
-            "generator_detail": detail,
+            "generator_detail": {
+                "fallback_level": 0,
+                "image_variant": "normal",
+                "local_infographic_disabled": True,
+            },
         }
 
     def run(self) -> dict:
@@ -245,6 +230,19 @@ class ImageJob:
                     "success": True,
                     "detail": "图片已存在，跳过生成",
                     "error_type": "",
+                }
+        elif not self.force and self.output_path.exists():
+            # 旧 Level 3/Pillow 诊断图不能继续留在默认输出路径，否则底层
+            # 生成器只看到“可解码 PNG”就会走 existing_output_reused。
+            try:
+                self.output_path.unlink()
+            except OSError as exc:
+                return {
+                    "group_name": self.group_name,
+                    "status": "failed",
+                    "success": False,
+                    "detail": f"旧诊断图无法清理，已停止生图：{str(exc)[:160]}",
+                    "error_type": IMAGE_GENERATION_FAILED,
                 }
         if isinstance(run_state, dict) and run_state.get("image_force_local_fallback"):
             try:

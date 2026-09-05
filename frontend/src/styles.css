@@ -7032,6 +7032,44 @@ textarea:focus-visible {
   color: var(--success);
 }
 
+.ai-images-theme-use-count {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 10px;
+  padding: 10px 11px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--card);
+}
+
+.ai-images-theme-use-count > span {
+  display: grid;
+  gap: 2px;
+}
+
+.ai-images-theme-use-count b {
+  font-size: 11px;
+}
+
+.ai-images-theme-use-count small {
+  color: var(--text-secondary);
+  font-size: 9.5px;
+}
+
+.ai-images-theme-use-count select {
+  min-width: 86px;
+  min-height: 34px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0 9px;
+  color: var(--text);
+  background: var(--bg);
+  font: inherit;
+  font-size: 11px;
+}
+
 .ai-images-default-preview pre {
   min-height: 112px;
   max-height: 150px;

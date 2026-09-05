@@ -20,4 +20,35 @@ def image_delivery_eligible(metadata: Mapping[str, Any] | None) -> bool:
     metadata = metadata if isinstance(metadata, Mapping) else {}
     fallback_level = image_fallback_level(metadata)
     image_variant = str(metadata.get("image_variant") or "").strip().lower()
-    return fallback_level < 3 and image_variant != "pillow"
+    image_status = str(metadata.get("image_status") or "").strip().lower()
+    image_job = metadata.get("image_job")
+    job_status = (
+        str(image_job.get("status") or "").strip().lower()
+        if isinstance(image_job, Mapping)
+        else ""
+    )
+    if (
+        fallback_level >= 3
+        or image_variant == "pillow"
+        or image_status in {"failed", "diagnostic_fallback"}
+        or job_status in {"failed", "ambiguous_result", "diagnostic_fallback"}
+    ):
+        return False
+
+    recovery_status = str(
+        metadata.get("image_recovery_status")
+        or metadata.get("recovery_status")
+        or ""
+    ).strip().lower()
+    if recovery_status == "existing_output_reused":
+        diagnostic_history = " ".join(
+            str(metadata.get(key) or "")
+            for key in (
+                "last_error_summary",
+                "image_fallback_reason",
+                "prompt_fallback_reason",
+            )
+        ).lower()
+        if "本地诊断图" in diagnostic_history or "fallback=l3" in diagnostic_history:
+            return False
+    return True

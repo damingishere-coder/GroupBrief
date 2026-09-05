@@ -156,6 +156,7 @@ class DailyPipeline:
                 "prompt_provider", "prompt_model", "image_enabled", "ranking_template",
                 "ranking_count_policy", "sender_name_policy",
                 "image_prompt_template", "image_theme", "image_theme_custom",
+                "image_theme_remaining_runs",
                 "image_prompt_override", "send_target",
             }
             groups = [
@@ -553,6 +554,7 @@ class DailyPipeline:
         return ImageStages(
             store=self.store,
             image_generator=self.image_generator,
+            consume_image_theme=self._consume_group_image_theme,
         ).make_job(self._group_name(group), run_date, force)
 
     def _image_hook(self, job: ImageJob, result: dict) -> None:
@@ -560,12 +562,14 @@ class DailyPipeline:
         ImageStages(
             store=self.store,
             image_generator=self.image_generator,
+            consume_image_theme=self._consume_group_image_theme,
         ).record_result(job, result)
 
     def _after_image(self, job: ImageJob, run_date: str) -> None:
         ImageStages(
             store=self.store,
             image_generator=self.image_generator,
+            consume_image_theme=self._consume_group_image_theme,
         ).advance_ready(job, run_date)
 
     def _run_image_jobs(self, image_jobs: list[ImageJob], run_date: str) -> list[dict]:
@@ -573,6 +577,7 @@ class DailyPipeline:
         return ImageStages(
             store=self.store,
             image_generator=self.image_generator,
+            consume_image_theme=self._consume_group_image_theme,
         ).run_jobs(
             image_jobs,
             run_date,
@@ -1651,6 +1656,30 @@ class DailyPipeline:
         def operation() -> Group | None:
             with Session(repo.engine) as session:
                 return repo.get_active_group(session, group_id)
+
+        return run_with_sqlite_retry(
+            operation,
+            max_attempts=self.settings.sqlite_retry_max_attempts,
+        )
+
+    def _consume_group_image_theme(
+        self,
+        group_id: int,
+        run_date: str,
+        expected_theme: str,
+        expected_custom: str,
+    ) -> dict:
+        from sqlmodel import Session
+
+        def operation() -> dict:
+            with Session(repo.engine) as session:
+                return repo.consume_group_image_theme_for_run(
+                    session,
+                    group_id,
+                    run_date=run_date,
+                    expected_theme=expected_theme,
+                    expected_custom=expected_custom,
+                )
 
         return run_with_sqlite_retry(
             operation,

@@ -82,6 +82,7 @@ def test_batch_image_theme_updates_multiple_groups_and_only_theme_fields(batch_c
             "group_ids": [first_id, disabled_id],
             "image_theme": "custom",
             "image_theme_custom": "  低饱和黏土摄影  ",
+            "image_theme_apply_count": 3,
         },
     )
 
@@ -90,8 +91,8 @@ def test_batch_image_theme_updates_multiple_groups_and_only_theme_fields(batch_c
         "status": "success",
         "requested_count": 2,
         "success": [
-            {"group_id": first_id, "group_name": "一群"},
-            {"group_id": disabled_id, "group_name": "停用群"},
+            {"group_id": first_id, "group_name": "一群", "remaining_runs": 3},
+            {"group_id": disabled_id, "group_name": "停用群", "remaining_runs": 3},
         ],
         "failed": [],
     }
@@ -99,8 +100,14 @@ def test_batch_image_theme_updates_multiple_groups_and_only_theme_fields(batch_c
         after = snapshot_group(engine, group_id)
         assert after["image_theme"] == "custom"
         assert after["image_theme_custom"] == "低饱和黏土摄影"
+        assert after["image_theme_remaining_runs"] == 3
         assert after["updated_at"] >= before[group_id]["updated_at"]
-        unchanged = set(before[group_id]) - {"image_theme", "image_theme_custom", "updated_at"}
+        unchanged = set(before[group_id]) - {
+            "image_theme",
+            "image_theme_custom",
+            "image_theme_remaining_runs",
+            "updated_at",
+        }
         assert {field: after[field] for field in unchanged} == {
             field: before[group_id][field] for field in unchanged
         }
@@ -133,7 +140,7 @@ def test_batch_image_theme_reports_missing_and_deleted_without_rolling_back_succ
     assert response.json() == {
         "status": "partial",
         "requested_count": 3,
-        "success": [{"group_id": active_id, "group_name": "正常群"}],
+        "success": [{"group_id": active_id, "group_name": "正常群", "remaining_runs": 0}],
         "failed": [
             {"group_id": missing_id, "code": "GROUP_NOT_FOUND", "reason": "群不存在"},
             {"group_id": deleted_id, "code": "GROUP_DELETED", "reason": "群已移入回收站"},
@@ -141,6 +148,7 @@ def test_batch_image_theme_reports_missing_and_deleted_without_rolling_back_succ
     }
     assert snapshot_group(engine, active_id)["image_theme"] == "random_preset"
     assert snapshot_group(engine, active_id)["image_theme_custom"] == ""
+    assert snapshot_group(engine, active_id)["image_theme_remaining_runs"] == 0
     assert snapshot_group(engine, deleted_id)["image_theme"] == "ai_free"
 
 
@@ -184,6 +192,8 @@ def test_batch_image_theme_returns_failed_when_every_target_is_invalid(batch_cli
         {"group_ids": [1], "image_theme": "custom", "image_theme_custom": ""},
         {"group_ids": [1], "image_theme": "custom", "image_theme_custom": "a" * 81},
         {"group_ids": [1], "image_theme": "custom", "image_theme_custom": "多行\n主题"},
+        {"group_ids": [1], "image_theme": "custom", "image_theme_custom": "主题", "image_theme_apply_count": 0},
+        {"group_ids": [1], "image_theme": "custom", "image_theme_custom": "主题", "image_theme_apply_count": 31},
     ],
 )
 def test_batch_image_theme_global_validation_is_422_with_zero_writes(batch_client, payload):
@@ -230,5 +240,60 @@ def test_batch_image_theme_continues_after_database_failure(batch_client, monkey
         "reason": "数据库保存失败，请重试",
     }]
     assert snapshot_group(engine, first_id)["image_theme"] == "ink_wash_editorial"
+    assert snapshot_group(engine, first_id)["image_theme_remaining_runs"] == 1
     assert snapshot_group(engine, failed_id)["image_theme"] == "ai_free"
     assert snapshot_group(engine, last_id)["image_theme"] == "ink_wash_editorial"
+    assert snapshot_group(engine, last_id)["image_theme_remaining_runs"] == 1
+
+
+def test_theme_consumption_is_idempotent_and_returns_to_random(batch_client):
+    _client, engine = batch_client
+    group_id = save_group(engine, "一次主题群")
+    with Session(engine) as session:
+        repo.update_group_image_theme(
+            session,
+            group_id,
+            image_theme="custom",
+            image_theme_custom="奥特曼",
+            image_theme_remaining_runs=2,
+        )
+
+    with Session(engine) as session:
+        first = repo.consume_group_image_theme_for_run(
+            session,
+            group_id,
+            run_date="2026-09-05",
+            expected_theme="custom",
+            expected_custom="奥特曼",
+        )
+    with Session(engine) as session:
+        duplicate = repo.consume_group_image_theme_for_run(
+            session,
+            group_id,
+            run_date="2026-09-05",
+            expected_theme="custom",
+            expected_custom="奥特曼",
+        )
+    with Session(engine) as session:
+        second = repo.consume_group_image_theme_for_run(
+            session,
+            group_id,
+            run_date="2026-09-06",
+            expected_theme="custom",
+            expected_custom="奥特曼",
+        )
+        group = session.get(Group, group_id)
+
+    assert first == {
+        "consumed": True,
+        "already_consumed": False,
+        "remaining_runs": 1,
+        "next_theme": "custom",
+    }
+    assert duplicate["already_consumed"] is True
+    assert duplicate["remaining_runs"] == 1
+    assert second["consumed"] is True
+    assert second["remaining_runs"] == 0
+    assert second["next_theme"] == "random_preset"
+    assert group.image_theme == "random_preset"
+    assert group.image_theme_custom == ""

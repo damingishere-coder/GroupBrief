@@ -161,16 +161,15 @@ def test_single_failure_does_not_block_others(tmp_path):
     ]
     results = queue.run_all(jobs)
     assert [r["status"] for r in results] == [
-        "diagnostic_fallback",
+        "failed",
         "success",
-        "diagnostic_fallback",
+        "failed",
     ]
     assert [r["success"] for r in results] == [False, True, False]
-    assert results[0]["generator_detail"]["fallback_level"] == 3
-    # 外部失败的群保留不可发送诊断图，其他群仍独立成功。
-    for job in jobs:
-        ok, _ = verify_image(job.output_path)
-        assert ok is True
+    assert results[0]["generator_detail"]["local_infographic_disabled"] is True
+    assert not jobs[0].output_path.exists()
+    assert verify_image(jobs[1].output_path)[0] is True
+    assert not jobs[2].output_path.exists()
 
 
 def test_policy_rejection_uses_safe_prompt_once(tmp_path):
@@ -242,7 +241,7 @@ def test_unknown_image_result_never_calls_safe_or_local_fallback(tmp_path):
     assert not job.output_path.exists()
 
 
-def test_strict_verification_known_failure_keeps_diagnostic_fallback_failed(tmp_path, monkeypatch):
+def test_strict_verification_known_failure_does_not_create_statistical_fallback(tmp_path, monkeypatch):
     from app.image.image_task import ImageTaskResult
 
     class QualityRetryFailsKnown:
@@ -263,7 +262,6 @@ def test_strict_verification_known_failure_keeps_diagnostic_fallback_failed(tmp_
 
     generator = QualityRetryFailsKnown()
     job = _job(tmp_path, "群1", generator)
-    fallback_calls = []
     monkeypatch.setattr(
         "app.image.image_task.verify_image_contract",
         lambda *_args, **_kwargs: (False, "图片事实校验失败"),
@@ -272,27 +270,14 @@ def test_strict_verification_known_failure_keeps_diagnostic_fallback_failed(tmp_
         "app.image.fact_verification.strict_fact_verification_enabled",
         lambda _path: True,
     )
-    monkeypatch.setattr(
-        ImageJob,
-        "_local_fallback",
-        lambda self, reason: fallback_calls.append(reason)
-        or {
-            "group_name": self.group_name,
-            "status": "diagnostic_fallback",
-            "success": False,
-            "detail": "local fallback",
-            "error_type": "IMAGE_CONTENT_VERIFICATION_FAILED",
-            "generator_detail": {"fallback_level": 3, "image_variant": "pillow"},
-        },
-    )
-
     result = job.run()
 
-    assert result["status"] == "diagnostic_fallback"
+    assert result["status"] == "failed"
     assert result["success"] is False
     assert result["error_type"] == "IMAGE_CONTENT_VERIFICATION_FAILED"
     assert generator.calls == 2
-    assert fallback_calls == ["IMAGE_CONTENT_VERIFICATION_FAILED"]
+    assert result["generator_detail"]["local_infographic_disabled"] is True
+    assert not job.output_path.exists()
 
 
 def test_retry_does_not_treat_existing_diagnostic_png_as_success(tmp_path):
@@ -309,6 +294,53 @@ def test_retry_does_not_treat_existing_diagnostic_png_as_success(tmp_path):
             },
             ensure_ascii=False,
         ),
+        encoding="utf-8",
+    )
+
+    result = job.run()
+
+    assert result["status"] == "success"
+    assert len(generator.calls) == 1
+
+
+def test_retry_rejects_diagnostic_reused_after_metadata_was_reset(tmp_path):
+    generator = FakeGenerator()
+    job = _job(tmp_path, "诊断图元数据误清理群", generator)
+    job.output_path.parent.mkdir(parents=True, exist_ok=True)
+    job.output_path.write_bytes(_PNG_1PX)
+    (job.output_path.parent / "run.json").write_text(
+        json.dumps(
+            {
+                "image_fallback_level": 0,
+                "image_variant": "normal",
+                "image_recovery_status": "existing_output_reused",
+                "last_error_summary": "图片生成失败，已保留不可发送的本地诊断图",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    result = job.run()
+
+    assert result["status"] == "success"
+    assert len(generator.calls) == 1
+
+
+@pytest.mark.parametrize(
+    "run_state",
+    [
+        {"image_status": "failed"},
+        {"image_job": {"status": "ambiguous_result"}},
+    ],
+)
+def test_retry_never_reuses_failed_or_ambiguous_existing_output(tmp_path, run_state):
+    generator = FakeGenerator()
+    job = _job(tmp_path, "失败结果残留群", generator)
+    job.output_path.parent.mkdir(parents=True, exist_ok=True)
+    job.output_path.write_bytes(_PNG_1PX)
+    (job.output_path.parent / "run.json").write_text(
+        json.dumps(run_state, ensure_ascii=False),
         encoding="utf-8",
     )
 

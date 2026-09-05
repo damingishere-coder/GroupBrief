@@ -44,6 +44,7 @@ class Group(SQLModel, table=True):
     image_prompt_template: str = "default"  # 生图 Prompt 模板名
     image_theme: str = "ai_free"  # 生图主题键（默认由 AI 按聊天内容自由发挥）
     image_theme_custom: str = ""  # 自定义生图大主题（image_theme=custom 时使用）
+    image_theme_remaining_runs: int = 0  # 手动主题剩余成功生图次数；0 表示持续模式不计次
     image_prompt_override: str = ""  # 本群专属 Prompt 模板；为空时继承全局模板
     wechat_send_enabled: bool = False  # 独立于生成开关，默认禁止自动对外发送
 

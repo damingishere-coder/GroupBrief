@@ -28,8 +28,12 @@ function groupName(group: GroupV2): string {
 }
 
 function themeLabel(group: GroupV2, themes: ImageThemeOption[]): string {
-  if (group.image_theme === "custom") return group.image_theme_custom || "自定义描述";
-  return themes.find((theme) => theme.key === group.image_theme)?.label || group.image_theme || "AI 自由发挥";
+  const label = group.image_theme === "custom"
+    ? group.image_theme_custom || "自定义描述"
+    : themes.find((theme) => theme.key === group.image_theme)?.label || group.image_theme || "AI 自由发挥";
+  return (group.image_theme_remaining_runs ?? 0) > 0
+    ? `${label}（剩余 ${group.image_theme_remaining_runs} 次）`
+    : label;
 }
 
 export function ImageStylePanel({
@@ -47,6 +51,7 @@ export function ImageStylePanel({
   const [custom, setCustom] = useState("");
   const [themeText, setThemeText] = useState("");
   const [themeConfirmed, setThemeConfirmed] = useState(false);
+  const [applyCount, setApplyCount] = useState(1);
   const [themeError, setThemeError] = useState("");
   const [saving, setSaving] = useState(false);
   const [result, setResult] = useState<BatchImageThemeResponse | null>(null);
@@ -66,8 +71,9 @@ export function ImageStylePanel({
   const selectedThemeLabel = theme === "custom"
     ? custom.trim() || "自定义描述"
     : themes.find((item) => item.key === theme)?.label || theme;
+  const limitedTheme = theme !== "ai_free" && theme !== "random_preset";
   const sharedPreview = themeConfirmed
-    ? `【共享视觉风格】\n${themeText || selectedThemeLabel}\n\n【应用范围】\n仅更新所选群的生图风格配置。每个群原有 Prompt 模板、群名、统计周期与内容变量均保持不变。`
+    ? `【共享视觉风格】\n${themeText || selectedThemeLabel}\n\n【应用范围】\n${limitedTheme ? `用于接下来 ${applyCount} 次成功生图，耗尽后自动回到每日随机。` : "作为持续模式使用，不消耗次数。"}\n每个群原有 Prompt 模板、群名、统计周期与内容变量均保持不变。`
     : "请先在上方打开风格中心并点击“使用这个风格”。确认后再选择需要同步的群。";
 
   const applyTheme = async (key: string, customValue = "") => {
@@ -75,6 +81,7 @@ export function ImageStylePanel({
     setTheme(key);
     setCustom(normalizedCustom);
     setThemeConfirmed(true);
+    if (key !== "ai_free" && key !== "random_preset") setApplyCount(1);
     setThemeError("");
     setResult(null);
     try {
@@ -118,12 +125,13 @@ export function ImageStylePanel({
         group_ids: requestedIds,
         image_theme: theme,
         image_theme_custom: theme === "custom" ? custom.trim() : "",
+        image_theme_apply_count: limitedTheme ? applyCount : 1,
       });
       setResult(response);
       setSelectedIds(response.failed.map((item) => item.group_id));
       await loadCatalogs();
       if (response.status === "success") {
-        toast(`已把「${selectedThemeLabel}」应用到 ${response.success.length} 个群`);
+        toast(`已把「${selectedThemeLabel}」应用到 ${response.success.length} 个群${limitedTheme ? `，每群 ${applyCount} 次` : ""}`);
       } else if (response.status === "partial") {
         toast(`已保存 ${response.success.length} 个群，${response.failed.length} 个群需要重试`);
       } else {
@@ -163,6 +171,14 @@ export function ImageStylePanel({
                       {themeConfirmed ? <CheckCircle size={18} weight="fill" /> : <WarningCircle size={18} />}
                       <span>{themeConfirmed ? `已确认：${selectedThemeLabel}` : "尚未确认风格，群选择不会触发保存"}</span>
                     </div>
+                    {themeConfirmed && limitedTheme && (
+                      <label className="ai-images-theme-use-count">
+                        <span><b>使用次数</b><small>默认只用下一次，耗尽后自动回到每日随机</small></span>
+                        <select value={applyCount} disabled={saving} onChange={(event) => setApplyCount(Number(event.target.value))}>
+                          {[1, 2, 3, 5, 10, 30].map((count) => <option key={count} value={count}>{count} 次</option>)}
+                        </select>
+                      </label>
+                    )}
                     <div className="ai-images-prompt-preview ai-images-default-preview">
                       <span>共享风格注入预览</span>
                       <pre aria-live="polite">{sharedPreview}</pre>
@@ -190,7 +206,7 @@ export function ImageStylePanel({
                 </div>
 
                 <div className="ai-images-style-submit-row">
-                  <span>{themeConfirmed ? `将「${selectedThemeLabel}」应用到后续新运行` : "请先确认共享风格"}</span>
+                  <span>{themeConfirmed ? `将「${selectedThemeLabel}」应用到后续${limitedTheme ? ` ${applyCount} 次成功生图` : "所有新运行"}` : "请先确认共享风格"}</span>
                   <Button tone="primary" onClick={saveStyle} busy={saving} disabled={saveDisabled}><FloppyDisk size={16} />{retryingFailures ? "重试失败群" : `应用到 ${selectedIds.length} 个群`}</Button>
                 </div>
 

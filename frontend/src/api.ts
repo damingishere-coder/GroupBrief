@@ -91,6 +91,7 @@ export interface GroupV2 extends Group {
   image_prompt_template: string;
   image_theme: string;
   image_theme_custom: string;
+  image_theme_remaining_runs?: number;
   has_image_prompt_override: boolean;
   wechat_send_enabled: boolean;
 }
@@ -115,6 +116,7 @@ export interface GroupPayload {
   image_prompt_template: string;
   image_theme?: string;
   image_theme_custom?: string;
+  image_theme_apply_count?: number;
   image_prompt_override?: string;
   wechat_send_enabled?: boolean;
 }
@@ -404,6 +406,7 @@ export interface GroupImagePromptConfig {
   revision: string;
   image_theme: string;
   image_theme_custom: string;
+  image_theme_remaining_runs?: number;
   resolved_theme: Record<string, string>;
   preview: string;
 }
@@ -411,6 +414,7 @@ export interface GroupImagePromptConfig {
 export interface BatchImageThemeSuccess {
   group_id: number;
   group_name: string;
+  remaining_runs: number;
 }
 
 export interface BatchImageThemeFailure {
@@ -540,6 +544,7 @@ export const batchUpdateGroupImageTheme = (body: {
   group_ids: number[];
   image_theme: string;
   image_theme_custom: string;
+  image_theme_apply_count: number;
 }) => put<BatchImageThemeResponse>("/groups/batch/image-theme", body);
 export const verifyGroupSendTarget = (groupId: number) =>
   post<{ ok: boolean; target: string; detail: string }>(`/groups/${groupId}/verify-send-target`);

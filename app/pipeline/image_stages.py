@@ -27,9 +27,16 @@ logger = get_logger("groupbrief.pipeline")
 class ImageStages:
     """构造、记录并收口受控并发的图片任务。"""
 
-    def __init__(self, *, store: RunStore, image_generator) -> None:
+    def __init__(
+        self,
+        *,
+        store: RunStore,
+        image_generator,
+        consume_image_theme: Callable[[int, str, str, str], dict] | None = None,
+    ) -> None:
         self.store = store
         self.image_generator = image_generator
+        self.consume_image_theme = consume_image_theme
 
     def make_job(self, group_name: str, run_date: str, force: bool) -> ImageJob:
         prompt_path = self.store.prompt_path(group_name, run_date)
@@ -83,6 +90,33 @@ class ImageStages:
         )
 
     def record_result(self, job: ImageJob, result: dict) -> None:
+        run_date = job.output_path.parent.name
+        current = self.store.load_run(job.group_name, run_date)
+        theme_consumption: dict = {}
+        applied_theme = str(current.get("image_theme") or "")
+        if (
+            result["success"]
+            and self.consume_image_theme is not None
+            and applied_theme not in {"", "ai_free", "random_preset"}
+        ):
+            try:
+                group_id = int(current.get("group_id") or 0)
+                if group_id <= 0:
+                    raise ValueError("运行记录缺少有效 group_id")
+                theme_consumption = self.consume_image_theme(
+                    group_id,
+                    run_date,
+                    applied_theme,
+                    str(current.get("image_theme_custom") or ""),
+                )
+            except Exception as exc:
+                result = {
+                    **result,
+                    "success": False,
+                    "status": "failed",
+                    "error_type": "IMAGE_THEME_CONSUME_FAILED",
+                    "detail": f"图片已生成但一次性主题消费失败，已停止发送：{str(exc)[:160]}",
+                }
         status = IMAGE_READY if result["success"] else FAILED
         error_type = result.get("error_type") or IMAGE_GENERATION_FAILED
         error_detail = (
@@ -90,8 +124,6 @@ class ImageStages:
             if not result["success"]
             else None
         )
-        run_date = job.output_path.parent.name
-        current = self.store.load_run(job.group_name, run_date)
         stage_timings = dict(current.get("stage_timings") or {})
         imagegen_ms = int(result.get("imagegen_ms") or 0)
         stage_timings["imagegen_ms"] = imagegen_ms
@@ -109,6 +141,11 @@ class ImageStages:
             else 0
         )
         finished_at = datetime.now().astimezone().isoformat()
+        theme_usage_recorded = bool(
+            theme_consumption.get("consumed")
+            or theme_consumption.get("already_consumed")
+        )
+        theme_just_consumed = bool(theme_consumption.get("consumed"))
         image_job = current.get("image_job") if isinstance(current.get("image_job"), dict) else {}
         candidates = normalize_candidate_diagnostics(generator_detail)
         if result["success"]:
@@ -180,6 +217,24 @@ class ImageStages:
             image_fallback_reason=str(generator_detail.get("fallback_reason") or ""),
             image_fallback_font=str(generator_detail.get("fallback_font") or ""),
             image_safety_redactions=generator_detail.get("safety_redactions") or [],
+            image_theme_consumed=(
+                True if theme_usage_recorded else current.get("image_theme_consumed", False)
+            ),
+            image_theme_consumed_at=(
+                finished_at
+                if theme_just_consumed
+                else current.get("image_theme_consumed_at", "")
+            ),
+            image_theme_remaining_runs=(
+                int(theme_consumption.get("remaining_runs") or 0)
+                if theme_consumption
+                else current.get("image_theme_remaining_runs", 0)
+            ),
+            image_theme_next=(
+                str(theme_consumption.get("next_theme") or "random_preset")
+                if theme_consumption
+                else current.get("image_theme_next", "")
+            ),
             image_force_local_fallback=(
                 False if result["success"] else current.get("image_force_local_fallback", False)
             ),

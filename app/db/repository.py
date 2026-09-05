@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from sqlalchemy import event, update
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlmodel import Session, SQLModel, create_engine, select
 
 from app.config.settings import Settings
@@ -188,6 +189,7 @@ _V2_GROUP_COLUMNS: dict[str, str] = {
     "image_prompt_template": "VARCHAR(64) NOT NULL DEFAULT 'default'",
     "image_theme": "VARCHAR(64) NOT NULL DEFAULT 'ai_free'",
     "image_theme_custom": "VARCHAR(80) NOT NULL DEFAULT ''",
+    "image_theme_remaining_runs": "INTEGER NOT NULL DEFAULT 0",
     "image_prompt_override": "TEXT NOT NULL DEFAULT ''",
     "wechat_send_enabled": "BOOLEAN NOT NULL DEFAULT 0",
     "deleted_at": "DATETIME NULL",
@@ -242,6 +244,23 @@ def _migrate_parallel_summary_defaults() -> None:
                 .values(image_theme="random_preset")
             )
             session.add(Setting(key=marker, value="done"))
+        session.commit()
+
+
+def _migrate_finite_image_theme_defaults() -> None:
+    """让升级前已保存的手动主题只再使用一次，随后回到每日随机。"""
+
+    marker = "migration_finite_image_theme_uses_v1"
+    with Session(engine) as session:
+        if session.get(Setting, marker) is not None:
+            return
+        session.exec(
+            Group.__table__.update()
+            .where(Group.image_theme.notin_(("ai_free", "random_preset")))
+            .where(Group.image_theme_remaining_runs <= 0)
+            .values(image_theme_remaining_runs=1)
+        )
+        session.add(Setting(key=marker, value="done"))
         session.commit()
 
 
@@ -380,6 +399,7 @@ def init_db(settings: Settings) -> Any:
     _seed_defaults(settings)
     # 先种默认值再迁移，确保旧 .env 中的 deepseek-chat / 12000 也会升级。
     _migrate_parallel_summary_defaults()
+    _migrate_finite_image_theme_defaults()
     _migrate_codex_summary_defaults()
     _migrate_codex_image_timeout_default()
     _migrate_daily_schedule_defaults()
@@ -529,6 +549,7 @@ def update_group_image_theme(
     *,
     image_theme: str,
     image_theme_custom: str,
+    image_theme_remaining_runs: int,
 ) -> bool:
     """独立事务只更新群生图主题字段，避免通用保存路径带入其他配置。"""
 
@@ -538,11 +559,92 @@ def update_group_image_theme(
         .values(
             image_theme=image_theme,
             image_theme_custom=image_theme_custom,
+            image_theme_remaining_runs=max(int(image_theme_remaining_runs), 0),
             updated_at=_now(),
         )
     )
     session.commit()
     return result.rowcount == 1
+
+
+def consume_group_image_theme_for_run(
+    session: Session,
+    group_id: int,
+    *,
+    run_date: str,
+    expected_theme: str,
+    expected_custom: str,
+) -> dict[str, Any]:
+    """为一个新运行至多消费一次手动主题；同一事务内写幂等标记并更新群配置。"""
+
+    if expected_theme in {"ai_free", "random_preset"}:
+        return {
+            "consumed": False,
+            "already_consumed": False,
+            "remaining_runs": 0,
+            "next_theme": expected_theme,
+        }
+
+    marker = f"image_theme_use:{group_id}:{run_date}"
+    claim = session.execute(
+        sqlite_insert(Setting)
+        .values(key=marker, value=expected_theme[:64], updated_at=_now())
+        .on_conflict_do_nothing(index_elements=["key"])
+    )
+    if claim.rowcount != 1:
+        session.rollback()
+        group = session.get(Group, group_id)
+        return {
+            "consumed": False,
+            "already_consumed": True,
+            "remaining_runs": max(
+                int(getattr(group, "image_theme_remaining_runs", 0) or 0), 0
+            )
+            if group is not None
+            else 0,
+            "next_theme": str(getattr(group, "image_theme", "random_preset") or "random_preset")
+            if group is not None
+            else "random_preset",
+        }
+
+    group = session.get(Group, group_id)
+    matches_snapshot = bool(
+        group is not None
+        and group.deleted_at is None
+        and str(group.image_theme or "") == expected_theme
+        and str(group.image_theme_custom or "") == expected_custom
+    )
+    if not matches_snapshot:
+        session.commit()
+        return {
+            "consumed": False,
+            "already_consumed": False,
+            "config_changed": True,
+            "remaining_runs": max(
+                int(getattr(group, "image_theme_remaining_runs", 0) or 0), 0
+            )
+            if group is not None
+            else 0,
+            "next_theme": str(getattr(group, "image_theme", "random_preset") or "random_preset")
+            if group is not None
+            else "random_preset",
+        }
+
+    remaining = max(int(group.image_theme_remaining_runs or 0), 1)
+    next_remaining = remaining - 1
+    if next_remaining == 0:
+        group.image_theme = "random_preset"
+        group.image_theme_custom = ""
+    group.image_theme_remaining_runs = next_remaining
+    group.updated_at = _now()
+    session.add(group)
+    session.commit()
+    return {
+        "consumed": True,
+        "already_consumed": False,
+        "remaining_runs": next_remaining,
+        "next_theme": str(group.image_theme or "random_preset"),
+    }
 
 
 def delete_group(session: Session, group_id: int) -> Group | None:
