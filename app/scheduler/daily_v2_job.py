@@ -22,8 +22,16 @@ from app.db import repository as repo
 from app.pipeline.daily_pipeline import DailyPipeline, parse_date
 from app.services.generation_runtime import GenerationBusyError, generation_mutex
 from app.services.email_service import email_delivery_config_error
-from app.v2.constants import IMAGE_GENERATION_FAILED, SCHEDULER_STATE_CORRUPT
-from app.v2.run_store import _atomic_write_text, _run_mutex
+from app.v2.constants import (
+    CORRUPT,
+    FAILED,
+    IMAGE_GENERATION_FAILED,
+    IMAGE_READY,
+    READY_TO_SEND,
+    SCHEDULER_STATE_CORRUPT,
+    SENT,
+)
+from app.v2.run_store import RunStore, _atomic_write_text, _run_mutex
 from app.scheduler.outcome import ProcessExitCode, attach_outcome, summarize_results
 from app.scheduler.task_manifest import (
     build_expected_groups,
@@ -244,12 +252,31 @@ def run_daily_v2_job(
         }
     except Exception as exc:
         logger.exception("V2 每日任务异常")
-        result = {"status": "failed", "detail": str(exc)[:300]}
+        result = {
+            "status": "failed",
+            "error_type": "UNEXPECTED_SCHEDULER_ERROR",
+            "stage": "scheduler",
+            "retryable": True,
+            "detail": str(exc)[:300],
+        }
     return _finalize_invocation(settings, parsed_date.isoformat(), result)
 
 
 def _finalize_invocation(settings: Settings, run_date: str, result: dict) -> dict:
     finalized = attach_outcome(result)
+    if finalized.get("error_type") == "UNEXPECTED_SCHEDULER_ERROR":
+        try:
+            from app.repair.store import RepairIncidentStore
+
+            RepairIncidentStore(settings).record(
+                scope="scheduler",
+                error_type="UNEXPECTED_SCHEDULER_ERROR",
+                stage="scheduler",
+                source_path=f".scheduler/{run_date}.json",
+                error_summary=str(finalized.get("detail") or ""),
+            )
+        except Exception:
+            logger.exception("调度异常写入维修队列失败：run_date=%s", run_date)
     logger.info(
         "V2 每日任务终态：run_date=%s source_status=%s outcome=%s exit_code=%d",
         run_date,
@@ -326,6 +353,9 @@ def ensure_daily_manifest(
         parsed,
         timezone=settings.app_timezone,
         schedule_send_time=settings.schedule_send_time,
+        weekly_replaces_monday_daily_send=(
+            settings.weekly_monday_replacement_enabled
+        ),
         resolver=resolver,
     )
     manifest = manifest_fields(expected)
@@ -682,6 +712,93 @@ def _run_locked(settings: Settings, run_date: date, *, skip_email: bool) -> dict
 
 def _generation_status(results: list[dict]) -> str:
     return str(summarize_results(results)["outcome_status"])
+
+
+def reconcile_daily_schedule_from_runs(settings: Settings, run_date: str) -> dict:
+    """以任务清单和权威 run.json 全量重算生成汇总，不触碰发送结果。"""
+
+    state_store = DailyScheduleState(settings.output_dir)
+    state = state_store.load(run_date)
+    if state.get("state_status") == "corrupt":
+        raise ScheduleStateCorruptionError("调度状态文件损坏，禁止自动覆盖")
+    expected = state.get("expected_groups")
+    if not isinstance(expected, list):
+        return state
+
+    runs_by_group_id: dict[int, dict] = {}
+    runs_by_name: dict[str, dict] = {}
+    for run in RunStore(settings.output_dir).list_runs(run_date):
+        try:
+            group_id = int(run.get("group_id") or 0)
+        except (TypeError, ValueError):
+            group_id = 0
+        if group_id > 0:
+            runs_by_group_id[group_id] = run
+        name = str(run.get("group_name") or "")
+        if name:
+            runs_by_name[name] = run
+
+    results: list[dict] = []
+    recovered_groups: list[str] = []
+    for item in expected:
+        group_id = int(item["group_id"])
+        group_name = str(item.get("group_name") or group_id)
+        run = runs_by_group_id.get(group_id) or runs_by_name.get(group_name)
+        if not run:
+            results.append(
+                {
+                    "group_name": group_name,
+                    "status": "failed_final",
+                    "error_type": "RUN_STATE_MISSING",
+                    "failed_stage": "reconcile",
+                    "detail": "预期群缺少权威 run.json",
+                }
+            )
+            continue
+        status = str(run.get("status") or "")
+        if status == SENT:
+            result_status = "success"
+        elif status in {IMAGE_READY, READY_TO_SEND}:
+            result_status = "ready_to_send"
+        elif status == CORRUPT:
+            result_status = "blocked"
+        elif status == FAILED:
+            result_status = (
+                "held" if bool(run.get("send_hold") or run.get("needs_manual_send"))
+                else "failed_final"
+            )
+        else:
+            result_status = "failed_final"
+        result = {
+            "group_name": group_name,
+            "status": result_status,
+            "error_type": run.get("error_type"),
+            "failed_stage": run.get("failed_stage"),
+            "detail": run.get("error") or run.get("image_error") or "",
+            "recovery_status": run.get("image_recovery_status"),
+            "recovered_at": run.get("image_recovered_at") or run.get("image_regenerated_at"),
+            "receipt_source": run.get("image_receipt_source"),
+            "codex_thread_id": run.get("codex_thread_id"),
+        }
+        results.append(result)
+        if result_status in {"success", "ready_to_send"} and result.get("recovered_at"):
+            recovered_groups.append(group_name)
+
+    compact = _compact_results(results)
+    next_status = _generation_status(results)
+    fields: dict = {
+        "generation_results": compact,
+        "generation_status": next_status,
+        "generation_reconciled_at": _now_iso(),
+        "generation_recovery_groups": sorted(set(recovered_groups)),
+        "generation_hold": any(
+            item.get("status") in {"held", "blocked", "failed_final"}
+            for item in results
+        ),
+    }
+    if _generation_results_terminal(results):
+        fields["generation_completed_at"] = state.get("generation_completed_at") or _now_iso()
+    return state_store.update(run_date, **fields)
 
 
 def _generation_results_terminal(results: list[dict]) -> bool:

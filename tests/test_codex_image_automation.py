@@ -256,13 +256,17 @@ def test_explicit_adopt_preserves_timing_audits_hash_and_syncs_scheduler(tmp_pat
         json.dumps(
             {
                 "run_date": "2026-08-20",
+                "manifest_version": 1,
+                "manifest_created_at": "2026-08-20T00:14:00+08:00",
+                "expected_groups": [{"group_id": 1, "group_name": "测试群"}],
                 "generation_status": "partial",
-                "generation_completed_at": "done",
+                "generation_completed_at": "2026-08-20T00:20:00+08:00",
                 "generation_results": [
                     {"group_name": "测试群", "status": "failed", "error_type": IMAGE_GENERATION_FAILED},
                     {"group_name": "其他群", "status": "ready_to_send"},
                 ],
-                "email_completed_at": "sent-before-recovery",
+                "email_completed_at": "2026-08-20T00:30:00+08:00",
+                "email_status": "sent",
             },
             ensure_ascii=False,
         ),
@@ -281,5 +285,5 @@ def test_explicit_adopt_preserves_timing_audits_hash_and_syncs_scheduler(tmp_pat
     assert run["image_recovery"]["preserved_imagegen_ms"] is True
     assert len(run["image_recovery"]["sha256"]) == 64
     assert scheduler["generation_status"] == "success"
-    assert scheduler["email_completed_at"] == "sent-before-recovery"
+    assert scheduler["email_completed_at"] == "2026-08-20T00:30:00+08:00"
     assert scheduler["generation_results"][0]["status"] == "ready_to_send"

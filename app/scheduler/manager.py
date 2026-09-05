@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 from datetime import datetime, time, timedelta
+import subprocess
+import sys
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
+from apscheduler.triggers.interval import IntervalTrigger
 from zoneinfo import ZoneInfo
 
-from app.config.settings import Settings, get_settings
+from app.config.settings import PROJECT_ROOT, Settings, get_settings
 from app.core.logging import get_logger
 from app.scheduler.daily_v2_job import DailyScheduleState, run_daily_v2_job
 from app.scheduler.heartbeat import record_scheduler_heartbeat
@@ -18,7 +21,8 @@ from app.scheduler.reliability_watchdog import recovery_dates, run_reliability_w
 from app.scheduler.send_job import run_send_due_job
 from app.v2.constants import EXECUTION_WAIT_RETRY, IMAGE_READY, READY_TO_SEND
 from app.v2.run_store import RunStore
-from app.weekly.service import WeeklyInsightsService
+from app.weekly.service import WeeklyInsightsService, previous_natural_week
+from app.weekly.store import WeeklyStore
 
 logger = get_logger("groupbrief.scheduler")
 
@@ -73,6 +77,19 @@ def _parse_weekly_time(value: str) -> time:
         value,
         fallback=time(7, 45),
         field_name="weekly_generate_time",
+    )
+
+
+def _is_current_monday_weekly_replacement(
+    settings: Settings,
+    now: datetime,
+    run_date: str,
+) -> bool:
+    """仅替换本周一当天的日报发送，历史日期仍保持人工恢复边界。"""
+    return bool(
+        settings.weekly_monday_replacement_enabled
+        and now.weekday() == 0
+        and run_date == now.date().isoformat()
     )
 
 
@@ -160,6 +177,10 @@ def _schedule_on_demand_jobs(
         scheduled.append(job_id)
 
     if today not in selected_dates:
+        return scheduled
+
+    if _is_current_monday_weekly_replacement(settings, now, today):
+        # 日报仍生成并保留 READY_TO_SEND，但周一微信入口由周报接管。
         return scheduled
 
     send_clock = _parse_send_time(settings.schedule_send_time)
@@ -257,6 +278,8 @@ def run_scheduled_send_batch(run_date: str | None = None) -> dict:
     now = _normalize_now(settings)
     target_date = run_date or now.date().isoformat()
     try:
+        if _is_current_monday_weekly_replacement(settings, now, target_date):
+            return run_scheduled_weekly_send(settings=settings, now=now)
         return run_send_due_job(
             settings=settings,
             now=now,
@@ -294,6 +317,7 @@ def run_scheduled_startup_recovery() -> dict:
         run_dates=recovery_dates(now, settings.reliability_lookback_days),
         include_newly_ready_send=False,
     )
+    _schedule_weekly_replacement_jobs(_scheduler, settings, now=now)
     record_scheduler_heartbeat(
         settings,
         job="startup_recovery",
@@ -302,26 +326,133 @@ def run_scheduled_startup_recovery() -> dict:
     return result
 
 
-def run_scheduled_weekly_insights() -> dict:
+def run_scheduled_weekly_insights(
+    *,
+    settings: Settings | None = None,
+    now: datetime | None = None,
+) -> dict:
     """周一独立生成上一自然周归档；不读取原始聊天、不发送。"""
-    settings = get_settings()
+    settings = settings or get_settings()
+    supplied_now = now
+    now = _normalize_now(settings, now)
     record_scheduler_heartbeat(settings, job="weekly_insights", status="started")
-    result = WeeklyInsightsService(settings).generate_previous_week()
+    try:
+        result = WeeklyInsightsService(settings).generate_previous_week(now=now)
+    except Exception as exc:
+        record_scheduler_heartbeat(
+            settings,
+            job="weekly_insights",
+            status="error",
+            detail=f"{type(exc).__name__}: {exc}",
+        )
+        raise
     record_scheduler_heartbeat(
         settings,
         job="weekly_insights",
         status=str(result.get("status") or "unknown"),
     )
+    _schedule_weekly_replacement_jobs(
+        _scheduler,
+        settings,
+        now=(now if supplied_now is not None else _normalize_now(settings)),
+        include_generation=False,
+    )
     return result
 
 
-def run_scheduled_weekly_send() -> dict:
+def run_scheduled_weekly_send(
+    *,
+    settings: Settings | None = None,
+    now: datetime | None = None,
+) -> dict:
     """可选周报发送独立运行，不再参与日报批次或空闲日志。"""
-    settings = get_settings()
-    results = WeeklyInsightsService(settings).send_due()
+    settings = settings or get_settings()
+    now = _normalize_now(settings, now)
+    results = WeeklyInsightsService(settings).send_due(now=now)
     outcome = summarize_results(results)
     require_scheduler_success(outcome, allow_not_run=True)
     return outcome
+
+
+def run_repair_worker_process() -> dict:
+    """在独立进程消费脱敏维修队列；Web 服务自身不修改代码工作树。"""
+    settings = get_settings()
+    completed = subprocess.run(
+        [sys.executable, str(PROJECT_ROOT / "scripts" / "repair_worker.py")],
+        cwd=str(PROJECT_ROOT),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=max(min(int(settings.repair_timeout_minutes), 60), 1) * 60 + 300,
+        shell=False,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError((completed.stderr or completed.stdout)[-500:])
+    return {"status": "complete", "detail": completed.stdout[-500:]}
+
+
+def _schedule_weekly_replacement_jobs(
+    scheduler: BackgroundScheduler | None,
+    settings: Settings,
+    *,
+    now: datetime | None = None,
+    include_generation: bool = True,
+) -> list[str]:
+    """周一重启或延迟生成后，按周报持久化状态恢复一次性任务。"""
+    if scheduler is None:
+        return []
+    now = _normalize_now(settings, now)
+    today = now.date().isoformat()
+    if not _is_current_monday_weekly_replacement(settings, now, today):
+        return []
+
+    scheduled: list[str] = []
+    generate_due = datetime.combine(
+        now.date(),
+        _parse_weekly_time(settings.weekly_generate_time),
+        tzinfo=now.tzinfo,
+    )
+    if include_generation and now >= generate_due:
+        job_id = f"weekly_generate_once_{today.replace('-', '')}"
+        _add_one_shot(
+            scheduler,
+            job_id=job_id,
+            name=f"WeeklyGenerateOnce:{today}",
+            func=run_scheduled_weekly_insights,
+            run_at=now + timedelta(seconds=1),
+        )
+        scheduled.append(job_id)
+
+    send_due = datetime.combine(
+        now.date(),
+        _parse_clock(
+            settings.weekly_send_time,
+            fallback=_DEFAULT_SEND_TIME,
+            field_name="weekly_send_time",
+        ),
+        tzinfo=now.tzinfo,
+    )
+    if now < send_due:
+        return scheduled
+    week_start, week_end = previous_natural_week(now.date())
+    sendable = any(
+        state.get("week_start") == week_start.isoformat()
+        and state.get("week_end") == week_end.isoformat()
+        and state.get("status") in {"ready_to_send", "sending"}
+        for state in WeeklyStore(settings.output_dir).list_states()
+    )
+    if sendable:
+        job_id = f"weekly_send_once_{today.replace('-', '')}"
+        _add_one_shot(
+            scheduler,
+            job_id=job_id,
+            name=f"WeeklySendOnce:{today}",
+            func=run_scheduled_weekly_send,
+            run_at=now + timedelta(seconds=1),
+        )
+        scheduled.append(job_id)
+    return scheduled
 
 
 def _schedule_startup_recovery(
@@ -396,7 +527,7 @@ def start_scheduler(settings: Settings) -> BackgroundScheduler:
             coalesce=True,
             max_instances=1,
         )
-    if settings.weekly_send_enabled:
+    if settings.weekly_send_enabled and not settings.weekly_monday_replacement_enabled:
         weekly_send_time = _parse_clock(
             settings.weekly_send_time,
             fallback=_DEFAULT_SEND_TIME,
@@ -417,10 +548,24 @@ def start_scheduler(settings: Settings) -> BackgroundScheduler:
             coalesce=True,
             max_instances=1,
         )
+    if settings.repair_enabled:
+        scheduler.add_job(
+            run_repair_worker_process,
+            trigger=IntervalTrigger(
+                minutes=max(int(settings.repair_poll_interval_minutes), 1),
+                timezone=tz,
+            ),
+            id="repair_controller",
+            name="RepairController",
+            misfire_grace_time=300,
+            coalesce=True,
+            max_instances=1,
+        )
     scheduler.start()
     _scheduler = scheduler
     record_scheduler_heartbeat(settings, job="scheduler", status="started")
     _schedule_startup_recovery(scheduler, settings)
+    _schedule_weekly_replacement_jobs(scheduler, settings)
     logger.info(
         "调度已启动：每日 %s 生成，%s 微信串行发送批次（时区 %s）",
         generate_time.strftime("%H:%M"),

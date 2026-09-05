@@ -32,6 +32,7 @@ from app.v2.constants import (
     IMAGE_FALLBACK_NOT_SENDABLE,
     IMAGE_FILE_MISSING,
     IMAGE_GENERATION_FAILED,
+    IMAGE_PROVENANCE_MISSING,
     IMAGE_READY,
     PROMPT_READY,
     READY_TO_SEND,
@@ -1110,6 +1111,9 @@ def _ready_run_contract(*, image_enabled: bool = False) -> dict:
         },
         "prompt_stale": False,
         "image_stale": False,
+        "image_fallback_level": 0,
+        "image_variant": "normal",
+        "image_status": "success",
     }
 
 
@@ -1136,6 +1140,29 @@ def test_send_due_sends_text_then_image(tmp_path):
     sender = pipeline.sender
     assert len(sender.text_calls) == 1
     assert len(sender.image_calls) == 1
+
+
+def test_monday_weekly_replacement_blocks_direct_daily_send_due(tmp_path):
+    pipeline = _ready_to_send(tmp_path)
+    pipeline.settings = pipeline.settings.model_copy(
+        update={
+            "weekly_insights_enabled": True,
+            "weekly_send_enabled": True,
+            "weekly_replaces_monday_daily_send": True,
+        }
+    )
+    monday = "2026-08-31"
+    original = pipeline.store.load_run("测试群", "2026-08-18")
+    pipeline.store.save_run("测试群", monday, original)
+
+    results = pipeline.send_due(
+        now=datetime(2026, 8, 31, 8, 30, tzinfo=ZoneInfo("Asia/Shanghai"))
+    )
+
+    assert results == []
+    assert pipeline.sender.text_calls == []
+    assert pipeline.sender.image_calls == []
+    assert pipeline.store.load_run("测试群", monday)["status"] == READY_TO_SEND
 
 
 @pytest.mark.parametrize(
@@ -1307,6 +1334,41 @@ def test_explicit_text_failures_use_backoff_and_stop_after_send_retry_budget(tmp
 
     assert pipeline.send_due(now=datetime(2026, 8, 18, 8, 39, 0)) == []
     assert len(sender.text_calls) == 3
+
+
+@pytest.mark.parametrize(
+    ("detail", "error_type"),
+    [
+        ("群聊分区未找到目标（匹配数 0；可信分区 0）", "WECHAT_TARGET_NOT_FOUND"),
+        ("UIA 精确群聊项数量不是 1（当前 2）", "WECHAT_TARGET_AMBIGUOUS"),
+        ("文字粘贴后未观察到输入区暂存，已停止且未按 Enter", "WECHAT_TEXT_NOT_STAGED"),
+    ],
+)
+def test_deterministic_wechat_pre_submit_failure_holds_on_first_attempt(
+    tmp_path, detail, error_type
+):
+    class PreSubmitFailureSender(FakeSender):
+        def send_text(self, target, text):
+            from app.sender.base import SendResult
+
+            self.text_calls.append((target, text))
+            return SendResult(False, detail, datetime.now().isoformat(), submitted=False)
+
+    sender = PreSubmitFailureSender()
+    pipeline, _ = _make_pipeline(tmp_path, sender=sender, image_enabled=False)
+    pipeline.generate_all(run_date="2026-08-18")
+
+    first = pipeline.send_due(now=datetime(2026, 8, 18, 8, 31, 0))
+    second = pipeline.send_due(now=datetime(2026, 8, 18, 8, 32, 0))
+    run = pipeline.store.load_run("测试群", "2026-08-18")
+
+    assert first[0]["status"] == "held"
+    assert first[0]["error_type"] == error_type
+    assert second == []
+    assert len(sender.text_calls) == 1
+    assert run["send_state"] == "failed_final"
+    assert run["send_hold"] is True
+    assert run["send_retry_attempt_count"] == 0
 
 
 def test_explicit_unsubmitted_final_failure_can_be_reset_without_sending(tmp_path):
@@ -1916,6 +1978,35 @@ def test_submitted_but_unverified_text_is_held_without_retry(tmp_path):
     assert run["send_hold"] is True
 
 
+def test_image_preview_not_observed_holds_without_retry_or_second_submit(tmp_path):
+    class PreviewFailureSender(FakeSender):
+        def send_image(self, target, image_path):
+            from app.sender.base import SendResult
+
+            self.image_calls.append((target, Path(image_path)))
+            return SendResult(
+                False,
+                "图片粘贴后未观察到预览，已停止且未按 Enter",
+                datetime.now().isoformat(),
+                submitted=False,
+            )
+
+    pipeline = _ready_to_send(tmp_path)
+    sender = PreviewFailureSender()
+    pipeline.sender = sender
+
+    first = pipeline.send_due(now=datetime(2026, 8, 18, 8, 31, 0))
+    second = pipeline.send_due(now=datetime(2026, 8, 18, 8, 32, 0))
+    run = pipeline.store.load_run("测试群", "2026-08-18")
+
+    assert first[0]["error_type"] == "WECHAT_IMAGE_NOT_STAGED"
+    assert second == []
+    assert len(sender.text_calls) == 1
+    assert len(sender.image_calls) == 1
+    assert run["send_state"] == "failed_final"
+    assert run["send_hold"] is True
+
+
 def test_submitted_failure_is_still_held_as_unknown(tmp_path):
     pipeline = _ready_to_send(tmp_path)
     sender = SubmittedFailureTextSender()
@@ -2181,4 +2272,4 @@ def test_run_store_send_claim_treats_legacy_artifact_without_contract_as_stale(t
     )
 
     assert claim_id is None
-    assert reason == "artifact_stale"
+    assert reason == IMAGE_PROVENANCE_MISSING

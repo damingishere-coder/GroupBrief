@@ -171,7 +171,13 @@ def _group_node_status(
 ) -> str:
     if node_id == "scheduler":
         return "success" if scheduler_started else "pending"
-    if node_id == "image" and not image_delivery_eligible(run):
+    image_job = run.get("image_job") if isinstance(run.get("image_job"), dict) else {}
+    image_attempt_finished = bool(
+        run.get("image_status")
+        or image_job.get("status") in {"completed", "failed", "ambiguous_result", "diagnostic_fallback"}
+        or str(run.get("status") or "") in {"IMAGE_READY", "READY_TO_SEND", "SENT"}
+    )
+    if node_id == "image" and image_attempt_finished and not image_delivery_eligible(run):
         # 历史 SENT 仍保持发送成功，但图片节点必须呈现诊断失败事实。
         return "failed"
 

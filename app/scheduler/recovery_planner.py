@@ -113,6 +113,9 @@ class RecoveryPlanner:
                     datetime.fromisoformat(run_date).date(),
                     timezone=self.settings.app_timezone,
                     schedule_send_time=self.settings.schedule_send_time,
+                    weekly_replaces_monday_daily_send=(
+                        self.settings.weekly_monday_replacement_enabled
+                    ),
                 )
                 source = "current_config_preview"
             runs = {
@@ -206,6 +209,9 @@ class RecoveryPlanner:
                     datetime.fromisoformat(run_date).date(),
                     timezone=self.settings.app_timezone,
                     schedule_send_time=self.settings.schedule_send_time,
+                    weekly_replaces_monday_daily_send=(
+                        self.settings.weekly_monday_replacement_enabled
+                    ),
                     resolver=pipeline.period_resolver,
                 )
                 state = self.state_store.load(run_date)
@@ -270,6 +276,9 @@ class RecoveryPlanner:
                 datetime.fromisoformat(run_date).date(),
                 timezone=self.settings.app_timezone,
                 schedule_send_time=self.settings.schedule_send_time,
+                weekly_replaces_monday_daily_send=(
+                    self.settings.weekly_monday_replacement_enabled
+                ),
                 resolver=pipeline.period_resolver,
             )
             actual_ids = sorted(

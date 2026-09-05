@@ -370,6 +370,43 @@ export interface WeeklyInsight {
     topics: { title: string; days: number }[];
   };
   card_url?: string;
+  error_type?: string;
+  state_error_reason?: string;
+}
+
+export interface WeeklyFeatureStatus {
+  generation_enabled: boolean;
+  send_enabled: boolean;
+  replaces_monday_daily_send: boolean;
+  next_generate_at: string;
+  next_send_at: string;
+  generation_job_registered: boolean;
+  send_job_registered: boolean;
+  status_counts: Record<string, number>;
+}
+
+export interface RepairIncident {
+  incident_id: string;
+  fingerprint: string;
+  scope: string;
+  error_type: string;
+  status: string;
+  attempt_count: number;
+  cooldown_until?: string;
+  branch?: string;
+  commit_sha?: string;
+  pr_url?: string;
+  circuit_reason?: string;
+  updated_at?: string;
+}
+
+export interface RepairSummary {
+  enabled: boolean;
+  queued: number;
+  active_fingerprint: string;
+  circuit_open: boolean;
+  circuit_until: string;
+  status_counts: Record<string, number>;
 }
 
 export interface TemplateItem {
@@ -587,9 +624,11 @@ export const getRecoveryBacklog = (lookbackDays = 30) =>
   get<RecoveryBacklog>(`/v2/recovery/backlog?lookback_days=${lookbackDays}`);
 export const confirmRecovery = (body: { expected_version: string; tasks: { run_date: string; group_id: number }[] }) =>
   post<{ status: string; generation_only: boolean; send_invoked: boolean; results: { status: string; group_name?: string }[] }>("/v2/recovery/confirm", body);
-export const listWeeklyInsights = () => get<{ schema_version: number; items: WeeklyInsight[] }>("/v2/weekly");
+export const listWeeklyInsights = () => get<{ schema_version: number; feature: WeeklyFeatureStatus; items: WeeklyInsight[] }>("/v2/weekly");
 export const getWeeklyInsight = (weekStart: string, groupId: number) =>
   get<WeeklyInsight>(`/v2/weekly/${weekStart}/${groupId}`);
+export const listRepairIncidents = () =>
+  get<{ schema_version: number; summary: RepairSummary; items: RepairIncident[] }>("/v2/repair/incidents");
 export const retryFailed = (body: { group_id?: number; run_date?: string }) =>
   post<{ results: { group_name?: string; status: string; detail?: string }[] }>("/v2/pipeline/retry-failed", body);
 export const pipelineGenerate = (body: { group_id?: number; run_date?: string; force?: boolean; refresh_messages?: boolean }) =>

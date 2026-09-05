@@ -43,15 +43,31 @@ class WeeklyStore:
         try:
             value = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, UnicodeError, json.JSONDecodeError):
-            return {
-                "schema_version": 1,
-                "week_start": week_start,
-                "week_end": week_end,
-                "group_id": group_id,
-                "status": "needs_attention",
-                "error_type": "WEEKLY_STATE_CORRUPT",
-            }
-        return value if isinstance(value, dict) else {}
+            return self._corrupt(week_start, week_end, group_id, "read_or_json_invalid")
+        if not isinstance(value, dict):
+            return self._corrupt(week_start, week_end, group_id, "root_not_object")
+        if (
+            value.get("week_start") != week_start
+            or value.get("week_end") != week_end
+            or value.get("group_id") != group_id
+        ):
+            return self._corrupt(week_start, week_end, group_id, "identity_invalid")
+        return value
+
+    @staticmethod
+    def _corrupt(week_start: str, week_end: str, group_id: int, reason: str) -> dict:
+        return {
+            "schema_version": 1,
+            "week_start": week_start,
+            "week_end": week_end,
+            "group_id": group_id,
+            "group_name": f"群 {group_id}",
+            "status": "needs_attention",
+            "error_type": "WEEKLY_STATE_CORRUPT",
+            "stage": "state",
+            "retryable": False,
+            "state_error_reason": reason,
+        }
 
     def save(self, week_start: str, week_end: str, group_id: int, value: dict) -> dict:
         with _LOCK:
@@ -109,15 +125,18 @@ class WeeklyStore:
         states: list[dict] = []
         for path in self.root.glob("*_*/group-*/weekly.json"):
             try:
-                value = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, UnicodeError, json.JSONDecodeError):
+                period = path.parent.parent.name
+                week_start, week_end = period.split("_", 1)
+                group_id = int(path.parent.name.removeprefix("group-"))
+                value = self.load(week_start, week_end, group_id)
+            except (ValueError, OSError):
                 continue
             if isinstance(value, dict):
                 states.append(value)
         states.sort(
             key=lambda item: (
                 str(item.get("week_start") or ""),
-                int(item.get("group_id") or 0),
+                int(item.get("group_id") or 0) if str(item.get("group_id") or "").isdigit() else 0,
             ),
             reverse=True,
         )

@@ -297,7 +297,6 @@ def test_fact_verification_retry_uses_correction_prompt(tmp_path, monkeypatch):
     job = _job(tmp_path, "纠错重画群", generator)
     verification_results = iter(
         [
-            (False, "图片文件不存在"),
             (False, "图片事实校验失败：无证据数字：45元, 11218"),
             (True, "OK"),
         ]
@@ -438,6 +437,19 @@ def test_skip_when_image_exists(tmp_path):
     job = _job(tmp_path, "群1", gen)
     # 先成功生成一次
     assert job.run()["status"] == "success"
+    (job.output_path.parent / "run.json").write_text(
+        json.dumps(
+            {
+                "image_enabled": True,
+                "image_fallback_level": 0,
+                "image_variant": "normal",
+                "image_status": "success",
+                "image_job": {"status": "completed"},
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
     # 再跑：已存在有效图片 → 跳过（不重复生成）
     result = job.run()
     assert result["status"] == "skipped"

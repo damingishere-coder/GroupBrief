@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from functools import lru_cache
+import os
 from pathlib import Path
 from typing import Any, Literal
 
@@ -30,8 +31,18 @@ _ENVIRONMENT_ONLY_FIELDS = frozenset(
         "scheduler_heartbeat_stale_seconds",
         "weekly_insights_enabled",
         "weekly_send_enabled",
+        "weekly_replaces_monday_daily_send",
         "weekly_generate_time",
         "weekly_send_time",
+        "repair_enabled",
+        "repair_codex_binary",
+        "repair_worktree_root",
+        "repair_max_per_day",
+        "repair_timeout_minutes",
+        "repair_fingerprint_cooldown_days",
+        "repair_circuit_failure_threshold",
+        "repair_circuit_cooldown_hours",
+        "repair_poll_interval_minutes",
         "output_root_override",
     }
 )
@@ -180,8 +191,20 @@ class Settings(BaseSettings):
     # 周报能力先部署、后灰度：14 天可靠性验收完成前保持关闭。
     weekly_insights_enabled: bool = False
     weekly_send_enabled: bool = False
+    # 三个开关同时开启时，周一微信只发送上一自然周周报；日报仍生成留档。
+    weekly_replaces_monday_daily_send: bool = False
     weekly_generate_time: str = "07:45"
     weekly_send_time: str = "08:30"
+    # 独立维修进程默认关闭；正式启用前必须先完成 PR/部署验收。
+    repair_enabled: bool = False
+    repair_codex_binary: str = "codex"
+    repair_worktree_root: str = ""
+    repair_max_per_day: int = 2
+    repair_timeout_minutes: int = 60
+    repair_fingerprint_cooldown_days: int = 7
+    repair_circuit_failure_threshold: int = 3
+    repair_circuit_cooldown_hours: int = 24
+    repair_poll_interval_minutes: int = 10
     scheduler_heartbeat_stale_seconds: int = 300
 
     # 只供测试/离线执行通过环境变量隔离 output 与相邻 runtime；
@@ -198,6 +221,24 @@ class Settings(BaseSettings):
         if self.output_root_override:
             return Path(self.output_root_override).expanduser().resolve()
         return PROJECT_ROOT / "output"
+
+    @property
+    def weekly_monday_replacement_enabled(self) -> bool:
+        """周一周报替代日报发送的有效开关，避免半配置时漏发日报。"""
+        return bool(
+            self.weekly_insights_enabled
+            and self.weekly_send_enabled
+            and self.weekly_replaces_monday_daily_send
+        )
+
+    @property
+    def repair_worktrees_dir(self) -> Path:
+        if self.repair_worktree_root:
+            return Path(self.repair_worktree_root).expanduser().resolve()
+        local_app_data = Path(
+            os.environ.get("LOCALAPPDATA") or PROJECT_ROOT.parent
+        )
+        return (local_app_data / "GroupBrief" / "repair-worktrees").resolve()
 
     @property
     def logs_dir(self) -> Path:

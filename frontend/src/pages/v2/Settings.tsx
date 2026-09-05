@@ -113,6 +113,8 @@ const SETTING_GROUPS = [
 ] as const;
 
 const CHECK_LABEL: Record<string, string> = {
+  weekly_insights: "周报调度",
+  auto_repair: "Codex 自动维修",
   wechat_data_analysis: "WeChatDataAnalysis 数据源",
   codex_summary: "Codex GPT 群聊总结",
   deepseek_fallback: "DeepSeek 总结备用",
