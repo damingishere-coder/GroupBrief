@@ -97,3 +97,49 @@ def test_watchdog_does_not_generate_today_before_schedule(tmp_path, monkeypatch)
     )
 
     assert calls == []
+
+
+def test_watchdog_does_not_scan_monday_daily_send_when_weekly_replaces_it(
+    tmp_path,
+    monkeypatch,
+):
+    from app.config.settings import Settings
+    from app.scheduler import reliability_watchdog as watchdog
+
+    settings = Settings(
+        _env_file=None,
+        reliability_watchdog_enabled=True,
+        reliability_lookback_days=1,
+        weekly_insights_enabled=True,
+        weekly_send_enabled=True,
+        weekly_replaces_monday_daily_send=True,
+    )
+
+    class TempState(watchdog.DailyScheduleState):
+        def __init__(self, _output_root):
+            super().__init__(tmp_path)
+
+    class ForbiddenPipeline:
+        def __init__(self, settings):
+            raise AssertionError("周一启动恢复不得进入日报发送流水线")
+
+    monkeypatch.setattr(watchdog, "DailyScheduleState", TempState)
+    monkeypatch.setattr(watchdog, "DailyPipeline", ForbiddenPipeline)
+    monkeypatch.setattr(
+        watchdog,
+        "run_daily_v2_job",
+        lambda *args, **kwargs: {"status": "success"},
+    )
+
+    result = watchdog.run_reliability_watchdog(
+        settings=settings,
+        now=datetime(2026, 8, 31, 9, 0, tzinfo=ZoneInfo("Asia/Shanghai")),
+    )
+
+    assert result["status"] == "success"
+    assert result["send"] == [
+        {
+            "status": "not_run",
+            "detail": "周一日报微信发送已由上一自然周周报替代",
+        }
+    ]

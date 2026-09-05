@@ -18,6 +18,7 @@
 - `app/scheduler/task_manifest.py`
 - `app/scheduler/daily_v2_job.py`
 - `app/scheduler/recovery_planner.py`
+- `app/scheduler/reliability_watchdog.py`
 - `app/pipeline/daily_pipeline.py`
 - `.env.example`
 - 相关测试文件
@@ -47,7 +48,7 @@
 ## 测试命令
 
 ```powershell
-python -m pytest tests/test_scheduler.py tests/test_recovery_planner.py tests/test_runtime_status.py tests/test_weekly_insights.py tests/test_v2_pipeline.py -q
+python -m pytest tests/test_scheduler.py tests/test_reliability_watchdog.py tests/test_recovery_planner.py tests/test_runtime_status.py tests/test_weekly_insights.py tests/test_v2_pipeline.py -q
 ```
 
 ## 返回格式

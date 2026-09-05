@@ -104,20 +104,29 @@ def run_reliability_watchdog(
             }
         generation_results.append(result)
 
-    try:
-        # 历史任务只能生成恢复；微信自动发送仍只扫描当天。
-        send_results = DailyPipeline(settings=settings).send_due_for_dates(
-            [now.date().isoformat()], now=now, recovery=False
-        )
-    except Exception as exc:
-        logger.exception("启动恢复发送检查异常")
+    if settings.weekly_monday_replacement_enabled and now.weekday() == 0:
+        # 周一日报只生成留档；周报补偿由 scheduler manager 的独立任务负责。
         send_results = [
             {
-                "status": "failed",
-                "error_type": type(exc).__name__,
-                "detail": str(exc)[:300],
+                "status": "not_run",
+                "detail": "周一日报微信发送已由上一自然周周报替代",
             }
         ]
+    else:
+        try:
+            # 历史任务只能生成恢复；微信自动发送仍只扫描当天。
+            send_results = DailyPipeline(settings=settings).send_due_for_dates(
+                [now.date().isoformat()], now=now, recovery=False
+            )
+        except Exception as exc:
+            logger.exception("启动恢复发送检查异常")
+            send_results = [
+                {
+                    "status": "failed",
+                    "error_type": type(exc).__name__,
+                    "detail": str(exc)[:300],
+                }
+            ]
 
     status = "success"
     if any(item.get("status") in {"failed", "partial"} for item in generation_results + send_results):
