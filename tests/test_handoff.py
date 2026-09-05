@@ -106,6 +106,8 @@ def test_generate_writes_files():
 
 def test_two_groups_isolated():
     with Session(repo.engine) as session:
+        # 本用例必须可独立运行，不能依赖 test_generate_writes_files 先创建 A 群。
+        _get_or_create_group(session, "示例UED-4群", "group-a")
         _get_or_create_group(session, "产品经理交流群", "group-b")
         service = _test_report_service()
         run = service.generate(session, report_date="2026-08-13", trigger_type="auto", force=True)
