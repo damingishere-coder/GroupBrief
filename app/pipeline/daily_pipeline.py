@@ -766,6 +766,9 @@ class DailyPipeline:
         for run_date in run_dates:
             try:
                 write_daily_status(self.store, run_date)
+                from app.repair.events import capture_daily_incidents
+
+                capture_daily_incidents(self.settings, self.store, run_date)
             except Exception:
                 logger.exception("每日运行报告写入失败：run_date=%s", run_date)
 

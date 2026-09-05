@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 from datetime import datetime, time, timedelta
+import subprocess
+import sys
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
+from apscheduler.triggers.interval import IntervalTrigger
 from zoneinfo import ZoneInfo
 
-from app.config.settings import Settings, get_settings
+from app.config.settings import PROJECT_ROOT, Settings, get_settings
 from app.core.logging import get_logger
 from app.scheduler.daily_v2_job import DailyScheduleState, run_daily_v2_job
 from app.scheduler.heartbeat import record_scheduler_heartbeat
@@ -371,6 +374,24 @@ def run_scheduled_weekly_send(
     return outcome
 
 
+def run_repair_worker_process() -> dict:
+    """在独立进程消费脱敏维修队列；Web 服务自身不修改代码工作树。"""
+    settings = get_settings()
+    completed = subprocess.run(
+        [sys.executable, str(PROJECT_ROOT / "scripts" / "repair_worker.py")],
+        cwd=str(PROJECT_ROOT),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=max(min(int(settings.repair_timeout_minutes), 60), 1) * 60 + 300,
+        shell=False,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError((completed.stderr or completed.stdout)[-500:])
+    return {"status": "complete", "detail": completed.stdout[-500:]}
+
+
 def _schedule_weekly_replacement_jobs(
     scheduler: BackgroundScheduler | None,
     settings: Settings,
@@ -524,6 +545,19 @@ def start_scheduler(settings: Settings) -> BackgroundScheduler:
             id="weekly_insights_send",
             name="WeeklyInsightsSend",
             misfire_grace_time=1800,
+            coalesce=True,
+            max_instances=1,
+        )
+    if settings.repair_enabled:
+        scheduler.add_job(
+            run_repair_worker_process,
+            trigger=IntervalTrigger(
+                minutes=max(int(settings.repair_poll_interval_minutes), 1),
+                timezone=tz,
+            ),
+            id="repair_controller",
+            name="RepairController",
+            misfire_grace_time=300,
             coalesce=True,
             max_instances=1,
         )

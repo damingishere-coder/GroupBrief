@@ -162,6 +162,7 @@ def test_weekly_ai_failure_still_creates_deterministic_text_and_card(tmp_path):
     state = weekly_store.load("2026-08-24", "2026-08-30", group.id)
     assert state["status"] == "ready_to_send"
     assert state["ai_status"] == "failed"
+    assert state["error_type"] == "WEEKLY_AI_FAILED_FALLBACK"
     assert state["narrative_source"] == "local_deterministic"
     assert "周度洞察" in state["narrative"]
 
@@ -232,3 +233,84 @@ def test_stale_weekly_send_claim_becomes_manual_hold_without_resubmit(tmp_path):
     assert sender.calls == []
     assert state["status"] == "needs_attention"
     assert state["send_claim_id"] == ""
+
+
+def test_weekly_corrupt_state_is_visible_in_archive(tmp_path):
+    store = WeeklyStore(tmp_path / "output")
+    path = store.state_path("2026-08-24", "2026-08-30", 7)
+    path.parent.mkdir(parents=True)
+    path.write_text("{broken", encoding="utf-8")
+
+    states = store.list_states()
+
+    assert len(states) == 1
+    assert states[0]["status"] == "needs_attention"
+    assert states[0]["error_type"] == "WEEKLY_STATE_CORRUPT"
+
+
+def test_weekly_hash_mismatch_holds_before_sender_call(tmp_path):
+    settings = _settings(tmp_path, weekly_send_enabled=True)
+    group = _group(settings, send=True)
+    daily_store = RunStore(tmp_path / "output")
+    weekly_store = WeeklyStore(daily_store.root)
+    _daily(daily_store, group, "2026-08-24", count=2, identity="a", name="成员A")
+    sender = FakeSender()
+    service = WeeklyInsightsService(
+        settings,
+        daily_store=daily_store,
+        weekly_store=weekly_store,
+        provider_factory=lambda _settings: FakeProvider([]),
+        sender=sender,
+    )
+    service.generate_previous_week(
+        now=datetime(2026, 8, 31, 7, 45, tzinfo=ZoneInfo("Asia/Shanghai"))
+    )
+    weekly_store.text_path("2026-08-24", "2026-08-30", group.id).write_text(
+        "被篡改的周报", encoding="utf-8"
+    )
+
+    result = service.send_due(
+        now=datetime(2026, 8, 31, 8, 30, tzinfo=ZoneInfo("Asia/Shanghai"))
+    )
+    state = weekly_store.load("2026-08-24", "2026-08-30", group.id)
+
+    assert sender.calls == []
+    assert result[0]["error_type"] == "WEEKLY_ARTIFACT_HASH_MISMATCH"
+    assert state["status"] == "needs_attention"
+
+
+def test_weekly_group_failure_does_not_block_another_group(tmp_path, monkeypatch):
+    settings = _settings(tmp_path)
+    first = _group(settings)
+    with Session(repo.engine) as session:
+        second = repo.save_group(
+            session,
+            Group(
+                display_name="第二周报群",
+                wechat_group_id="weekly-2@chatroom",
+                wechat_group_name="第二周报群",
+                summary_provider="codex",
+                summary_model="gpt-5.6-sol",
+            ),
+        )
+    service = WeeklyInsightsService(settings, sender=FakeSender())
+    original = service._generate_group
+
+    def fail_first(group, *args):
+        if group.id == first.id:
+            raise ValueError("message_count 不是合法整数")
+        return {
+            "group_id": second.id,
+            "group_name": second.display_name,
+            "status": "ready_to_send",
+        }
+
+    monkeypatch.setattr(service, "_generate_group", fail_first)
+    result = service.generate_previous_week(
+        now=datetime(2026, 8, 31, 7, 45, tzinfo=ZoneInfo("Asia/Shanghai"))
+    )
+
+    assert result["status"] == "partial"
+    assert [item["status"] for item in result["results"]] == ["held", "ready_to_send"]
+    held = service.store.load("2026-08-24", "2026-08-30", first.id)
+    assert held["error_type"] == "WEEKLY_DATA_INVALID"

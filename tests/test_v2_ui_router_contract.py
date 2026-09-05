@@ -45,6 +45,8 @@ EXPECTED_V2_UI_OPERATIONS = {
     ("GET", "/api/v2/weekly", "list_weekly_insights_api_v2_weekly_get"),
     ("GET", "/api/v2/weekly/{week_start}/{group_id}", "weekly_insight_detail_api_v2_weekly__week_start___group_id__get"),
     ("GET", "/api/v2/weekly/{week_start}/{group_id}/card", "weekly_insight_card_api_v2_weekly__week_start___group_id__card_get"),
+    ("GET", "/api/v2/repair/incidents", "list_repair_incidents_api_v2_repair_incidents_get"),
+    ("GET", "/api/v2/repair/incidents/{incident_id}", "repair_incident_detail_api_v2_repair_incidents__incident_id__get"),
 }
 
 

@@ -5,6 +5,13 @@ from __future__ import annotations
 from typing import Any, Mapping
 
 
+def image_provenance_complete(metadata: Mapping[str, Any] | None) -> bool:
+    metadata = metadata if isinstance(metadata, Mapping) else {}
+    if metadata.get("image_enabled") is False:
+        return True
+    return all(key in metadata for key in ("image_fallback_level", "image_variant", "image_status"))
+
+
 def image_fallback_level(metadata: Mapping[str, Any] | None) -> int:
     """读取兜底等级；非空脏值按 Level 3 处理，保持 fail-closed。"""
     metadata = metadata if isinstance(metadata, Mapping) else {}
@@ -18,6 +25,10 @@ def image_fallback_level(metadata: Mapping[str, Any] | None) -> int:
 def image_delivery_eligible(metadata: Mapping[str, Any] | None) -> bool:
     """只有真实或安全化生成图可以发送；Level 3/Pillow 仅供诊断。"""
     metadata = metadata if isinstance(metadata, Mapping) else {}
+    if metadata.get("image_enabled") is False:
+        return True
+    if not image_provenance_complete(metadata):
+        return False
     fallback_level = image_fallback_level(metadata)
     image_variant = str(metadata.get("image_variant") or "").strip().lower()
     image_status = str(metadata.get("image_status") or "").strip().lower()
@@ -30,7 +41,8 @@ def image_delivery_eligible(metadata: Mapping[str, Any] | None) -> bool:
     if (
         fallback_level >= 3
         or image_variant == "pillow"
-        or image_status in {"failed", "diagnostic_fallback"}
+        or image_variant not in {"normal", "safe"}
+        or image_status not in {"success", "regenerated"}
         or job_status in {"failed", "ambiguous_result", "diagnostic_fallback"}
     ):
         return False

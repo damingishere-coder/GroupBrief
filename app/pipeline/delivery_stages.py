@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 from app.config.settings import Settings
 from app.core.observability import log_event
 from app.db.models import Group
-from app.image.delivery_guard import image_delivery_eligible
+from app.image.delivery_guard import image_delivery_eligible, image_provenance_complete
 from app.image.image_task import verify_image
 from app.pipeline.stage_result import StageResult
 from app.sender.base import WechatSender
@@ -19,8 +19,13 @@ from app.v2.constants import (
     FAILED,
     IMAGE_FALLBACK_NOT_SENDABLE,
     IMAGE_FILE_MISSING,
+    IMAGE_PROVENANCE_MISSING,
     READY_TO_SEND,
     SENT,
+    WECHAT_IMAGE_NOT_STAGED,
+    WECHAT_TARGET_AMBIGUOUS,
+    WECHAT_TARGET_NOT_FOUND,
+    WECHAT_TEXT_NOT_STAGED,
 )
 from app.v2.run_store import RunStore
 
@@ -63,6 +68,64 @@ class DeliveryStages:
         self.store = store
         self._name_sync_audit = name_sync_audit
         self.logger = logger
+
+    @staticmethod
+    def _manual_pre_submit_error(detail: str, stage: str) -> str:
+        text = str(detail or "")
+        if "匹配数 0" in text or "当前 0" in text or "未得到可验证的目标匹配" in text:
+            return WECHAT_TARGET_NOT_FOUND
+        if "歧义" in text or "数量不是 1" in text:
+            return WECHAT_TARGET_AMBIGUOUS
+        if stage == "text" and "未观察到输入区暂存" in text:
+            return WECHAT_TEXT_NOT_STAGED
+        if stage == "image" and "未观察到预览" in text:
+            return WECHAT_IMAGE_NOT_STAGED
+        return ""
+
+    def _hold_manual_pre_submit_failure(
+        self,
+        context: DeliveryContext,
+        *,
+        stage: str,
+        error_type: str,
+        detail: str,
+        finished_at: str,
+        diagnostics: dict,
+    ) -> dict:
+        persisted, _ = self.store.finish_send_claim(
+            context.group_name,
+            context.run_date,
+            context.claim_id,
+            send_state="failed_final",
+            status=context.run.get("status", READY_TO_SEND),
+            send_hold=True,
+            send_hold_reason=error_type,
+            needs_manual_send=True,
+            send_next_retry_at="",
+            send_retry_attempt_count=int(context.run.get("send_retry_attempt_count") or 0),
+            send_error=str(detail)[:500],
+            send_error_type=error_type,
+            **{
+                f"{stage}_attempt_finished_at": finished_at,
+                f"{stage}_submitted_at": "",
+                f"{stage}_verification_diagnostics": diagnostics,
+            },
+        )
+        if not persisted:
+            return self.finish_unknown(
+                context.group_name,
+                context.run_date,
+                context.claim_id,
+                stage,
+                f"人工锁状态无法持久化：{detail}",
+                diagnostics=diagnostics,
+            )
+        return {
+            "group_name": context.group_name,
+            "status": "held",
+            "error_type": error_type,
+            "detail": detail,
+        }
 
     def run(
         self,
@@ -125,13 +188,17 @@ class DeliveryStages:
             allow_sent=context.allow_sent,
         )
         if not claim_id:
-            if claim_reason == IMAGE_FALLBACK_NOT_SENDABLE:
+            if claim_reason in {IMAGE_FALLBACK_NOT_SENDABLE, IMAGE_PROVENANCE_MISSING}:
                 return StageResult.stop(
                     {
                         "group_name": context.group_name,
                         "status": "failed",
-                        "error_type": IMAGE_FALLBACK_NOT_SENDABLE,
-                        "detail": "Level 3/Pillow 诊断图不可发送",
+                        "error_type": claim_reason,
+                        "detail": (
+                            "图片来源元数据不完整，不可发送"
+                            if claim_reason == IMAGE_PROVENANCE_MISSING
+                            else "Level 3/Pillow 诊断图不可发送"
+                        ),
                     }
                 )
             if claim_reason == "result_unknown":
@@ -177,27 +244,37 @@ class DeliveryStages:
         context: DeliveryContext,
     ) -> StageResult[DeliveryContext]:
         if not image_delivery_eligible(context.run):
-            detail = "Level 3/Pillow 诊断图不可发送，已在发送前预检阶段拦截"
+            provenance_missing = not image_provenance_complete(context.run)
+            error_type = (
+                IMAGE_PROVENANCE_MISSING
+                if provenance_missing
+                else IMAGE_FALLBACK_NOT_SENDABLE
+            )
+            detail = (
+                "图片来源元数据不完整，已在发送前预检阶段拦截"
+                if provenance_missing
+                else "Level 3/Pillow 诊断图不可发送，已在发送前预检阶段拦截"
+            )
             self.store.finish_send_claim(
                 context.group_name,
                 context.run_date,
                 context.claim_id,
                 send_state="held",
                 send_hold=True,
-                send_hold_reason=IMAGE_FALLBACK_NOT_SENDABLE,
+                send_hold_reason=error_type,
                 needs_manual_send=False,
                 status=FAILED,
                 failed_stage="image",
                 error=detail,
-                error_type=IMAGE_FALLBACK_NOT_SENDABLE,
+                error_type=error_type,
                 send_error=detail,
-                send_error_type=IMAGE_FALLBACK_NOT_SENDABLE,
+                send_error_type=error_type,
             )
             return StageResult.stop(
                 {
                     "group_name": context.group_name,
                     "status": "failed",
-                    "error_type": IMAGE_FALLBACK_NOT_SENDABLE,
+                    "error_type": error_type,
                     "detail": detail,
                 }
             )
@@ -388,6 +465,18 @@ class DeliveryStages:
                         diagnostics=result.diagnostics,
                     )
                 )
+            manual_error = self._manual_pre_submit_error(result.detail, "text")
+            if manual_error:
+                return StageResult.stop(
+                    self._hold_manual_pre_submit_failure(
+                        context,
+                        stage="text",
+                        error_type=manual_error,
+                        detail=result.detail,
+                        finished_at=finished_at,
+                        diagnostics=result.diagnostics,
+                    )
+                )
             persisted, failed_run, final = self.store.finish_send_failure(
                 context.group_name,
                 context.run_date,
@@ -524,6 +613,18 @@ class DeliveryStages:
                         "image",
                         result.detail or "图片已提交，但发送结果未确认",
                         submitted_at=finished_at,
+                        diagnostics=result.diagnostics,
+                    )
+                )
+            manual_error = self._manual_pre_submit_error(result.detail, "image")
+            if manual_error:
+                return StageResult.stop(
+                    self._hold_manual_pre_submit_failure(
+                        context,
+                        stage="image",
+                        error_type=manual_error,
+                        detail=result.detail,
+                        finished_at=finished_at,
                         diagnostics=result.diagnostics,
                     )
                 )

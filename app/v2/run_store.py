@@ -27,7 +27,7 @@ from app.core.path_security import (
     validate_iso_date,
     validate_path_label,
 )
-from app.image.delivery_guard import image_delivery_eligible
+from app.image.delivery_guard import image_delivery_eligible, image_provenance_complete
 from app.services.handoff_service import safe_dir_name
 from app.v2.constants import (
     CORRUPT,
@@ -41,6 +41,7 @@ from app.v2.constants import (
     FILE_RANKING_TXT,
     FILE_RUN,
     IMAGE_FALLBACK_NOT_SENDABLE,
+    IMAGE_PROVENANCE_MISSING,
     IMAGE_READY,
     PENDING,
     PROMPT_READY,
@@ -654,7 +655,11 @@ class RunStore:
             if data.get("send_hold") and not allow_hold:
                 return None, data, "send_hold"
             if not image_delivery_eligible(data):
-                return None, data, IMAGE_FALLBACK_NOT_SENDABLE
+                return None, data, (
+                    IMAGE_FALLBACK_NOT_SENDABLE
+                    if image_provenance_complete(data)
+                    else IMAGE_PROVENANCE_MISSING
+                )
             prompt_meta = (
                 data.get("prompt_meta")
                 if isinstance(data.get("prompt_meta"), dict)

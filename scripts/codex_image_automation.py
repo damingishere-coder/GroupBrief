@@ -334,51 +334,19 @@ def _sha256(path: Path) -> str:
 
 
 def _sync_scheduler_result(store: RunStore, group_name: str, run_date: str) -> None:
-    """同步人工认领结果，不触碰已经完成的邮件批次或微信发送字段。"""
-    scheduler_path = store.root / ".scheduler" / f"{run_date}.json"
-    if not scheduler_path.is_file():
-        return
+    """从全部权威 run.json 重算批次状态，不增添幽灵群或覆盖发送字段。"""
+    del group_name
+    from app.scheduler.daily_v2_job import reconcile_daily_schedule_from_runs
+
+    from app.config.settings import Settings
+    from app.scheduler.daily_v2_job import ScheduleStateCorruptionError
+
+    settings = Settings(_env_file=None, output_root_override=str(store.root))
     try:
-        state = json.loads(scheduler_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        reconcile_daily_schedule_from_runs(settings, run_date)
+    except ScheduleStateCorruptionError:
+        # 工件认领已经成功；损坏 scheduler 保持原样并继续在接口中显式暴露。
         return
-    if not isinstance(state, dict):
-        return
-    raw_results = state.get("generation_results")
-    results = list(raw_results) if isinstance(raw_results, list) else []
-    replacement = {
-        "group_name": group_name,
-        "status": "ready_to_send",
-        "detail": "图片已安全恢复，可以按原计划发送",
-    }
-    matched = False
-    for index, item in enumerate(results):
-        if isinstance(item, dict) and str(item.get("group_name") or "") == group_name:
-            results[index] = replacement
-            matched = True
-            break
-    if not matched:
-        results.append(replacement)
-    statuses = {str(item.get("status") or "") for item in results if isinstance(item, dict)}
-    if statuses and statuses <= {"ready_to_send", "skipped", "no_groups"}:
-        generation_status = "success"
-    elif statuses == {"failed"}:
-        generation_status = "failed"
-    else:
-        generation_status = "partial"
-    state.update(
-        generation_results=results,
-        generation_status=generation_status,
-        generation_recovered_at=datetime.now().astimezone().isoformat(),
-        updated_at=datetime.now().astimezone().isoformat(),
-    )
-    scheduler_path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = scheduler_path.with_suffix(f".json.{os.getpid()}.{uuid.uuid4().hex}.tmp")
-    try:
-        temp_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
-        os.replace(temp_path, scheduler_path)
-    finally:
-        temp_path.unlink(missing_ok=True)
 
 
 def _new_images(marker: dict[str, Any]) -> list[Path]:

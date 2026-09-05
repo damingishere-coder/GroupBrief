@@ -17,6 +17,7 @@ from app.config.settings import Settings, get_settings
 from app.db import repository as repo
 from app.db.models import Group
 from app.image.fallback import _fit_lines, _load_font
+from app.image.image_task import verify_image
 from app.providers.ai.base import ExternalCallResultUnknownError
 from app.providers.ai.codex import build_summary_provider
 from app.sender.base import WechatSender
@@ -26,6 +27,7 @@ from app.services.group_name_sync import effective_send_target
 from app.services.group_provider_config import resolve_group_ai_settings
 from app.v2.run_store import RunStore
 from app.weekly.store import WeeklyStore
+from app.repair.store import RepairIncidentStore
 
 
 def previous_natural_week(reference: date) -> tuple[date, date]:
@@ -44,6 +46,29 @@ def _safe_json(path: Path) -> dict:
 
 def _sha256_bytes(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
+
+
+def _nonnegative_int(value: object, field: str) -> int:
+    try:
+        parsed = int(value or 0)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field} 不是合法整数") from exc
+    if parsed < 0:
+        raise ValueError(f"{field} 不能为负数")
+    return parsed
+
+
+def _failure_fields(error_type: str, stage: str, detail: str) -> dict:
+    summary = str(detail)[:300]
+    return {
+        "error_type": error_type,
+        "stage": stage,
+        "error_summary": summary,
+        "failure_fingerprint": hashlib.sha256(
+            f"weekly|{error_type}|{stage}|{summary}".encode("utf-8")
+        ).hexdigest(),
+        "retryable": False,
+    }
 
 
 class WeeklyInsightsService:
@@ -82,7 +107,53 @@ class WeeklyInsightsService:
                 )
         start, end = previous_natural_week(now.date())
         groups = self._groups(group_ids)
-        results = [self._generate_group(group, start, end, now) for group in groups]
+        results: list[dict] = []
+        for group in groups:
+            try:
+                results.append(self._generate_group(group, start, end, now))
+            except Exception as exc:
+                assert group.id is not None
+                error_type = (
+                    "WEEKLY_DATA_INVALID"
+                    if isinstance(exc, (TypeError, ValueError))
+                    else "WEEKLY_ARTIFACT_WRITE_FAILED"
+                )
+                detail = str(exc)[:300]
+                fingerprint = hashlib.sha256(
+                    f"weekly|{error_type}|{detail}".encode("utf-8")
+                ).hexdigest()
+                self.store.save(
+                    start.isoformat(),
+                    end.isoformat(),
+                    group.id,
+                    {
+                        "status": "needs_attention",
+                        "group_name": group.display_name,
+                        "error_type": error_type,
+                        "stage": "aggregate" if error_type == "WEEKLY_DATA_INVALID" else "artifact",
+                        "error_summary": detail,
+                        "failure_fingerprint": fingerprint,
+                        "retryable": False,
+                        "generated_at": now.isoformat(),
+                    },
+                )
+                RepairIncidentStore(self.settings).record(
+                    scope="weekly",
+                    error_type=error_type,
+                    stage="aggregate" if error_type == "WEEKLY_DATA_INVALID" else "artifact",
+                    source_path=f".weekly/{start.isoformat()}_{end.isoformat()}/group-{group.id}/weekly.json",
+                    error_summary=detail,
+                    now=now,
+                )
+                results.append(
+                    {
+                        "group_id": group.id,
+                        "group_name": group.display_name,
+                        "status": "held",
+                        "error_type": error_type,
+                        "detail": detail,
+                    }
+                )
         return {
             "status": "complete" if all(item["status"] in {"ready_to_send", "skipped"} for item in results) else "partial",
             "week_start": start.isoformat(),
@@ -128,7 +199,7 @@ class WeeklyInsightsService:
                 end_text,
                 group.id,
                 status="needs_attention",
-                error_type=error_type,
+                **_failure_fields(error_type, "external_call", "上次周报外部操作中断"),
             )
             return {
                 "group_id": group.id,
@@ -212,12 +283,20 @@ class WeeklyInsightsService:
         self._render_card(group, aggregate, start_text, end_text, card_path)
         text_bytes = narrative.encode("utf-8")
         card_bytes = card_path.read_bytes()
+        result_unknown = ai_status == "result_unknown"
+        error_type = (
+            "WEEKLY_AI_RESULT_UNKNOWN"
+            if result_unknown
+            else "WEEKLY_AI_FAILED_FALLBACK"
+            if ai_status == "failed"
+            else ""
+        )
         payload = self.store.save(
             start_text,
             end_text,
             group.id,
             {
-                "status": "ready_to_send",
+                "status": "needs_attention" if result_unknown else "ready_to_send",
                 "group_name": group.display_name,
                 "wechat_group_id": group.wechat_group_id,
                 "send_target_snapshot": effective_send_target(group),
@@ -227,6 +306,13 @@ class WeeklyInsightsService:
                 "ai_status": ai_status,
                 "ai_error": ai_error,
                 "ai_call_count": ai_call_count,
+                "error_type": error_type,
+                "stage": "ai" if error_type else "complete",
+                "retryable": False,
+                "failure_fingerprint": (
+                    hashlib.sha256(f"weekly|{error_type}|{ai_error}".encode("utf-8")).hexdigest()
+                    if error_type else ""
+                ),
                 "requested_provider": requested_provider,
                 "requested_model": requested_model,
                 "actual_provider": actual_provider,
@@ -256,8 +342,14 @@ class WeeklyInsightsService:
             ranking = _safe_json(self.daily_store.ranking_json_path(group.display_name, run_date))
             if not ranking:
                 missing_days.append(run_date)
-            message_count = int(ranking.get("message_count") or run.get("message_count") or 0)
-            speaker_count = int(ranking.get("speaker_count") or run.get("speaker_count") or 0)
+            message_count = _nonnegative_int(
+                ranking.get("message_count") or run.get("message_count") or 0,
+                f"{run_date}.message_count",
+            )
+            speaker_count = _nonnegative_int(
+                ranking.get("speaker_count") or run.get("speaker_count") or 0,
+                f"{run_date}.speaker_count",
+            )
             daily.append(
                 {
                     "date": run_date,
@@ -274,7 +366,10 @@ class WeeklyInsightsService:
                 identity = str(row.get("identity_key") or f"name:{name.casefold()}")
                 item = contributors.setdefault(identity, {"identity_key": identity, "name": name, "count": 0})
                 item["name"] = name
-                item["count"] += int(row.get("count") or 0)
+                item["count"] += _nonnegative_int(
+                    row.get("count") or 0,
+                    f"{run_date}.top_speakers.count",
+                )
             prompt_meta = run.get("prompt_meta") if isinstance(run.get("prompt_meta"), dict) else {}
             selection = prompt_meta.get("topic_selection") if isinstance(prompt_meta.get("topic_selection"), dict) else {}
             candidates = selection.get("candidates") if isinstance(selection.get("candidates"), list) else []
@@ -393,9 +488,13 @@ class WeeklyInsightsService:
                     week_end.isoformat(),
                     group_id,
                     status="needs_attention",
-                    error_type="WEEKLY_SEND_RESULT_UNKNOWN",
                     send_claim_id="",
                     send_claim_expires_at="",
+                    **_failure_fields(
+                        "WEEKLY_SEND_RESULT_UNKNOWN",
+                        "send_claim",
+                        "发送租约过期，提交结果未知",
+                    ),
                 )
                 results.append(
                     {
@@ -415,9 +514,48 @@ class WeeklyInsightsService:
             if target != str(state.get("send_target_snapshot") or ""):
                 self.store.update(
                     week_start.isoformat(), week_end.isoformat(), group_id,
-                    status="needs_attention", error_type="WEEKLY_SEND_TARGET_CHANGED",
+                    status="needs_attention",
+                    **_failure_fields(
+                        "WEEKLY_SEND_TARGET_CHANGED",
+                        "send_preflight",
+                        "发送目标与生成时快照不一致",
+                    ),
                 )
                 results.append({"group_name": group.display_name, "status": "held", "error_type": "WEEKLY_SEND_TARGET_CHANGED"})
+                continue
+            text_path = self.store.text_path(week_start.isoformat(), week_end.isoformat(), group_id)
+            card_path = self.store.card_path(week_start.isoformat(), week_end.isoformat(), group_id)
+            try:
+                text_bytes = text_path.read_bytes()
+                card_bytes = card_path.read_bytes()
+            except OSError as exc:
+                error_type = "WEEKLY_ARTIFACT_MISSING"
+                self.store.update(
+                    week_start.isoformat(), week_end.isoformat(), group_id,
+                    status="needs_attention",
+                    send_error=str(exc)[:300],
+                    **_failure_fields(error_type, "send_preflight", str(exc)),
+                )
+                results.append({"group_name": group.display_name, "status": "held", "error_type": error_type})
+                continue
+            image_ok, image_detail = verify_image(card_path)
+            hashes_match = (
+                _sha256_bytes(text_bytes) == str(state.get("text_sha256") or "")
+                and _sha256_bytes(card_bytes) == str(state.get("card_sha256") or "")
+            )
+            if not image_ok or not text_bytes.strip() or not hashes_match:
+                error_type = "WEEKLY_ARTIFACT_HASH_MISMATCH"
+                self.store.update(
+                    week_start.isoformat(), week_end.isoformat(), group_id,
+                    status="needs_attention",
+                    send_error=(image_detail if not image_ok else "周报文字或卡片哈希不一致"),
+                    **_failure_fields(
+                        error_type,
+                        "send_preflight",
+                        image_detail if not image_ok else "周报文字或卡片哈希不一致",
+                    ),
+                )
+                results.append({"group_name": group.display_name, "status": "held", "error_type": error_type})
                 continue
             claim_id, state = self.store.claim_send(
                 week_start.isoformat(),
@@ -427,24 +565,35 @@ class WeeklyInsightsService:
             )
             if not claim_id:
                 continue
-            text_path = self.store.text_path(week_start.isoformat(), week_end.isoformat(), group_id)
-            card_path = self.store.card_path(week_start.isoformat(), week_end.isoformat(), group_id)
             try:
                 text_result, image_result = self.sender.send_bundle(
                     target,
-                    text_path.read_text(encoding="utf-8"),
+                    text_bytes.decode("utf-8"),
                     card_path,
                 )
             except Exception as exc:
                 self.store.update(
                     week_start.isoformat(), week_end.isoformat(), group_id,
-                    status="needs_attention", error_type="WEEKLY_SEND_RESULT_UNKNOWN",
+                    status="needs_attention",
                     send_error=str(exc)[:300], send_claim_id="", send_claim_expires_at="",
+                    **_failure_fields("WEEKLY_SEND_RESULT_UNKNOWN", "send", str(exc)),
                 )
                 results.append({"group_name": group.display_name, "status": "held", "error_type": "WEEKLY_SEND_RESULT_UNKNOWN"})
                 break
-            image_ok = image_result is not None and image_result.success
-            if text_result.success and image_ok:
+            text_ok = bool(
+                text_result.success
+                and text_result.submitted
+                and not text_result.outcome_unknown
+                and text_result.verification_level == "ui_observed"
+            )
+            image_ok = bool(
+                image_result is not None
+                and image_result.success
+                and image_result.submitted
+                and not image_result.outcome_unknown
+                and image_result.verification_level == "ui_observed"
+            )
+            if text_ok and image_ok:
                 self.store.update(
                     week_start.isoformat(), week_end.isoformat(), group_id,
                     status="sent", sent_at=now.isoformat(), send_target=target,
@@ -459,15 +608,21 @@ class WeeklyInsightsService:
                 continue
             unknown = bool(
                 text_result.outcome_unknown
-                or text_result.submitted
-                or (image_result and (image_result.outcome_unknown or image_result.submitted))
+                or (image_result and image_result.outcome_unknown)
+                or (text_result.submitted and not text_ok)
+                or (image_result and image_result.submitted and not image_ok)
             )
             error_type = "WEEKLY_SEND_RESULT_UNKNOWN" if unknown else "WEEKLY_SEND_FAILED"
             self.store.update(
                 week_start.isoformat(), week_end.isoformat(), group_id,
-                status="needs_attention", error_type=error_type,
+                status="needs_attention",
                 send_claim_id="", send_claim_expires_at="",
                 send_error=f"text={text_result.detail}; image={getattr(image_result, 'detail', '')}"[:300],
+                **_failure_fields(
+                    error_type,
+                    "send",
+                    f"text={text_result.detail}; image={getattr(image_result, 'detail', '')}",
+                ),
             )
             results.append({"group_name": group.display_name, "status": "held", "error_type": error_type})
             if unknown:

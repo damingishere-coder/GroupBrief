@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "summary": {"type": "string"},
+    "root_cause": {"type": "string"},
+    "regression_test_added": {"type": "boolean"},
+    "regression_test_reproduced": {"type": "boolean"},
+    "changed_files": {"type": "array", "items": {"type": "string"}},
+    "tests_run": {"type": "array", "items": {"type": "string"}},
+    "tests_passed": {"type": "boolean"},
+    "safe_to_propose_pr": {"type": "boolean"}
+  },
+  "required": ["summary", "root_cause", "regression_test_added", "regression_test_reproduced", "changed_files", "tests_run", "tests_passed", "safe_to_propose_pr"],
+  "additionalProperties": false
+}

@@ -15,10 +15,14 @@ import {
   V2Run,
   V2RunDetail,
   WeeklyInsight,
+  WeeklyFeatureStatus,
+  RepairIncident,
+  RepairSummary,
   getArchiveGroups,
   getRunDetail,
   getWeeklyInsight,
   listWeeklyInsights,
+  listRepairIncidents,
   getV2File,
   readV2TextFile,
   restoreGroup,
@@ -166,6 +170,17 @@ function preferredGroup(groups: ArchiveGroup[]): ArchiveGroup | undefined {
   })[0];
 }
 
+function repairStatusLabel(item: RepairIncident): string {
+  if (item.pr_url || item.status === "pr_created") return "修复 PR 待确认";
+  if (item.status === "queued") return "等待 Codex 诊断";
+  if (item.status === "running") return "Codex 正在维修";
+  if (item.status === "environment") return "运行环境问题";
+  if (item.status === "diagnostic_only") return item.scope === "send" || item.scope === "wechat" ? "发送人工复核" : "仅诊断，等待人工复核";
+  if (item.status === "failed") return "自动维修失败";
+  if (item.status === "corrupt") return "维修状态损坏";
+  return item.status || "未知状态";
+}
+
 export default function Archive() {
   const { msg, toast } = useToast();
   const [groups, setGroups] = useState<ArchiveGroup[]>([]);
@@ -186,6 +201,9 @@ export default function Archive() {
   const [weeklyItems, setWeeklyItems] = useState<WeeklyInsight[]>([]);
   const [selectedWeekly, setSelectedWeekly] = useState<WeeklyInsight | null>(null);
   const [weeklyLoading, setWeeklyLoading] = useState(true);
+  const [weeklyFeature, setWeeklyFeature] = useState<WeeklyFeatureStatus | null>(null);
+  const [repairItems, setRepairItems] = useState<RepairIncident[]>([]);
+  const [repairSummary, setRepairSummary] = useState<RepairSummary | null>(null);
 
   const loadArchive = async (): Promise<ArchiveGroup[]> => {
     setLoading(true);
@@ -212,6 +230,7 @@ export default function Archive() {
     void loadArchive();
     listWeeklyInsights()
       .then((response) => {
+        setWeeklyFeature(response.feature);
         const items = Array.isArray(response.items) ? response.items : [];
         setWeeklyItems(items);
         if (items[0]) return getWeeklyInsight(items[0].week_start, items[0].group_id);
@@ -220,6 +239,12 @@ export default function Archive() {
       .then((detail) => detail && setSelectedWeekly(detail))
       .catch((error) => toast(`周报归档读取失败：${safeError(error, "请稍后重试")}`))
       .finally(() => setWeeklyLoading(false));
+    listRepairIncidents()
+      .then((response) => {
+        setRepairItems(response.items || []);
+        setRepairSummary(response.summary);
+      })
+      .catch((error) => toast(`自动维修状态读取失败：${safeError(error, "请稍后重试")}`));
   }, []);
 
   const selectWeeklyInsight = (item: WeeklyInsight) => {
@@ -402,7 +427,13 @@ export default function Archive() {
 
       <section className="weekly-archive card" aria-label="每周洞察归档">
         <div className="archive-catalog-head"><div><h2>每周洞察</h2><p>只读展示上一自然周的已保存日报聚合；不会重新上传整周聊天。</p></div><StatusBadge tone="info">独立周报</StatusBadge></div>
-        {weeklyLoading && weeklyItems.length === 0 ? <LoadingState label="正在读取周报归档…" /> : weeklyItems.length === 0 ? <EmptyState title="暂无每周洞察" description="14 天可靠性验收完成并开启周报生成后，归档会显示在这里。" /> : (
+        {weeklyFeature && <div className="weekly-archive-meta">
+          <span>生成 {weeklyFeature.generation_enabled ? "已开启" : "未开启"} / 任务 {weeklyFeature.generation_job_registered ? "已注册" : "未注册"}</span>
+          <span>发送 {weeklyFeature.send_enabled ? "已开启" : "未开启"} / 任务 {weeklyFeature.send_job_registered ? "已注册" : "未注册"}</span>
+          <span>下次生成 {weeklyFeature.next_generate_at || "配置异常"}</span>
+          <span>下次发送 {weeklyFeature.next_send_at || "配置异常"}</span>
+        </div>}
+        {weeklyLoading && weeklyItems.length === 0 ? <LoadingState label="正在读取周报归档…" /> : weeklyItems.length === 0 ? <EmptyState title="暂无每周洞察" description={weeklyFeature?.generation_enabled ? "尚未生成周报；请核对任务注册状态和最近一次错误。" : "周报生成开关尚未开启，合并部署后需先备份配置再启用。"} /> : (
           <div className="weekly-archive-layout">
             <div className="weekly-archive-list">{weeklyItems.map((item) => (
               <button type="button" key={`${item.week_start}:${item.group_id}`} className={selectedWeekly?.week_start === item.week_start && selectedWeekly?.group_id === item.group_id ? "is-selected" : ""} onClick={() => selectWeeklyInsight(item)}>
@@ -416,6 +447,22 @@ export default function Archive() {
               <div className="weekly-archive-meta"><span>缺失日报 {selectedWeekly.aggregation?.missing_days?.length || 0} 天</span><span>AI 状态 {selectedWeekly.ai_status}</span><span>状态 {selectedWeekly.status}</span></div>
             </article>}
           </div>
+        )}
+      </section>
+
+      <section className="weekly-archive card" aria-label="自动维修状态">
+        <div className="archive-catalog-head"><div><h2>自动维修</h2><p>只处理脱敏故障事件；代码修复只会创建待确认 PR，不会自动合并、部署或补发。</p></div><StatusBadge tone={repairSummary?.circuit_open ? "danger" : "info"}>{repairSummary?.circuit_open ? "已熔断" : repairSummary?.enabled ? "运行中" : "未开启"}</StatusBadge></div>
+        <div className="weekly-archive-meta">
+          <span>等待处理 {repairSummary?.queued ?? 0}</span>
+          <span>活跃指纹 {repairSummary?.active_fingerprint || "无"}</span>
+          {repairSummary?.circuit_open && <span>熔断至 {repairSummary.circuit_until}</span>}
+        </div>
+        {repairItems.length === 0 ? <EmptyState title="暂无维修事件" description="发生可识别故障后，这里会显示诊断、PR 待确认、运行环境问题或人工复核状态。" /> : (
+          <div className="weekly-archive-list">{repairItems.slice(0, 10).map((item) => (
+            <button type="button" key={item.incident_id} disabled>
+              <strong>{item.error_type}</strong><span>{item.scope} · {repairStatusLabel(item)}</span><small>{item.status === "diagnostic_only" ? "不会自动重试外部操作" : `尝试 ${item.attempt_count} 次`}</small>
+            </button>
+          ))}</div>
         )}
       </section>
 

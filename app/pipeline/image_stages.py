@@ -7,7 +7,7 @@ import hashlib
 from typing import Callable
 import uuid
 
-from app.image.delivery_guard import image_delivery_eligible
+from app.image.delivery_guard import image_delivery_eligible, image_provenance_complete
 from app.image.image_task import ImageJob, SerialImageQueue
 from app.image.regeneration import normalize_candidate_diagnostics
 from app.core.logging import get_logger
@@ -15,6 +15,7 @@ from app.core.observability import log_event
 from app.v2.constants import (
     FAILED,
     IMAGE_FALLBACK_NOT_SENDABLE,
+    IMAGE_PROVENANCE_MISSING,
     IMAGE_GENERATION_FAILED,
     IMAGE_READY,
     READY_TO_SEND,
@@ -133,8 +134,12 @@ class ImageStages:
         image_metadata = {
             "image_fallback_level": generator_detail.get("fallback_level"),
             "image_variant": generator_detail.get("image_variant"),
+            "image_status": result.get("status"),
         }
-        diagnostic_fallback = not image_delivery_eligible(image_metadata)
+        diagnostic_fallback = bool(
+            int(generator_detail.get("fallback_level") or 0) >= 3
+            or str(generator_detail.get("image_variant") or "").lower() == "pillow"
+        )
         image_size_bytes = (
             job.output_path.stat().st_size
             if (result["success"] or diagnostic_fallback) and job.output_path.is_file()
@@ -183,7 +188,7 @@ class ImageStages:
             failed_stage="image" if not result["success"] else None,
             error=error_detail,
             image_error=error_detail,
-            image_status=result["status"],
+            image_status="success" if result["success"] else result["status"],
             error_type=error_type if not result["success"] else None,
             stage_timings=stage_timings,
             imagegen_ms=imagegen_ms,
@@ -263,14 +268,25 @@ class ImageStages:
         run = self.store.load_run(job.group_name, run_date)
         if run.get("status") == IMAGE_READY:
             if not image_delivery_eligible(run):
+                provenance_missing = not image_provenance_complete(run)
+                error_type = (
+                    IMAGE_PROVENANCE_MISSING
+                    if provenance_missing
+                    else IMAGE_FALLBACK_NOT_SENDABLE
+                )
+                detail = (
+                    "图片来源元数据不完整，不可进入发送流程"
+                    if provenance_missing
+                    else "Level 3/Pillow 诊断图不可进入发送流程"
+                )
                 self.store.update(
                     job.group_name,
                     run_date,
                     status=FAILED,
                     failed_stage="image",
-                    error="Level 3/Pillow 诊断图不可进入发送流程",
-                    image_error="Level 3/Pillow 诊断图不可进入发送流程",
-                    error_type=IMAGE_FALLBACK_NOT_SENDABLE,
+                    error=detail,
+                    image_error=detail,
+                    error_type=error_type,
                 )
                 return
             self.store.update(job.group_name, run_date, status=READY_TO_SEND)

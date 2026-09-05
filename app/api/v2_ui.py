@@ -42,6 +42,7 @@ from app.api.v2_ui_read import (
 from app.config.settings import Settings, get_settings
 from app.v2.constants import RUN_STATE_CORRUPT
 from app.api.v2_recovery import router as recovery_router
+from app.api.v2_repair import router as repair_router
 from app.api.v2_weekly import router as weekly_router
 
 
@@ -49,12 +50,54 @@ router = APIRouter(prefix="/api/v2", tags=["v2-ui"])
 router.include_router(read_router)
 router.include_router(image_router)
 router.include_router(recovery_router)
+router.include_router(repair_router)
 router.include_router(weekly_router)
 
 
 @router.get("/system/health")
 def system_health(settings: Settings = Depends(get_settings)):
     checks: dict[str, dict] = {}
+
+    from app.repair.store import RepairIncidentStore
+
+    repair = RepairIncidentStore(settings).summary()
+    checks["auto_repair"] = {
+        "ok": True,
+        "status": (
+            "CIRCUIT_OPEN" if repair["circuit_open"] else "ENABLED"
+            if repair["enabled"] else "DISABLED"
+        ),
+        "detail": (
+            f"queue={repair['queued']} active={repair['active_fingerprint'][:12] or 'none'}"
+        ),
+        **repair,
+    }
+
+    try:
+        from app.scheduler.manager import get_scheduler
+
+        scheduler = get_scheduler()
+        job_ids = {job.id for job in scheduler.get_jobs()} if scheduler else set()
+    except Exception:
+        job_ids = set()
+    weekly_generate_registered = "weekly_insights_generate" in job_ids
+    weekly_send_registered = (
+        "daily_wechat_send_batch" in job_ids
+        if settings.weekly_monday_replacement_enabled
+        else "weekly_insights_send" in job_ids
+    )
+    checks["weekly_insights"] = {
+        "ok": not settings.weekly_insights_enabled or weekly_generate_registered,
+        "status": "ENABLED" if settings.weekly_insights_enabled else "DISABLED",
+        "detail": (
+            f"generate_job={weekly_generate_registered} send_job={weekly_send_registered} "
+            f"generate_at={settings.weekly_generate_time} send_at={settings.weekly_send_time}"
+        ),
+        "generation_enabled": settings.weekly_insights_enabled,
+        "send_enabled": settings.weekly_send_enabled,
+        "generation_job_registered": weekly_generate_registered,
+        "send_job_registered": weekly_send_registered,
+    }
 
     from app.data_sources.wechat_data_analysis import WeChatDataAnalysisSource
 

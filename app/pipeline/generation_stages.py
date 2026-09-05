@@ -364,6 +364,7 @@ class GenerationStages:
                 status=FAILED,
                 failed_stage="data",
                 error="群未绑定微信群 ID",
+                error_type=WECHAT_DATA_UNAVAILABLE,
             )
             return StageResult.stop(
                 {
@@ -542,6 +543,17 @@ class GenerationStages:
                 ranking,
                 template_name=context.group.ranking_template,
             )
+            attribution = build_attribution_contract(messages)
+            snapshot_path = self.store.messages_path(context.group_name, context.run_date)
+            self._save_json(snapshot_path, [message.to_dict() for message in messages])
+            self._save_json(
+                self.store.ranking_json_path(context.group_name, context.run_date),
+                ranking.to_dict(),
+            )
+            self.store.ranking_txt_path(context.group_name, context.run_date).write_text(
+                ranking_txt,
+                encoding="utf-8",
+            )
         except Exception as exc:
             context.timings["ranking_ms"] = round((perf_counter() - started_at) * 1000)
             self.store.update(
@@ -552,6 +564,7 @@ class GenerationStages:
                 error=context.run.get("error"),
                 message_refresh_status="failed",
                 message_refresh_error=str(exc)[:300],
+                message_refresh_error_type=RANKING_FAILED,
             )
             return StageResult.stop(
                 {
@@ -563,17 +576,6 @@ class GenerationStages:
             )
 
         context.timings["ranking_ms"] = round((perf_counter() - started_at) * 1000)
-        attribution = build_attribution_contract(messages)
-        snapshot_path = self.store.messages_path(context.group_name, context.run_date)
-        self._save_json(snapshot_path, [message.to_dict() for message in messages])
-        self._save_json(
-            self.store.ranking_json_path(context.group_name, context.run_date),
-            ranking.to_dict(),
-        )
-        self.store.ranking_txt_path(context.group_name, context.run_date).write_text(
-            ranking_txt,
-            encoding="utf-8",
-        )
         next_status = SENT if context.run.get("status") == SENT else RANKING_READY
         prior_hold_reason = str(context.run.get("send_hold_reason") or "")
         hold_reason = (
@@ -637,6 +639,18 @@ class GenerationStages:
                 ),
                 name_source=getattr(context.group, "sender_name_policy", "resolved"),
             )
+            self._save_json(
+                self.store.ranking_json_path(context.group_name, context.run_date),
+                ranking.to_dict(),
+            )
+            ranking_txt = self.renderer.render(
+                ranking,
+                template_name=context.group.ranking_template,
+            )
+            self.store.ranking_txt_path(context.group_name, context.run_date).write_text(
+                ranking_txt,
+                encoding="utf-8",
+            )
         except Exception as exc:
             self.store.update(
                 context.group_name,
@@ -644,6 +658,7 @@ class GenerationStages:
                 status=FAILED,
                 failed_stage="ranking",
                 error=str(exc)[:300],
+                error_type=RANKING_FAILED,
             )
             context.timings["ranking_ms"] = round((perf_counter() - started_at) * 1000)
             return StageResult.stop(
@@ -655,18 +670,6 @@ class GenerationStages:
             )
 
         context.timings["ranking_ms"] = round((perf_counter() - started_at) * 1000)
-        self._save_json(
-            self.store.ranking_json_path(context.group_name, context.run_date),
-            ranking.to_dict(),
-        )
-        ranking_txt = self.renderer.render(
-            ranking,
-            template_name=context.group.ranking_template,
-        )
-        self.store.ranking_txt_path(context.group_name, context.run_date).write_text(
-            ranking_txt,
-            encoding="utf-8",
-        )
         self.store.update(
             context.group_name,
             context.run_date,

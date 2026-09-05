@@ -283,6 +283,16 @@ def _promote_image(
         image_sha256=_sha256(target),
         **success_fields,
     )
+    from app.scheduler.daily_v2_job import (
+        ScheduleStateCorruptionError,
+        reconcile_daily_schedule_from_runs,
+    )
+
+    settings = Settings(_env_file=None, output_root_override=str(store.root))
+    try:
+        reconcile_daily_schedule_from_runs(settings, run_date)
+    except ScheduleStateCorruptionError:
+        logger.warning("图片已恢复，但调度状态损坏，保留人工复核：run_date=%s", run_date)
     return store.load_run(group_name, run_date)
 
 

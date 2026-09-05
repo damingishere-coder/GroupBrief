@@ -56,6 +56,51 @@ def test_scheduler_jobs_configured():
     assert get_scheduler() is None
 
 
+def test_reconcile_generation_summary_uses_all_authoritative_runs(tmp_path):
+    from app.config.settings import Settings
+    from app.scheduler.daily_v2_job import (
+        DailyScheduleState,
+        reconcile_daily_schedule_from_runs,
+    )
+    from app.v2.constants import READY_TO_SEND
+    from app.v2.run_store import RunStore
+
+    settings = Settings(_env_file=None, output_root_override=str(tmp_path / "output"))
+    schedule = DailyScheduleState(settings.output_dir)
+    schedule.update(
+        "2026-09-05",
+        manifest_version=1,
+        manifest_created_at="2026-09-05T00:15:00+08:00",
+        expected_groups=[
+            {"group_id": 1, "group_name": "群一"},
+            {"group_id": 2, "group_name": "群二"},
+        ],
+        generation_started_at="2026-09-05T00:15:00+08:00",
+        generation_completed_at="2026-09-05T00:20:00+08:00",
+        generation_status="partial",
+        generation_results=[{"group_name": "群一", "status": "failed"}],
+        email_recovery_required=False,
+    )
+    runs = RunStore(settings.output_dir)
+    for group_id, group_name in ((1, "群一"), (2, "群二")):
+        runs.save_run(
+            group_name,
+            "2026-09-05",
+            {
+                "group_id": str(group_id),
+                "status": READY_TO_SEND,
+                "image_recovered_at": "2026-09-05T09:00:00+08:00",
+            },
+        )
+
+    state = reconcile_daily_schedule_from_runs(settings, "2026-09-05")
+
+    assert state["generation_status"] == "success"
+    assert [item["group_name"] for item in state["generation_results"]] == ["群一", "群二"]
+    assert all(item["status"] == "ready_to_send" for item in state["generation_results"])
+    assert state["email_recovery_required"] is False
+
+
 def test_scheduler_uses_daily_batch_as_the_only_monday_send_entry():
     from app.config.settings import Settings
 
@@ -74,6 +119,26 @@ def test_scheduler_uses_daily_batch_as_the_only_monday_send_entry():
         assert "daily_wechat_send_batch" in ids
         assert "weekly_insights_generate" in ids
         assert "weekly_insights_send" not in ids
+    finally:
+        stop_scheduler()
+
+
+def test_scheduler_registers_independent_repair_controller_only_when_enabled():
+    from app.config.settings import Settings
+
+    settings = Settings(
+        _env_file=None,
+        reliability_watchdog_enabled=False,
+        repair_enabled=True,
+        repair_poll_interval_minutes=7,
+    )
+    try:
+        start_scheduler(settings)
+        scheduler = get_scheduler()
+        job = scheduler.get_job("repair_controller")
+        assert job is not None
+        assert job.name == "RepairController"
+        assert int(job.trigger.interval.total_seconds()) == 7 * 60
     finally:
         stop_scheduler()
 
