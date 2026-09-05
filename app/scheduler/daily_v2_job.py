@@ -326,6 +326,9 @@ def ensure_daily_manifest(
         parsed,
         timezone=settings.app_timezone,
         schedule_send_time=settings.schedule_send_time,
+        weekly_replaces_monday_daily_send=(
+            settings.weekly_monday_replacement_enabled
+        ),
         resolver=resolver,
     )
     manifest = manifest_fields(expected)

@@ -605,6 +605,15 @@ class DailyPipeline:
         """
         now = now or datetime.now(ZoneInfo(self.settings.app_timezone))
         normalized_dates = sorted({validate_run_date(value) for value in run_dates})
+        if (
+            not recovery
+            and self.settings.weekly_monday_replacement_enabled
+            and now.weekday() == 0
+        ):
+            # 防御性门禁：即使绕过 APScheduler 直接调用 send-due，
+            # 本周一日报也只留档，不进入微信自动发送。
+            current_date = now.date().isoformat()
+            normalized_dates = [value for value in normalized_dates if value != current_date]
         results: list[dict] = []
         groups = self._load_groups()
         due_group_ids: list[int] = []

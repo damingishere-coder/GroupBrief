@@ -1138,6 +1138,29 @@ def test_send_due_sends_text_then_image(tmp_path):
     assert len(sender.image_calls) == 1
 
 
+def test_monday_weekly_replacement_blocks_direct_daily_send_due(tmp_path):
+    pipeline = _ready_to_send(tmp_path)
+    pipeline.settings = pipeline.settings.model_copy(
+        update={
+            "weekly_insights_enabled": True,
+            "weekly_send_enabled": True,
+            "weekly_replaces_monday_daily_send": True,
+        }
+    )
+    monday = "2026-08-31"
+    original = pipeline.store.load_run("测试群", "2026-08-18")
+    pipeline.store.save_run("测试群", monday, original)
+
+    results = pipeline.send_due(
+        now=datetime(2026, 8, 31, 8, 30, tzinfo=ZoneInfo("Asia/Shanghai"))
+    )
+
+    assert results == []
+    assert pipeline.sender.text_calls == []
+    assert pipeline.sender.image_calls == []
+    assert pipeline.store.load_run("测试群", monday)["status"] == READY_TO_SEND
+
+
 @pytest.mark.parametrize(
     ("fallback_level", "image_variant"),
     [(3, "normal"), (0, "pillow")],

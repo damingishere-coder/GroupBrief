@@ -9,6 +9,7 @@ import pytest
 from app.scheduler.manager import (
     _parse_generate_time,
     _schedule_startup_recovery,
+    _schedule_weekly_replacement_jobs,
     get_scheduler,
     start_scheduler,
     stop_scheduler,
@@ -53,6 +54,57 @@ def test_scheduler_jobs_configured():
     assert start_scheduler(settings) is scheduler
     stop_scheduler()
     assert get_scheduler() is None
+
+
+def test_scheduler_uses_daily_batch_as_the_only_monday_send_entry():
+    from app.config.settings import Settings
+
+    settings = Settings(
+        _env_file=None,
+        reliability_watchdog_enabled=False,
+        weekly_insights_enabled=True,
+        weekly_send_enabled=True,
+        weekly_replaces_monday_daily_send=True,
+    )
+    try:
+        start_scheduler(settings)
+        scheduler = get_scheduler()
+        assert scheduler is not None
+        ids = {job.id for job in scheduler.get_jobs()}
+        assert "daily_wechat_send_batch" in ids
+        assert "weekly_insights_generate" in ids
+        assert "weekly_insights_send" not in ids
+    finally:
+        stop_scheduler()
+
+
+def test_monday_daily_manifest_finishes_at_ready_when_weekly_replaces_send():
+    from app.db.models import Group
+    from app.scheduler.task_manifest import build_expected_groups
+
+    group = Group(
+        id=7,
+        display_name="测试群",
+        wechat_group_id="test@chatroom",
+        wechat_send_enabled=True,
+    )
+    monday = build_expected_groups(
+        [group],
+        datetime(2026, 8, 31).date(),
+        timezone="Asia/Shanghai",
+        weekly_replaces_monday_daily_send=True,
+    )[0]
+    tuesday = build_expected_groups(
+        [group],
+        datetime(2026, 9, 1).date(),
+        timezone="Asia/Shanghai",
+        weekly_replaces_monday_daily_send=True,
+    )[0]
+
+    assert monday["expected_terminal"] == "READY_TO_SEND"
+    assert monday["wechat_send_replaced_by_weekly"] is True
+    assert tuesday["expected_terminal"] == "SENT"
+    assert tuesday["wechat_send_replaced_by_weekly"] is False
 
 
 def test_scheduler_registers_only_one_startup_recovery_job():
@@ -867,6 +919,125 @@ def test_on_demand_ready_send_is_deduplicated_and_unknown_is_not_rescheduled(tmp
         run_dates=[run_date],
     ) == []
     assert held_scheduler.jobs == {}
+
+
+def test_monday_replacement_never_reschedules_daily_wechat_send(tmp_path):
+    from app.config.settings import Settings
+    from app.scheduler.manager import _schedule_on_demand_jobs
+    from app.v2.constants import READY_TO_SEND
+    from app.v2.run_store import RunStore
+
+    settings = Settings(
+        _env_file=None,
+        output_root_override=str(tmp_path / "output"),
+        weekly_insights_enabled=True,
+        weekly_send_enabled=True,
+        weekly_replaces_monday_daily_send=True,
+    )
+    store = RunStore(settings.output_dir)
+    run_date = "2026-08-31"
+    store.save_run(
+        "周一日报群",
+        run_date,
+        {
+            "group_id": "1",
+            "status": READY_TO_SEND,
+            "wechat_send_enabled": True,
+            "send_hold": False,
+        },
+    )
+
+    class FakeScheduler:
+        def __init__(self):
+            self.jobs = {}
+
+        def add_job(self, func, **kwargs):
+            self.jobs[kwargs["id"]] = (func, kwargs)
+
+    scheduler = FakeScheduler()
+    scheduled = _schedule_on_demand_jobs(
+        scheduler,
+        settings,
+        now=datetime(2026, 8, 31, 8, 40, tzinfo=ZoneInfo("Asia/Shanghai")),
+        run_dates=[run_date],
+    )
+
+    assert scheduled == []
+    assert scheduler.jobs == {}
+
+
+def test_send_batch_routes_monday_to_weekly_and_other_days_to_daily(monkeypatch):
+    from app.config.settings import Settings
+    from app.scheduler import manager
+
+    settings = Settings(
+        _env_file=None,
+        weekly_insights_enabled=True,
+        weekly_send_enabled=True,
+        weekly_replaces_monday_daily_send=True,
+    )
+    calls = []
+    monday = datetime(2026, 8, 31, 8, 30, tzinfo=ZoneInfo("Asia/Shanghai"))
+    monkeypatch.setattr(manager, "get_settings", lambda: settings)
+    monkeypatch.setattr(manager, "_normalize_now", lambda _settings, now=None: now or monday)
+    monkeypatch.setattr(
+        manager,
+        "run_scheduled_weekly_send",
+        lambda **kwargs: calls.append(("weekly", kwargs["now"])) or {"status": "success"},
+    )
+    monkeypatch.setattr(
+        manager,
+        "run_send_due_job",
+        lambda **kwargs: calls.append(("daily", kwargs["run_date"])) or {"status": "success"},
+    )
+
+    manager.run_scheduled_send_batch("2026-08-31")
+    assert calls == [("weekly", monday)]
+
+    tuesday = datetime(2026, 9, 1, 8, 30, tzinfo=ZoneInfo("Asia/Shanghai"))
+    monkeypatch.setattr(manager, "_normalize_now", lambda _settings, now=None: now or tuesday)
+    manager.run_scheduled_send_batch("2026-09-01")
+    assert calls[-1] == ("daily", "2026-09-01")
+
+
+def test_monday_restart_rebuilds_weekly_generation_and_send(monkeypatch):
+    from app.config.settings import Settings
+    from app.scheduler import manager
+
+    settings = Settings(
+        _env_file=None,
+        weekly_insights_enabled=True,
+        weekly_send_enabled=True,
+        weekly_replaces_monday_daily_send=True,
+    )
+
+    class FakeStore:
+        def list_states(self):
+            return [
+                {
+                    "week_start": "2026-08-24",
+                    "week_end": "2026-08-30",
+                    "status": "ready_to_send",
+                }
+            ]
+
+    class FakeScheduler:
+        def __init__(self):
+            self.jobs = {}
+
+        def add_job(self, func, **kwargs):
+            self.jobs[kwargs["id"]] = (func, kwargs)
+
+    monkeypatch.setattr(manager, "WeeklyStore", lambda _output_dir: FakeStore())
+    scheduler = FakeScheduler()
+    scheduled = _schedule_weekly_replacement_jobs(
+        scheduler,
+        settings,
+        now=datetime(2026, 8, 31, 8, 40, tzinfo=ZoneInfo("Asia/Shanghai")),
+    )
+
+    assert scheduled == ["weekly_generate_once_20260831", "weekly_send_once_20260831"]
+    assert set(scheduler.jobs) == set(scheduled)
 
 
 def test_on_demand_rebuilds_only_persisted_generation_and_send_retries(tmp_path):

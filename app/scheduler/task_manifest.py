@@ -21,10 +21,12 @@ def build_expected_groups(
     *,
     timezone: str,
     schedule_send_time: str = "08:30",
+    weekly_replaces_monday_daily_send: bool = False,
     resolver: PeriodResolver | None = None,
 ) -> list[dict]:
     resolver = resolver or PeriodResolver()
     expected: list[dict] = []
+    monday_replaced = bool(weekly_replaces_monday_daily_send and run_date.weekday() == 0)
     for group in groups:
         if group.id is None:
             continue
@@ -65,8 +67,13 @@ def build_expected_groups(
                 "image_prompt_override": str(group.image_prompt_override or ""),
                 "send_target": str(group.send_target or ""),
                 "wechat_send_enabled": bool(group.wechat_send_enabled),
+                "wechat_send_replaced_by_weekly": bool(
+                    monday_replaced and group.wechat_send_enabled
+                ),
                 "expected_terminal": (
-                    "SENT" if group.wechat_send_enabled else "READY_TO_SEND"
+                    "SENT"
+                    if group.wechat_send_enabled and not monday_replaced
+                    else "READY_TO_SEND"
                 ),
                 "period_start": window.period_start.isoformat(),
                 "period_end": window.period_end.isoformat(),

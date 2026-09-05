@@ -30,6 +30,7 @@ _ENVIRONMENT_ONLY_FIELDS = frozenset(
         "scheduler_heartbeat_stale_seconds",
         "weekly_insights_enabled",
         "weekly_send_enabled",
+        "weekly_replaces_monday_daily_send",
         "weekly_generate_time",
         "weekly_send_time",
         "output_root_override",
@@ -180,6 +181,8 @@ class Settings(BaseSettings):
     # 周报能力先部署、后灰度：14 天可靠性验收完成前保持关闭。
     weekly_insights_enabled: bool = False
     weekly_send_enabled: bool = False
+    # 三个开关同时开启时，周一微信只发送上一自然周周报；日报仍生成留档。
+    weekly_replaces_monday_daily_send: bool = False
     weekly_generate_time: str = "07:45"
     weekly_send_time: str = "08:30"
     scheduler_heartbeat_stale_seconds: int = 300
@@ -198,6 +201,15 @@ class Settings(BaseSettings):
         if self.output_root_override:
             return Path(self.output_root_override).expanduser().resolve()
         return PROJECT_ROOT / "output"
+
+    @property
+    def weekly_monday_replacement_enabled(self) -> bool:
+        """周一周报替代日报发送的有效开关，避免半配置时漏发日报。"""
+        return bool(
+            self.weekly_insights_enabled
+            and self.weekly_send_enabled
+            and self.weekly_replaces_monday_daily_send
+        )
 
     @property
     def logs_dir(self) -> Path:
