@@ -40,5 +40,5 @@ class PromptOutput:
     success: bool
     prompt: str = ""
     error: str = ""
-    model: str = "gpt-5.6-sol"
+    model: str = "gpt-6-astra"
     meta: dict[str, Any] | None = None  # 模型调用结构化元数据（不含 API Key）

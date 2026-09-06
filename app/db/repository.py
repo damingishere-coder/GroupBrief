@@ -179,8 +179,8 @@ _V2_GROUP_COLUMNS: dict[str, str] = {
     "send_time": "VARCHAR(8) NOT NULL DEFAULT '08:30'",
     "summary_provider": "VARCHAR(32) NOT NULL DEFAULT ''",
     "prompt_provider": "VARCHAR(32) NOT NULL DEFAULT ''",
-    "summary_model": "VARCHAR(64) NOT NULL DEFAULT 'gpt-5.6-sol'",
-    "prompt_model": "VARCHAR(64) NOT NULL DEFAULT 'gpt-5.6-sol'",
+    "summary_model": "VARCHAR(64) NOT NULL DEFAULT 'gpt-6-astra'",
+    "prompt_model": "VARCHAR(64) NOT NULL DEFAULT 'gpt-6-astra'",
     "image_enabled": "BOOLEAN NOT NULL DEFAULT 1",
     "send_target": "VARCHAR(256) NOT NULL DEFAULT ''",
     "ranking_template": "VARCHAR(64) NOT NULL DEFAULT 'default'",
@@ -317,12 +317,12 @@ def _migrate_codex_summary_defaults() -> None:
         session.exec(
             Group.__table__.update()
             .where(Group.summary_model.in_(legacy_models))
-            .values(summary_model="gpt-5.6-sol")
+            .values(summary_model="gpt-6-astra")
         )
         session.exec(
             Group.__table__.update()
             .where(Group.prompt_model.in_(legacy_models))
-            .values(prompt_model="gpt-5.6-sol")
+            .values(prompt_model="gpt-6-astra")
         )
         session.add(Setting(key=marker, value="done"))
         session.commit()

@@ -5,7 +5,7 @@
 
 策略：
 - 复用 V1/V2 共用的 Codex GPT / DeepSeek 主备调用（重试/超时）；
-- 主模型固定使用 settings.codex_summary_model（默认 gpt-5.6-sol）；
+- 主模型固定使用 settings.codex_summary_model（默认 gpt-6-astra）；
 - 模板（templates/image_prompt/）控制最终 Prompt 的输出结构，可编辑；
 - 超长聊天采用「分块 → 逐块提取事件(JSON) → 合并去重 → 按模板生成」，
   避免简单暴力截断丢失重要内容；

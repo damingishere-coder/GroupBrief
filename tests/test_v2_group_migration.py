@@ -112,7 +112,7 @@ def test_codex_summary_defaults_migrate_once_and_keep_fallback_model(tmp_path, m
 
     with Session(engine) as session:
         groups = list(session.exec(select(Group).order_by(Group.id)).all())
-        assert (groups[0].summary_model, groups[0].prompt_model) == ("gpt-5.6-sol", "gpt-5.6-sol")
+        assert (groups[0].summary_model, groups[0].prompt_model) == ("gpt-6-astra", "gpt-6-astra")
         assert (groups[1].summary_model, groups[1].prompt_model) == ("custom-model", "custom-model")
         assert session.get(Setting, "ai_model").value == "deepseek-v4-flash"
         assert session.get(Setting, "migration_codex_summary_primary_v1").value == "done"

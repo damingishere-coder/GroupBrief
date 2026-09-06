@@ -21,13 +21,13 @@ def test_group_ai_config_inherits_global_and_rejects_unknown_model():
     settings = Settings(
         _env_file=None,
         summary_provider_primary="codex",
-        codex_summary_model="gpt-5.6-sol",
+        codex_summary_model="gpt-6-astra",
     )
     group = Group(display_name="群", prompt_provider="", prompt_model="")
     resolved, meta = resolve_group_ai_settings(settings, group, capability="prompt")
     assert meta == {
         "provider": "codex",
-        "model": "gpt-5.6-sol",
+        "model": "gpt-6-astra",
         "inherited": True,
         "capability": "prompt",
     }
