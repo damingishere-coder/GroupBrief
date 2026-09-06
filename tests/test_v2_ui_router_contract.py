@@ -2,6 +2,8 @@ from pathlib import Path
 import json
 from types import SimpleNamespace
 
+import pytest
+
 from fastapi import FastAPI
 
 from app.api import v2_ui, v2_ui_read
@@ -233,11 +235,17 @@ def test_dashboard_preserves_sent_truth_and_exposes_diagnostic_image_failure(
     assert runtime_group["send"]["status"] == "success"
 
 
+@pytest.mark.parametrize("current_policy, saved_policy, expected_policy", [
+    ("all_messages", "text_primary_with_interactions", "text_primary_with_interactions"),
+    ("text_primary_with_interactions", "all_messages", "all_messages"),
+    ("text_primary_with_interactions", None, "all_messages"),
+])
 def test_dashboard_accepts_run_date_and_returns_top_five_ranking_preview(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, current_policy, saved_policy, expected_policy
 ) -> None:
     group = SimpleNamespace(
         id=8,
+        ranking_count_policy=current_policy,
         display_name="排行测试群",
         wechat_group_name="排行测试群",
         send_time="08:30",
@@ -254,7 +262,8 @@ def test_dashboard_accepts_run_date_and_returns_top_five_ranking_preview(
                 "top_speakers": [
                     {"rank": index, "name": f"成员{index}", "count": 20 - index}
                     for index in range(1, 8)
-                ]
+                ],
+                **({"count_policy": saved_policy} if saved_policy else {}),
             },
             ensure_ascii=False,
         ),
@@ -299,6 +308,7 @@ def test_dashboard_accepts_run_date_and_returns_top_five_ranking_preview(
     ]
     assert result["runtime"]["groups"][0]["current_node"] == "prompt"
     assert result["daily_status"]["overall_status"] == result["runtime"]["overall_status"]
+    assert result["cards"][0]["ranking_count_policy"] == expected_policy
     assert len(result["cards"][0]["ranking_preview"]) == 5
     assert result["cards"][0]["ranking_preview"][0] == {
         "rank": 1,

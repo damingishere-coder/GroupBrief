@@ -47,6 +47,7 @@ def build_expected_groups(
                 "prompt_provider": str(getattr(group, "prompt_provider", "") or ""),
                 "prompt_model": str(group.prompt_model or ""),
                 "send_time": str(schedule_send_time or "08:30"),
+                "strict_image_fact_check": bool(getattr(group, "strict_image_fact_check", False)),
                 "image_enabled": bool(group.image_enabled),
                 "ranking_template": str(group.ranking_template or "default"),
                 "ranking_count_policy": str(

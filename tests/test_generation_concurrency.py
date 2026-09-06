@@ -256,7 +256,10 @@ def test_prompt_ready_group_starts_image_before_other_prompts_finish(tmp_path, m
     assert all(item["status"] == "ready_to_send" for item in results)
 
 
-def test_group_overrides_rebuild_loaded_group_with_live_sqlalchemy_state(tmp_path, monkeypatch):
+@pytest.mark.parametrize("saved_fact_check", [None, True, False])
+def test_group_overrides_rebuild_loaded_group_with_live_sqlalchemy_state(
+    tmp_path, monkeypatch, saved_fact_check,
+):
     engine = create_engine(
         f"sqlite:///{tmp_path / 'group-overrides.db'}",
         connect_args={"check_same_thread": False},
@@ -289,12 +292,17 @@ def test_group_overrides_rebuild_loaded_group_with_live_sqlalchemy_state(tmp_pat
         dry_run=True,
     )
 
+    if saved_fact_check is not None:
+        pipeline.store.update(
+            "覆盖配置群", "2026-08-21", strict_image_fact_check=saved_fact_check,
+        )
     results = pipeline.generate_all(
         run_date="2026-08-21",
         group_overrides={
             group_id: {
                 "image_enabled": False,
                 "image_theme": "ai_free",
+                "strict_image_fact_check": True,
             }
         },
     )
@@ -309,6 +317,9 @@ def test_group_overrides_rebuild_loaded_group_with_live_sqlalchemy_state(tmp_pat
     run = pipeline.store.load_run("覆盖配置群", "2026-08-21")
     assert run["image_enabled"] is False
     assert run["image_theme"] == "ai_free"
+    expected_fact_check = True if saved_fact_check is None else saved_fact_check
+    assert run["strict_image_fact_check"] is expected_fact_check
+    assert (run.get("image_fact_contract") == "strict_evidence_v1") is expected_fact_check
 
 
 def test_unexpected_worker_and_image_errors_are_isolated(tmp_path, monkeypatch):

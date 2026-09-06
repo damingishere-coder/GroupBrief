@@ -73,12 +73,15 @@ def dashboard(
         image_url = ""
         if image_path.exists() and Path(image_path).stat().st_size > 0:
             image_url = f"/api/v2/files/{quote(name)}/{selected_run_date}/{FILE_IMAGE}"
+        ranking_count_policy = "all_messages"
         ranking_preview: list[dict[str, object]] = []
         ranking_error = ""
         ranking_path = store.ranking_json_path(name, selected_run_date)
         if ranking_path.exists() and ranking_path.stat().st_size > 0:
             try:
                 ranking = json.loads(ranking_path.read_text(encoding="utf-8"))
+                if isinstance(ranking, dict) and ranking.get("count_policy") == "text_primary_with_interactions":
+                    ranking_count_policy = "text_primary_with_interactions"
                 speakers = ranking.get("top_speakers", []) if isinstance(ranking, dict) else []
                 if not isinstance(speakers, list):
                     raise ValueError("top_speakers 不是数组")
@@ -114,9 +117,7 @@ def dashboard(
                     getattr(group, "wechat_send_enabled", False)
                 ),
                 "ranking_template": group.ranking_template,
-                "ranking_count_policy": getattr(
-                    group, "ranking_count_policy", "all_messages"
-                ),
+                "ranking_count_policy": ranking_count_policy,
                 "image_prompt_template": group.image_prompt_template,
                 "status": status,
                 "period_start": run.get("period_start", ""),

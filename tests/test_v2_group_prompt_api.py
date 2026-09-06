@@ -108,3 +108,24 @@ def test_named_theme_preview_only_replaces_canonical_theme_section():
         assert "不透明水粉社论" in resolved["prompt"]
         assert "张三说今天完成 3 项工作。" in resolved["prompt"]
         assert resolved["prompt"].count("【漫画分镜】") == 1
+
+
+def test_independent_fact_check_api_defaults_and_patch_preservation():
+    with client:
+        response = client.post("/api/groups", json={"display_name": "独立事实校验测试"})
+        assert response.status_code == 200
+        group_id = response.json()["id"]
+        try:
+            def current():
+                return next(g for g in client.get("/api/groups").json() if g["id"] == group_id)
+            assert current()["strict_image_fact_check"] is False
+            assert client.put(f"/api/groups/{group_id}", json={
+                "strict_image_fact_check": True, "ranking_count_policy": "all_messages",
+            }).status_code == 200
+            assert client.put(f"/api/groups/{group_id}", json={
+                "ranking_template": "default",
+            }).status_code == 200
+            assert current()["strict_image_fact_check"] is True
+            assert current()["ranking_count_policy"] == "all_messages"
+        finally:
+            client.delete(f"/api/groups/{group_id}")

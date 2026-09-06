@@ -154,7 +154,7 @@ class DailyPipeline:
                 "wechat_group_id", "wechat_group_name", "provider_preference",
                 "schedule_rule", "summary_provider", "summary_model",
                 "prompt_provider", "prompt_model", "image_enabled", "ranking_template",
-                "ranking_count_policy", "sender_name_policy",
+                "ranking_count_policy", "sender_name_policy", "strict_image_fact_check",
                 "image_prompt_template", "image_theme", "image_theme_custom",
                 "image_theme_remaining_runs",
                 "image_prompt_override", "send_target",

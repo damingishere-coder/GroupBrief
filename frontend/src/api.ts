@@ -75,6 +75,7 @@ export interface LatestReport {
 // ================= V2 =================
 
 export interface GroupV2 extends Group {
+  strict_image_fact_check?: boolean;
   schedule_rule: string;
   send_time: string;
   summary_provider: string;
@@ -97,6 +98,7 @@ export interface GroupV2 extends Group {
 }
 
 export interface GroupPayload {
+  strict_image_fact_check?: boolean;
   display_name: string;
   wechat_group_id: string;
   wechat_group_name?: string;

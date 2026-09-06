@@ -183,6 +183,7 @@ _V2_GROUP_COLUMNS: dict[str, str] = {
     "prompt_model": "VARCHAR(64) NOT NULL DEFAULT 'gpt-6-astra'",
     "image_enabled": "BOOLEAN NOT NULL DEFAULT 1",
     "send_target": "VARCHAR(256) NOT NULL DEFAULT ''",
+    "strict_image_fact_check": "BOOLEAN NOT NULL DEFAULT 0",
     "ranking_template": "VARCHAR(64) NOT NULL DEFAULT 'default'",
     "ranking_count_policy": "VARCHAR(64) NOT NULL DEFAULT 'all_messages'",
     "sender_name_policy": "VARCHAR(64) NOT NULL DEFAULT 'resolved'",
