@@ -49,6 +49,7 @@ class GroupCreate(BaseModel):
     prompt_provider: str = ""
     summary_model: str = ""
     prompt_model: str = ""
+    strict_image_fact_check: bool = False
     image_enabled: bool = True
     send_target: str = ""
     ranking_template: str = "default"
@@ -75,6 +76,7 @@ class GroupUpdate(BaseModel):
     prompt_provider: str | None = None
     summary_model: str | None = None
     prompt_model: str | None = None
+    strict_image_fact_check: bool | None = None
     image_enabled: bool | None = None
     send_target: str | None = None
     ranking_template: str | None = None
@@ -240,6 +242,7 @@ def list_groups(
             "prompt_provider": g.prompt_provider,
             "summary_model": g.summary_model,
             "prompt_model": g.prompt_model,
+            "strict_image_fact_check": g.strict_image_fact_check,
             "image_enabled": g.image_enabled,
             "send_target": g.send_target,
             "effective_send_target": effective_send_target(g),

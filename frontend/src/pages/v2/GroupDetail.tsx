@@ -61,6 +61,7 @@ const EMPTY_FORM: GroupPayload = {
   prompt_provider: "",
   summary_model: "",
   prompt_model: "",
+  strict_image_fact_check: false,
   image_enabled: true,
   send_target: "",
   ranking_template: "default",
@@ -91,6 +92,7 @@ function toForm(group: GroupV2): GroupPayload {
     prompt_provider: group.prompt_provider || "",
     summary_model: group.summary_model || "",
     prompt_model: group.prompt_model || "",
+    strict_image_fact_check: group.strict_image_fact_check ?? false,
     image_enabled: group.image_enabled,
     send_target: group.send_target || "",
     ranking_template: group.ranking_template || "default",
@@ -435,6 +437,10 @@ export default function GroupDetail({ groupId, invalidGroupId }: GroupDetailProp
           <label className="group-detail-switch" htmlFor="image-enabled">
             <input id="image-enabled" type="checkbox" checked={form.image_enabled} onChange={(event) => setField("image_enabled", event.target.checked)} />
             <span><strong>启用 AI 图片</strong><small>启用后会进入最多 2 路的受控生图阶段</small></span>
+          </label>
+          <label className="group-detail-switch" htmlFor="strict-image-fact-check">
+            <input id="strict-image-fact-check" type="checkbox" checked={Boolean(form.strict_image_fact_check) || form.ranking_count_policy === "text_primary_with_interactions"} disabled={form.ranking_count_policy === "text_primary_with_interactions"} onChange={(event) => setField("strict_image_fact_check", event.target.checked)} />
+            <span><strong>严格核对图片事实</strong><small>核对图片内容与聊天证据；旧文字排行始终启用</small></span>
           </label>
           <Field id="send-target" label="发送目标（可选人工覆盖）" error={errors.send_target}>
             <input id="send-target" value={form.send_target} onChange={(event) => setField("send_target", event.target.value)} placeholder="留空则自动跟随微信当前群名" />

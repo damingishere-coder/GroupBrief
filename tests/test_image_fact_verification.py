@@ -253,3 +253,18 @@ def test_strict_contract_removes_bmi_display_instructions():
     assert "话题延伸到身高和婚后发福" in strict_prompt
     assert "猜体重" in strict_prompt
     assert "我的" not in strict_prompt
+
+
+def test_independent_fact_check_survives_all_message_ranking(tmp_path):
+    import json
+    from app.image.fact_verification import strict_fact_verification_enabled
+
+    prompt = tmp_path / "prompt.txt"
+    (tmp_path / "run.json").write_text(json.dumps({
+        "ranking_count_policy": "all_messages", "strict_image_fact_check": True,
+    }), encoding="utf-8")
+    assert strict_fact_verification_enabled(prompt) is True
+    (tmp_path / "run.json").write_text(json.dumps({
+        "ranking_count_policy": "all_messages", "strict_image_fact_check": False,
+    }), encoding="utf-8")
+    assert strict_fact_verification_enabled(prompt) is False

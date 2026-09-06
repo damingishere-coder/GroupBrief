@@ -21,7 +21,7 @@ def test_group_prompt_and_wechat_columns_migrate_idempotently_with_safe_defaults
     with engine.connect() as connection:
         columns = [row[1] for row in connection.exec_driver_sql("PRAGMA table_info(groups)")]
         row = connection.exec_driver_sql(
-            "SELECT image_prompt_override, wechat_send_enabled, deleted_at FROM groups WHERE id = 1"
+            "SELECT image_prompt_override, wechat_send_enabled, deleted_at, strict_image_fact_check FROM groups WHERE id = 1"
         ).one()
     assert columns.count("image_prompt_override") == 1
     assert columns.count("wechat_send_enabled") == 1
@@ -29,6 +29,8 @@ def test_group_prompt_and_wechat_columns_migrate_idempotently_with_safe_defaults
     assert row[0] == ""
     assert bool(row[1]) is False
     assert row[2] is None
+    assert columns.count("strict_image_fact_check") == 1
+    assert bool(row[3]) is False
 
 
 def test_group_queries_hide_deleted_but_keep_history_lookup(tmp_path, monkeypatch):

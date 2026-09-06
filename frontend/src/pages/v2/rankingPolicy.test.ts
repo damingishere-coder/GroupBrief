@@ -21,7 +21,7 @@ describe("ranking policy display", () => {
 
   it("keeps legacy rankings compatible", () => {
     expect(isTextPrimaryRanking("all_messages")).toBe(false);
-    expect(formatRankingCount("all_messages", { count: 89 })).toBe("89 条");
+    expect(formatRankingCount("all_messages", { count: 89, text_count: 55, interaction_count: 34 })).toBe("89 条");
   });
 
   it("falls back safely when an early strict record lacks extended counts", () => {

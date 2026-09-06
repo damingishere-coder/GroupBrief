@@ -918,3 +918,15 @@ def test_on_demand_rebuilds_only_persisted_generation_and_send_retries(tmp_path)
     send_at = scheduler.jobs[scheduled[1]][1]["trigger"].run_date
     assert generation_at.isoformat() == "2026-08-29T08:45:00+08:00"
     assert send_at.isoformat() == "2026-08-29T08:46:00+08:00"
+
+
+def test_expected_groups_snapshot_keeps_independent_fact_check():
+    from datetime import date
+    from app.db.models import Group
+    from app.scheduler.task_manifest import build_expected_groups
+
+    group = Group(id=23, display_name="快照群", strict_image_fact_check=True)
+    snapshot = build_expected_groups([group], date(2026, 9, 7), timezone="Asia/Shanghai")[0]
+    group.strict_image_fact_check = False
+    assert snapshot["strict_image_fact_check"] is True
+    assert snapshot["ranking_count_policy"] == "all_messages"

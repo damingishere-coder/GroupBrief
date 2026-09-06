@@ -57,7 +57,8 @@ def strict_fact_verification_enabled(prompt_file: Path) -> bool:
     if not isinstance(run, dict):
         return False
     return bool(
-        run.get("image_fact_contract") == "strict_evidence_v1"
+        run.get("strict_image_fact_check") is True
+        or run.get("image_fact_contract") == "strict_evidence_v1"
         or run.get("ranking_count_policy") == RANKING_POLICY_TEXT_PRIMARY
     )
 

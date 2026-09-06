@@ -20,6 +20,8 @@ PERIOD_END = "2026-08-17 23:59:59"
 def test_strict_image_fact_contract_is_policy_driven_for_every_group():
     assert uses_strict_image_fact_contract("text_primary_with_interactions") is True
     assert uses_strict_image_fact_contract("all_messages") is False
+    assert uses_strict_image_fact_contract("all_messages", True) is True
+    assert uses_strict_image_fact_contract("text_primary_with_interactions", False) is True
 
 
 def _msg(
@@ -275,3 +277,27 @@ def test_ranking_json_structure():
     assert d["top_speakers"][0]["interaction_count"] == 0
     assert d["top_speakers"][0]["name_source"] == "resolved"
     assert len(d["top_speakers"][0]["identity_key"]) == 16
+
+
+def test_all_messages_ranks_media_only_members_and_renders_without_interactions():
+    from app.ranking.renderer import RankingRenderer
+
+    messages = [
+        _msg("文字群友", i=1), _msg("文字群友", i=2),
+        *[_msg("媒体群友", kind, i=index) for index, kind in enumerate(
+            ["image", "emoji", "voice", "video", "file", "link", "quote",
+             "red_packet", "transfer", "other"], start=3)],
+        _msg("系统", "system", "有人加入群聊", i=20),
+    ]
+    result = engine.compute(
+        messages, "测试群", PERIOD_START, PERIOD_END, top_limit=1,
+        count_policy="all_messages", name_source="wechat_data_analysis",
+    )
+    assert result.message_count == 12
+    assert result.speaker_count == 2
+    assert [(s.name, s.count) for s in result.top_speakers] == [("媒体群友", 10)]
+    assert result.top_speakers[0].text_count == 0
+    text = RankingRenderer().render(result, "default")
+    assert "媒体群友【10】" in text
+    assert "总消息：12" in text
+    assert "互动" not in text

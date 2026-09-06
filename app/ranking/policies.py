@@ -30,5 +30,9 @@ def normalize_sender_name_policy(value: object) -> str:
     return policy
 
 
-def uses_strict_image_fact_contract(ranking_policy: object) -> bool:
-    return normalize_ranking_policy(ranking_policy) == RANKING_POLICY_TEXT_PRIMARY
+def uses_strict_image_fact_contract(
+    ranking_policy: object, strict_image_fact_check: bool = False,
+) -> bool:
+    # 兼容旧文字排行，允许全消息排行独立启用校验。
+    policy = normalize_ranking_policy(ranking_policy)
+    return strict_image_fact_check or policy == RANKING_POLICY_TEXT_PRIMARY

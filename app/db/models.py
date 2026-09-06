@@ -36,6 +36,7 @@ class Group(SQLModel, table=True):
     prompt_provider: str = ""  # 日报 Prompt AI；空值继承全局
     summary_model: str = "gpt-6-astra"  # 总结主模型
     prompt_model: str = "gpt-6-astra"  # Prompt 主模型
+    strict_image_fact_check: bool = False  # 独立开启图片事实校验
     image_enabled: bool = True  # 是否生图
     send_target: str = ""  # 可选人工发送目标；为空时自动跟随 wechat_group_name
     ranking_template: str = "default"  # 排行榜模板名

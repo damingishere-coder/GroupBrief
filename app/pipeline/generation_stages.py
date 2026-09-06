@@ -324,6 +324,9 @@ class GenerationStages:
             "period_start": context.period_start,
             "period_end": context.period_end,
             "send_time": self.settings.schedule_send_time,
+            "strict_image_fact_check": bool(
+                run.get("strict_image_fact_check", group.strict_image_fact_check)
+            ),
             "image_enabled": bool(group.image_enabled),
             "ranking_template": group.ranking_template,
             "ranking_count_policy": getattr(
@@ -857,8 +860,12 @@ class GenerationStages:
             prompt_meta = committed.get("prompt_meta")
 
         self._record_prompt_timing(context, started_at)
+        run = self.store.load_run(context.group_name, context.run_date)
         if uses_strict_image_fact_contract(
-            getattr(context.group, "ranking_count_policy", "all_messages")
+            getattr(context.group, "ranking_count_policy", "all_messages"),
+            strict_image_fact_check=bool(
+                run.get("strict_image_fact_check", context.group.strict_image_fact_check)
+            ),
         ):
             prompt_path = self.store.prompt_path(context.group_name, context.run_date)
             strict_prompt = append_strict_image_fact_contract(
