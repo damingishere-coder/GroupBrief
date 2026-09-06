@@ -45,7 +45,7 @@ from app.pipeline.generation_stages import GenerationStages
 from app.pipeline.image_stages import ImageStages
 from app.ranking.engine import RankingEngine
 from app.ranking.renderer import RankingRenderer
-from app.scheduler.period import PeriodResolver, PeriodWindow
+from app.scheduler.period import PeriodResolver, PeriodWindow, restore_period, automatic_run_allowed
 from app.scheduler.runtime_status import write_daily_status
 from app.sender.base import WechatSender
 from app.sender.wechat_native import create_wechat_sender
@@ -123,6 +123,7 @@ class DailyPipeline:
         group_overrides: dict[int, dict] | None = None,
         *,
         acquire_lock: bool = True,
+        automatic_now: datetime | None = None,
     ) -> list[dict]:
         if acquire_lock:
             with generation_mutex():
@@ -133,6 +134,7 @@ class DailyPipeline:
                     refresh_messages=refresh_messages,
                     group_overrides=group_overrides,
                     acquire_lock=False,
+                    automatic_now=automatic_now,
                 )
         requested_date = parse_date(run_date)
         if run_date is not None and requested_date is None:
@@ -146,9 +148,26 @@ class DailyPipeline:
             timezone=self.settings.app_timezone,
             schedule_rule="daily_previous_day",
         )
+        automatic_now = automatic_now or getattr(self, "automatic_now", None)
         run_date_str = base_window.run_date.isoformat()
-        self._last_name_sync_report = self._sync_group_names_safe(group_ids)
         groups = self._load_groups(group_ids)
+        def scheduling_snapshot(group):
+            if self.store.run_path(self._group_name(group), run_date_str).exists():
+                return self.store.load_run(self._group_name(group), run_date_str)
+            return (group_overrides or {}).get(int(group.id or 0), {})
+        # 必须在群名 MCP 同步及历史配置覆盖之前使用当前规则拦截。
+        groups = [group for group in groups if (
+            self.period_resolver.resolve(base_window.run_date, self.settings.app_timezone, group.schedule_rule).should_run
+            and (automatic_now is None or automatic_run_allowed(
+                group.schedule_rule, base_window.run_date, automatic_now,
+                scheduling_snapshot(group),
+            ))
+        )]
+        if not groups:
+            return [{"status": "no_groups", "reason": "当日没有符合群级统计规则的任务"}]
+        active_ids = [int(group.id) for group in groups if group.id is not None]
+        self._last_name_sync_report = self._sync_group_names_safe(active_ids)
+        groups = self._load_groups(active_ids)
         if group_overrides:
             allowed_override_fields = {
                 "wechat_group_id", "wechat_group_name", "provider_preference",
@@ -183,6 +202,8 @@ class DailyPipeline:
                 timezone=self.settings.app_timezone,
                 schedule_rule=str(group.schedule_rule or "daily_previous_day"),
             )
+            snapshot = scheduling_snapshot(group)
+            window = restore_period(window, snapshot)
             if window.should_run:
                 scheduled.append((group, window))
         if not scheduled:
@@ -604,6 +625,8 @@ class DailyPipeline:
         仍必须通过现有 claim、未知结果锁、目标预检和图片预检。
         """
         now = now or datetime.now(ZoneInfo(self.settings.app_timezone))
+        if now.tzinfo is not None:
+            now = now.astimezone(ZoneInfo(self.settings.app_timezone))
         normalized_dates = sorted({validate_run_date(value) for value in run_dates})
         results: list[dict] = []
         groups = self._load_groups()
@@ -628,6 +651,8 @@ class DailyPipeline:
                     continue
                 group_name = group.display_name or group.wechat_group_name
                 run = self.store.load_run(group_name, run_date)
+                if not automatic_run_allowed(group.schedule_rule, report_date, now, run):
+                    continue
                 status = run.get("status")
                 if status not in (IMAGE_READY, READY_TO_SEND):
                     continue
@@ -1170,7 +1195,12 @@ class DailyPipeline:
         group = self._get_group(group_id)
         if not group:
             return {"status": "failed", "error": f"群不存在 {group_id}"}
-        window = self.period_resolver.resolve(run_date=parse_date(run_date), timezone=self.settings.app_timezone)
+        window = restore_period(self.period_resolver.resolve(
+            run_date=parse_date(run_date), timezone=self.settings.app_timezone,
+            schedule_rule=group.schedule_rule,
+        ), current)
+        if not window.should_run:
+            return {"status": "skipped", "detail": "该日期按群规则不生成"}
         result = self._generate_one(
             group,
             window,
@@ -1316,7 +1346,9 @@ class DailyPipeline:
         window = self.period_resolver.resolve(
             run_date=parsed_run_date,
             timezone=self.settings.app_timezone,
+            schedule_rule=group.schedule_rule,
         )
+        window = restore_period(window, current)
         result = self._generate_one(
             group,
             window,
@@ -1625,6 +1657,8 @@ class DailyPipeline:
                 continue
             group_name = group.display_name or group.wechat_group_name
             run = self.store.load_run(group_name, run_date)
+            if not automatic_run_allowed(group.schedule_rule, date.fromisoformat(run_date), now, run):
+                continue
             if run.get("status") not in (IMAGE_READY, READY_TO_SEND):
                 continue
             if run.get("sent_at") or run.get("send_hold"):

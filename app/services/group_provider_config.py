@@ -137,6 +137,7 @@ def validate_group_provider_values(
     if schedule_rule is not None and schedule_rule not in {
         "weekday_default",
         "daily_previous_day",
+        "workdays_daily_monday_weekly",
     }:
         raise ValueError(f"不支持的统计周期规则：{schedule_rule}")
     if "ranking_count_policy" in normalized:

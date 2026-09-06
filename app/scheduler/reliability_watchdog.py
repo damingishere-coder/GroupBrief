@@ -93,6 +93,7 @@ def run_reliability_watchdog(
                 run_date,
                 settings=settings,
                 skip_email=True,
+                now=now,
             )
         except Exception as exc:
             logger.exception("启动恢复生成补偿异常：run_date=%s", run_date)

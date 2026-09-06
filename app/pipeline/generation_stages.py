@@ -7,12 +7,14 @@ from datetime import datetime
 from pathlib import Path
 from time import perf_counter
 from typing import Any, Callable
+from zoneinfo import ZoneInfo
 
 from app.ai.concurrency import bounded_slot
 from app.ai.prompt_builder import GroupSummaryImagePromptBuilder
 from app.ai.prompt_builder_types import PromptInput
 from app.ai.speaker_attribution import build_attribution_contract
 from app.ai.strict_prompt_contract import append_strict_image_fact_contract
+from app.ai.weekly_champion import champion_seed, build_champion, decorate_weekly_ranking, weekly_image_contract
 from app.image.fact_verification import strip_unverified_prompt_numeric_units
 from app.config.settings import Settings
 from app.core.observability import log_event
@@ -25,7 +27,7 @@ from app.ranking.engine_types import RankingResult
 from app.ranking.renderer import RankingRenderer
 from app.ranking.policies import uses_strict_image_fact_contract
 from app.services.sender_name_policy import apply_sender_name_policy
-from app.scheduler.period import PeriodWindow
+from app.scheduler.period import PeriodWindow, restore_period
 from app.services.group_name_sync import effective_send_target, send_target_mode
 from app.v2.constants import (
     DATA_READY,
@@ -219,6 +221,7 @@ class GenerationStages:
         started_at = perf_counter()
         group_name = self._group_name(group)
         run = self.store.load_run(group_name, run_date)
+        window = restore_period(window, run)
         prompt_meta = run.get("prompt_meta")
         persisted_prompt_meta = prompt_meta if isinstance(prompt_meta, dict) else {}
         return GenerationContext(
@@ -323,6 +326,9 @@ class GenerationStages:
             **self._name_sync_audit(group),
             "period_start": context.period_start,
             "period_end": context.period_end,
+            "schedule_rule": context.window.rule,
+            "report_kind": context.window.report_kind,
+            "top_limit": context.window.top_limit,
             "send_time": self.settings.schedule_send_time,
             "strict_image_fact_check": bool(
                 run.get("strict_image_fact_check", group.strict_image_fact_check)
@@ -497,6 +503,21 @@ class GenerationStages:
             )
 
         messages = list(fetch.messages)
+        if context.window.report_kind == "weekly":
+            unique = {}
+            for index, message in enumerate(messages):
+                stamp = message.timestamp
+                if stamp.tzinfo is not None:
+                    stamp = stamp.astimezone(ZoneInfo(self.settings.app_timezone))
+                stamp = stamp.replace(tzinfo=None)
+                if not context.window.period_start.replace(tzinfo=None) <= stamp <= context.window.period_end.replace(tzinfo=None):
+                    continue
+                # 无消息 ID 时不能把同一秒的重复发言误判成同一条消息。
+                key = message.message_id or ("no-message-id", index)
+                unique.setdefault(key, message)
+            messages = list(unique.values())
+            if not messages:
+                raise ValueError("完整周统计范围内没有有效消息")
         apply_sender_name_policy(
             messages,
             getattr(context.group, "sender_name_policy", "resolved"),
@@ -535,7 +556,7 @@ class GenerationStages:
                 context.group_name,
                 context.period_start,
                 context.period_end,
-                top_limit=10,
+                top_limit=context.window.top_limit,
                 count_policy=getattr(
                     context.group, "ranking_count_policy", "all_messages"
                 ),
@@ -545,6 +566,8 @@ class GenerationStages:
                 ranking,
                 template_name=context.group.ranking_template,
             )
+            if context.window.report_kind == "weekly":
+                ranking_txt = decorate_weekly_ranking(ranking_txt, {})
         except Exception as exc:
             context.timings["ranking_ms"] = round((perf_counter() - started_at) * 1000)
             self.store.update(
@@ -567,11 +590,13 @@ class GenerationStages:
 
         context.timings["ranking_ms"] = round((perf_counter() - started_at) * 1000)
         attribution = build_attribution_contract(messages)
+        if context.window.report_kind == "weekly":
+            self.store.update(context.group_name, context.run_date, weekly_champion={})
         snapshot_path = self.store.messages_path(context.group_name, context.run_date)
         self._save_json(snapshot_path, [message.to_dict() for message in messages])
         self._save_json(
             self.store.ranking_json_path(context.group_name, context.run_date),
-            ranking.to_dict(),
+            {**ranking.to_dict(), "report_kind": context.window.report_kind},
         )
         self.store.ranking_txt_path(context.group_name, context.run_date).write_text(
             ranking_txt,
@@ -634,7 +659,7 @@ class GenerationStages:
                 context.group_name,
                 context.period_start,
                 context.period_end,
-                top_limit=10,
+                top_limit=context.window.top_limit,
                 count_policy=getattr(
                     context.group, "ranking_count_policy", "all_messages"
                 ),
@@ -658,14 +683,17 @@ class GenerationStages:
             )
 
         context.timings["ranking_ms"] = round((perf_counter() - started_at) * 1000)
+        champion = self._weekly_champion(context, ranking, messages)
         self._save_json(
             self.store.ranking_json_path(context.group_name, context.run_date),
-            ranking.to_dict(),
+            {**ranking.to_dict(), "report_kind": context.window.report_kind, "weekly_champion": champion},
         )
         ranking_txt = self.renderer.render(
             ranking,
             template_name=context.group.ranking_template,
         )
+        if context.window.report_kind == "weekly":
+            ranking_txt = decorate_weekly_ranking(ranking_txt, champion)
         self.store.ranking_txt_path(context.group_name, context.run_date).write_text(
             ranking_txt,
             encoding="utf-8",
@@ -681,6 +709,34 @@ class GenerationStages:
             text_speaker_count=ranking.text_speaker_count,
         )
         return StageResult.proceed(ranking)
+
+    def _weekly_champion(self, context, ranking, messages) -> dict:
+        if context.window.report_kind != "weekly":
+            return {}
+        attribution = build_attribution_contract(messages)
+        seed = champion_seed(ranking, messages, attribution.message_snapshot_sha256)
+        current = self.store.load_run(context.group_name, context.run_date)
+        saved = current.get("weekly_champion") or {}
+        if not seed:
+            self.store.update(context.group_name, context.run_date, weekly_champion={})
+            return {}
+        matches = (
+            saved.get("snapshot_sha256") == seed["snapshot_sha256"]
+            and saved.get("identity_key") == seed["identity_key"]
+            and saved.get("name") == seed["name"]
+        )
+        if matches and saved.get("status") == "completed":
+            return saved
+        if matches and saved.get("status") == "building":
+            result = {**seed, "status": "completed", "evidence": [], "error_type": "CHAMPION_RESULT_UNKNOWN"}
+        else:
+            self.store.update(
+                context.group_name, context.run_date,
+                weekly_champion={**seed, "status": "building", "evidence": []},
+            )
+            result = build_champion(seed, getattr(self.prompt_builder, "_analysis_chat", None))
+        self.store.update(context.group_name, context.run_date, weekly_champion=result)
+        return result
 
     def _build_prompt(
         self,
@@ -734,6 +790,8 @@ class GenerationStages:
                 context.run_date,
                 limit=3,
             ),
+            report_kind=context.window.report_kind,
+            weekly_champion=self.store.load_run(context.group_name, context.run_date).get("weekly_champion") or {},
         )
         return self._execute_prompt_operation(context, prompt_input)
 
@@ -849,8 +907,8 @@ class GenerationStages:
                 context.group_name,
                 context.run_date,
                 operation_id,
-                prompt=prompt_out.prompt,
-                meta=prompt_out.meta,
+                prompt=weekly_image_contract(prompt_out.prompt, prompt_input),
+                meta={**(prompt_out.meta or {}), "report_kind": prompt_input.report_kind, "weekly_champion": prompt_input.weekly_champion},
             )
             committed = self.store.commit_recorded_prompt(
                 context.group_name,
@@ -882,6 +940,14 @@ class GenerationStages:
                 image_fact_contract="strict_evidence_v1",
                 prompt_stripped_numeric_units=list(stripped_units),
             )
+        if prompt_input.report_kind == "weekly":
+            final_prompt = self.store.prompt_path(context.group_name, context.run_date).read_text(encoding="utf-8")
+            greeting = str((prompt_input.weekly_champion or {}).get("text") or "")
+            if greeting and greeting not in final_prompt:
+                raise ValueError("周报冠军祝贺词未完整保留在生图提示词，已停止生图")
+            if len(final_prompt) > self.settings.image_prompt_max_chars or len(final_prompt.encode("utf-8")) > self.settings.image_prompt_max_bytes:
+                raise ValueError("周报最终提示词超出长度预算，已停止生图")
+            prompt_meta = {**(prompt_meta or {}), "prompt_final_chars": len(final_prompt), "prompt_final_bytes": len(final_prompt.encode("utf-8"))}
         return StageResult.proceed(
             PromptStageOutput(
                 prompt_meta=prompt_meta if isinstance(prompt_meta, dict) else None

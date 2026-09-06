@@ -33,6 +33,8 @@ class PromptInput:
     persisted_theme_meta: dict[str, Any] | None = None
     persisted_topic_selection: dict[str, Any] | None = None
     recent_layout_history: tuple[dict[str, Any], ...] = ()
+    report_kind: str = "daily"
+    weekly_champion: dict[str, Any] | None = None
 
 
 @dataclass

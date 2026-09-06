@@ -39,8 +39,11 @@ class ImageStages:
         self.consume_image_theme = consume_image_theme
 
     def make_job(self, group_name: str, run_date: str, force: bool) -> ImageJob:
+        from app.ai.weekly_champion import validate_weekly_payload
         prompt_path = self.store.prompt_path(group_name, run_date)
         current = self.store.load_run(group_name, run_date)
+        if current.get("report_kind") == "weekly":
+            validate_weekly_payload(current, self.store.ranking_txt_path(group_name, run_date).read_text(encoding="utf-8"), prompt_path.read_text(encoding="utf-8"))
         prompt_meta = (
             current.get("prompt_meta")
             if isinstance(current.get("prompt_meta"), dict)

@@ -23,7 +23,7 @@ from app.pipeline.daily_pipeline import DailyPipeline, parse_date
 from app.services.generation_runtime import GenerationBusyError, generation_mutex
 from app.services.email_service import email_delivery_config_error
 from app.v2.constants import IMAGE_GENERATION_FAILED, SCHEDULER_STATE_CORRUPT
-from app.v2.run_store import _atomic_write_text, _run_mutex
+from app.v2.run_store import RunStore, _atomic_write_text, _run_mutex
 from app.scheduler.outcome import ProcessExitCode, attach_outcome, summarize_results
 from app.scheduler.task_manifest import (
     build_expected_groups,
@@ -221,10 +221,13 @@ def run_daily_v2_job(
     *,
     settings: Settings | None = None,
     skip_email: bool = False,
+    now: datetime | None = None,
 ) -> dict:
     settings = settings or get_settings()
     tz = ZoneInfo(settings.app_timezone)
-    run_date = run_date or datetime.now(tz).date().isoformat()
+    now = now or datetime.now(tz)
+    now = now.replace(tzinfo=tz) if now.tzinfo is None else now.astimezone(tz)
+    run_date = run_date or now.date().isoformat()
     parsed_date = parse_date(run_date)
     if parsed_date is None:
         return attach_outcome(
@@ -233,7 +236,7 @@ def run_daily_v2_job(
 
     try:
         with _daily_mutex():
-            result = _run_locked(settings, parsed_date, skip_email=skip_email)
+            result = _run_locked(settings, parsed_date, skip_email=skip_email, now=now)
     except GenerationBusyError as exc:
         logger.info("V2 每日任务未领取：%s", exc)
         result = {
@@ -335,7 +338,7 @@ def ensure_daily_manifest(
     return state_store.update(run_date, **manifest)
 
 
-def _run_locked(settings: Settings, run_date: date, *, skip_email: bool) -> dict:
+def _run_locked(settings: Settings, run_date: date, *, skip_email: bool, now: datetime | None = None) -> dict:
     run_date_text = run_date.isoformat()
     state_store = DailyScheduleState(settings.output_dir)
     state = state_store.load(run_date_text)
@@ -350,6 +353,25 @@ def _run_locked(settings: Settings, run_date: date, *, skip_email: bool) -> dict
     repo.init_db(settings)
     repo.apply_db_settings(settings)
     pipeline = DailyPipeline(settings=settings)
+    from app.scheduler.period import automatic_run_allowed
+    tz = ZoneInfo(settings.app_timezone)
+    now = now or datetime.now(tz)
+    now = now.replace(tzinfo=tz) if now.tzinfo is None else now.astimezone(tz)
+    pipeline.automatic_now = now
+    blocked_ids = set()
+    load_groups = getattr(pipeline, "_load_groups", None)
+    if callable(load_groups):
+        current_groups = load_groups()
+        for group in current_groups:
+            run_store = RunStore(settings.output_dir)
+            group_name = group.display_name or group.wechat_group_name
+            snapshot = run_store.load_run(group_name, run_date_text) if run_store.run_path(group_name, run_date_text).exists() else {}
+            if not snapshot:
+                snapshot = next((row for row in state.get("expected_groups", []) if isinstance(row, dict) and row.get("group_id") == group.id), {})
+            if not automatic_run_allowed(getattr(group, "schedule_rule", "daily_previous_day"), run_date, now, snapshot):
+                blocked_ids.add(group.id)
+        if current_groups and all(group.id in blocked_ids for group in current_groups):
+            return {"status": "not_run", "run_date": run_date_text, "detail": "当前群规则禁止此时自动执行该日期", "email_status": "skipped_schedule"}
     state = ensure_daily_manifest(
         settings,
         run_date_text,
@@ -362,6 +384,10 @@ def _run_locked(settings: Settings, run_date: date, *, skip_email: bool) -> dict
         if isinstance(state.get("expected_groups"), list)
         else None
     )
+    if blocked_ids:
+        skip_email = True  # 邮件脚本扫描整批，不能夹带本次被禁止的群。
+        if manifest_ids is not None:
+            manifest_ids = [value for value in manifest_ids if value not in blocked_ids]
 
     generation_results = state.get("generation_results") or []
     if not state.get("generation_completed_at"):
@@ -428,6 +454,8 @@ def _run_locked(settings: Settings, run_date: date, *, skip_email: bool) -> dict
             if callable(writer):
                 writer([run_date_text])
             raise
+        if blocked_ids:
+            generation_results += [{"status": "held", "group_id": value, "error_type": "SCHEDULE_POLICY_DEFERRED"} for value in sorted(blocked_ids)]
         generation_status = _generation_status(generation_results)
         completion_fields = {
             "generation_invocation_completed_at": _now_iso(),
@@ -436,7 +464,7 @@ def _run_locked(settings: Settings, run_date: date, *, skip_email: bool) -> dict
             "generation_hold": generation_status in {"blocked", "failed", "partial"},
             "generation_error": "",
         }
-        if _generation_results_terminal(generation_results):
+        if not blocked_ids and _generation_results_terminal(generation_results):
             completion_fields["generation_completed_at"] = _now_iso()
         state = state_store.update(run_date_text, **completion_fields)
         writer = getattr(pipeline, "_write_runtime_status_safe", None)
@@ -450,6 +478,7 @@ def _run_locked(settings: Settings, run_date: date, *, skip_email: bool) -> dict
                 run_date_text,
                 state_store,
                 state,
+                now=now,
             )
         except Exception:
             logger.exception(
@@ -706,6 +735,8 @@ def _reconcile_completed_generation(
     run_date: str,
     state_store: DailyScheduleState,
     state: dict,
+    *,
+    now: datetime | None = None,
 ) -> dict:
     """只对带可信 Codex thread_id 候选的失败群做无新调用收口。"""
     if state.get("generation_status") != "partial":
@@ -715,6 +746,9 @@ def _reconcile_completed_generation(
         return state
 
     pipeline = DailyPipeline(settings=settings)
+    from app.scheduler.period import automatic_run_allowed
+    now = now or datetime.now(ZoneInfo(settings.app_timezone))
+    pipeline.automatic_now = now
     generator = pipeline.image_generator
     can_reconcile = getattr(generator, "can_reconcile_without_generation", None)
     if not callable(can_reconcile):
@@ -735,6 +769,8 @@ def _reconcile_completed_generation(
         if group is None or group.id is None:
             continue
         run = pipeline.store.load_run(group_name, run_date)
+        if not automatic_run_allowed(getattr(group, "schedule_rule", "daily_previous_day"), date.fromisoformat(run_date), now, run):
+            continue
         image_job = run.get("image_job") if isinstance(run.get("image_job"), dict) else {}
         job_id = str(image_job.get("job_id") or "")
         prompt_path = pipeline.store.prompt_path(group_name, run_date)

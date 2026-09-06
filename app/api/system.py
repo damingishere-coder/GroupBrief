@@ -357,6 +357,7 @@ def stats(session: Session = Depends(repo.get_session)):
 @router.get("/status")
 def status(session: Session = Depends(repo.get_session), settings: Settings = Depends(get_settings)):
     from app.scheduler.manager import get_scheduler
+    from app.scheduler.period import PeriodResolver, next_run_at
 
     try:
         tz = ZoneInfo(settings.app_timezone)
@@ -366,15 +367,15 @@ def status(session: Session = Depends(repo.get_session), settings: Settings = De
         tz = None
 
     window = get_report_window(now.date(), settings.app_timezone)
+    groups = repo.list_groups(session, only_enabled=True)
+    rules = [group.schedule_rule for group in groups] or ["daily_previous_day"]
+    periods = [PeriodResolver().resolve(now.date(), settings.app_timezone, rule) for rule in rules]
     def next_daily_at(value: str, fallback: str) -> str:
         try:
             hour, minute = (int(x) for x in str(value).split(":"))
         except (TypeError, ValueError):
             hour, minute = (int(x) for x in fallback.split(":"))
-        next_dt = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-        if next_dt <= now:
-            next_dt += timedelta(days=1)
-        return next_dt.isoformat()
+        return next_run_at(now, f"{hour:02d}:{minute:02d}", rules)
 
     next_generate_at = next_daily_at(settings.schedule_generate_time, "00:15")
     next_send_at = next_daily_at(settings.schedule_send_time, "08:30")
@@ -390,9 +391,10 @@ def status(session: Session = Depends(repo.get_session), settings: Settings = De
         "now": now.isoformat() if tz else None,
         "timezone": settings.app_timezone,
         "report_date": window.report_date.isoformat(),
-        "range_start": window.range_start.isoformat() if window.should_run else "",
-        "range_end": window.range_end.isoformat() if window.should_run else "",
-        "should_run_today": window.should_run,
+        "range_start": periods[0].period_start.isoformat() if periods[0].should_run else "",
+        "range_end": periods[0].period_end.isoformat() if periods[0].should_run else "",
+        "should_run_today": any(period.should_run for period in periods),
+        "report_kind": periods[0].report_kind if len(set(rules)) == 1 else "mixed",
         "is_weekend_summary": window.is_weekend_summary,
         "next_generate_at": next_generate_at,
         "next_send_at": next_send_at,

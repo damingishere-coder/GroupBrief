@@ -248,6 +248,19 @@ class DeliveryStages:
             )
 
         context.ranking_text = ranking_text
+        if context.run.get("report_kind") == "weekly":
+            from app.ai.weekly_champion import validate_weekly_payload
+            try:
+                prompt = self.store.prompt_path(context.group_name, context.run_date).read_text(encoding="utf-8") if context.group.image_enabled else None
+                validate_weekly_payload(context.run, ranking_text, prompt)
+            except (OSError, ValueError) as exc:
+                self.store.finish_send_claim(
+                    context.group_name, context.run_date, context.claim_id,
+                    send_state="held", send_hold=True,
+                    send_hold_reason="WEEKLY_CHAMPION_MISMATCH",
+                    send_error=str(exc), send_error_type="WEEKLY_CHAMPION_MISMATCH",
+                )
+                return StageResult.stop({"group_name": context.group_name, "status": "held", "error_type": "WEEKLY_CHAMPION_MISMATCH", "detail": str(exc)})
         context.text_sha256 = hashlib.sha256(ranking_text.encode("utf-8")).hexdigest()
         context.image_enabled = bool(context.group.image_enabled)
         if context.image_enabled:
