@@ -36,6 +36,11 @@ import { navigateToHash } from "../../navigation";
 
 type GroupFilter = "all" | "enabled" | "disabled";
 type ToggleField = "enabled" | "image_enabled";
+const SCHEDULE_LABELS: Record<string, string> = {
+  workdays_daily_monday_weekly: "周一周报 / 工作日日报",
+  daily_previous_day: "每天统计前一天",
+  weekday_default: "工作日（周一汇总周末）",
+};
 
 function formatDateTime(value: string): string {
   if (!value) return "—";
@@ -349,7 +354,7 @@ export default function Groups() {
                       <td data-label="启用状态">
                         <ToggleSwitch checked={group.enabled} label={`${group.display_name} 启用状态`} busy={toggleBusy === `${group.id}:enabled`} onChange={() => toggle(group, "enabled")} />
                       </td>
-                      <td data-label="统计规则"><span className="groups-muted-cell">{group.schedule_rule || "daily_previous_day"}</span></td>
+                      <td data-label="统计规则"><span className="groups-muted-cell">{SCHEDULE_LABELS[group.schedule_rule || "daily_previous_day"] || group.schedule_rule}</span></td>
                       <td data-label="发送批次"><strong>{group.send_time || "08:30"}</strong></td>
                       <td data-label="排行榜配置">
                         <div className="groups-template-cell">

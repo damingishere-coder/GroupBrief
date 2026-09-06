@@ -71,7 +71,7 @@ test("390px 窄屏可核对 48 小时外恢复清单且确认接口不包含发�
   expect(JSON.stringify(confirmBody)).not.toContain("send");
 });
 
-test("群配置只展示后端白名单并支持两种统计规则", async ({ page }) => {
+test("群配置只展示后端白名单并支持周一周报规则", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.route("**/api/**", async (route) => {
     const url = new URL(route.request().url());
@@ -124,6 +124,8 @@ test("群配置只展示后端白名单并支持两种统计规则", async ({ pa
   await expect(page.getByLabel("统计周期规则")).toHaveValue("daily_previous_day");
   await page.getByLabel("统计周期规则").selectOption("weekday_default");
   await expect(page.getByLabel("统计周期规则")).toHaveValue("weekday_default");
+  await page.getByLabel("统计周期规则").selectOption("workdays_daily_monday_weekly");
+  await expect(page.getByLabel("统计周期规则")).toHaveValue("workdays_daily_monday_weekly");
   await expect(page.getByLabel("摘要 Provider").locator("option[value=deepseek]")).toBeDisabled();
   await expect(page.getByLabel("日报 Prompt Provider").locator("option[value=deepseek]")).toBeDisabled();
 });

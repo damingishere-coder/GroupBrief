@@ -472,7 +472,8 @@ class DeepSeekImagePromptBuilder:
                     if last_violations:
                         prompt += "\n上次具体违反：" + "；".join(last_violations[:8])
                 raw_copy = self._prompt_chat(
-                    POSTER_EDITOR_SYSTEM,
+                    (POSTER_EDITOR_SYSTEM.replace("日报", "周报").replace("当天", "本周")
+                     if data.report_kind == "weekly" else POSTER_EDITOR_SYSTEM),
                     prompt,
                     response_format="json_object",
                     temperature=0.35,
@@ -495,6 +496,7 @@ class DeepSeekImagePromptBuilder:
                         style_text=theme_text,
                         explicit_style=theme.has_explicit_style,
                         template_text=template_text,
+                        report_kind=data.report_kind,
                     )
                 except PosterCopyError as exc:
                     last_violations = [str(exc)]

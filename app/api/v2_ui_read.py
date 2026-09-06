@@ -21,7 +21,7 @@ from app.api.v2_ui_common import (
 from app.config.settings import Settings, get_settings
 from app.db import repository as repo
 from app.image.delivery_guard import image_delivery_eligible, image_fallback_level
-from app.scheduler.period import PeriodResolver
+from app.scheduler.period import PeriodResolver, WORKDAYS_WEEKLY_RULE
 from app.scheduler.runtime_status import build_daily_status
 from app.services.runtime_logs import read_runtime_logs
 from app.v2.constants import FILE_IMAGE
@@ -49,6 +49,8 @@ def dashboard(
     )
     store = _store(settings)
     groups = repo.list_groups(session, only_enabled=True)
+    if groups and all(group.schedule_rule == WORKDAYS_WEEKLY_RULE for group in groups):
+        window = PeriodResolver().resolve(selected_date, settings.app_timezone, WORKDAYS_WEEKLY_RULE)
 
     cards: list[dict] = []
     runtime_runs: list[dict] = []
@@ -121,6 +123,8 @@ def dashboard(
                 "status": status,
                 "period_start": run.get("period_start", ""),
                 "period_end": run.get("period_end", ""),
+                "report_kind": run.get("report_kind", "daily" if run.get("period_start") else window.report_kind),
+                "top_limit": run.get("top_limit", 10 if run.get("period_start") else window.top_limit),
                 "message_count": run.get("message_count", 0),
                 "speaker_count": run.get("speaker_count", 0),
                 "image_url": image_url,
@@ -165,7 +169,7 @@ def dashboard(
             counts["pending"] += 1
 
     next_send = ""
-    if selected_date == now.date() and any(
+    if window.should_run and selected_date == now.date() and any(
         card["status"] in ("IMAGE_READY", "READY_TO_SEND")
         and not card["sent_at"]
         and card["wechat_send_enabled"]
@@ -183,6 +187,7 @@ def dashboard(
         schedule_generate_time=settings.schedule_generate_time,
         schedule_send_time=settings.schedule_send_time,
         app_timezone=settings.app_timezone,
+        schedule_rules=[group.schedule_rule for group in groups],
     )
     daily_status = {
         "overall_status": runtime_status["overall_status"],
@@ -194,6 +199,7 @@ def dashboard(
         "today": selected_run_date,
         "run_date": selected_run_date,
         "should_run": window.should_run,
+        "report_kind": window.report_kind,
         "period_start": window.period_start_str(),
         "period_end": window.period_end_str(),
         "enabled_groups": len(cards),

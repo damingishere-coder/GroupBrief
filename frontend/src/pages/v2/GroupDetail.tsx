@@ -406,6 +406,7 @@ export default function GroupDetail({ groupId, invalidGroupId }: GroupDetailProp
             <select id="schedule-rule" value={form.schedule_rule} onChange={(event) => setField("schedule_rule", event.target.value)}>
               <option value="daily_previous_day">每天统计前一天（默认）</option>
               <option value="weekday_default">仅工作日（周一=周五至周日）</option>
+              <option value="workdays_daily_monday_weekly">周一周报 Top15；周二至周五日报；周末停跑</option>
             </select>
           </Field>
           <Field id="send-batch-time" label="发送批次">

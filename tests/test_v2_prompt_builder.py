@@ -292,6 +292,21 @@ def test_build_renders_only_fixed_sections_and_real_multi_person_dialogue():
         assert hidden not in output.prompt
 
 
+def test_weekly_prompt_keeps_quotes_and_adds_exact_champion_contract():
+    from app.ai.weekly_champion import weekly_image_contract
+    data = _input(report_kind="weekly", period_start="2026-08-10 00:00:00",
+                  period_end="2026-08-16 23:59:59",
+                  weekly_champion={"name": "张三", "text": "恭喜 张三 获得本周文字发言第一名！"})
+    output = _builder().build(data)
+    assert output.success, output.error
+    prompt = weekly_image_contract(output.prompt, data)
+    assert "微信群周报漫画" in prompt
+    assert "2026-08-10 00:00:00 ~ 2026-08-16 23:59:59" in prompt
+    assert data.weekly_champion["text"] in prompt
+    assert "今天群里聊了票房" in prompt  # 真实引文不能随周报措辞被改写
+    assert validate_fixed_prompt_contract(prompt, expected_panel_count=2) == 2
+
+
 def test_builder_repairs_duplicate_sender_identity_and_records_prompt_meta():
     output = _builder(DuplicateIdentitySummaryProvider()).build(_input())
 

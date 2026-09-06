@@ -9,10 +9,10 @@ from datetime import date, datetime
 from typing import Iterable
 
 from app.db.models import Group
-from app.scheduler.period import PeriodResolver
+from app.scheduler.period import PeriodResolver, WORKDAYS_WEEKLY_RULE
 
 MANIFEST_VERSION = 1
-SUPPORTED_SCHEDULE_RULES = frozenset({"weekday_default", "daily_previous_day"})
+SUPPORTED_SCHEDULE_RULES = frozenset({"weekday_default", "daily_previous_day", WORKDAYS_WEEKLY_RULE})
 
 
 def build_expected_groups(
@@ -41,6 +41,8 @@ def build_expected_groups(
                 "wechat_group_id": str(group.wechat_group_id or ""),
                 "wechat_group_name": str(group.wechat_group_name or ""),
                 "schedule_rule": rule,
+                "report_kind": window.report_kind,
+                "top_limit": window.top_limit,
                 "history_provider_preference": str(group.provider_preference or ""),
                 "summary_provider": str(getattr(group, "summary_provider", "") or ""),
                 "summary_model": str(group.summary_model or ""),

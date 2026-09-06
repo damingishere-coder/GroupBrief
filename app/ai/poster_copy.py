@@ -624,11 +624,15 @@ def render_poster_prompt(
     style_text: str,
     explicit_style: bool,
     template_text: str = "",
+    report_kind: str = "daily",
 ) -> str:
     panels = "\n\n".join(
         _render_panel(index, panel) for index, panel in enumerate(copy.panels, start=1)
     )
     overall_visual = _overall_visual(style_text, explicit_style=explicit_style)
+    if report_kind == "weekly":
+        overall_visual = overall_visual.replace("当天", "本周")
+        template_text = template_text.replace("日报", "周报").replace("当天", "本周")
     if template_text:
         from app.ai.prompt_templates import render_image_prompt_template
 
@@ -655,7 +659,7 @@ def render_poster_prompt(
         ).strip()
     else:
         parts = [
-            "【任务】\n\n生成一张竖版微信群日报漫画信息图。",
+            "【任务】\n\n生成一张竖版微信群周报漫画信息图。" if report_kind == "weekly" else "【任务】\n\n生成一张竖版微信群日报漫画信息图。",
             f"【群名称】\n\n{group_name}",
             f"【统计时间】\n\n{period_line}",
             f"【数据】\n\n{message_line}\n{speaker_line}",

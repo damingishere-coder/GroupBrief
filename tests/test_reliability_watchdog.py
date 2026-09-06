@@ -36,7 +36,7 @@ def test_watchdog_backfills_in_date_order_and_scans_same_dates_for_send(tmp_path
     generated = []
     sent = []
 
-    def fake_daily(run_date, *, settings, skip_email):
+    def fake_daily(run_date, *, settings, skip_email, now):
         generated.append((run_date, skip_email))
         return {"run_date": run_date, "status": "success"}
 

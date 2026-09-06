@@ -11,6 +11,9 @@ from zoneinfo import ZoneInfo
 
 from app.config.settings import Settings, get_settings
 from app.core.logging import get_logger
+from app.db import repository as repo
+from sqlmodel import Session
+from app.scheduler.period import automatic_run_allowed
 from app.scheduler.daily_v2_job import DailyScheduleState, run_daily_v2_job
 from app.scheduler.heartbeat import record_scheduler_heartbeat
 from app.scheduler.outcome import require_scheduler_success, summarize_results
@@ -129,8 +132,18 @@ def _schedule_on_demand_jobs(
     state_store = DailyScheduleState(settings.output_dir)
     run_store = RunStore(settings.output_dir)
     scheduled: list[str] = []
+    repo.init_db(settings)
+    with Session(repo.engine) as session:
+        current_groups = repo.list_groups(session, only_enabled=True)
+    rules = {str(group.id): group.schedule_rule for group in current_groups}
+
+    def allowed(run_date: str, run: dict) -> bool:
+        rule = rules.get(str(run.get("group_id")), str(run.get("schedule_rule") or "daily_previous_day"))
+        return automatic_run_allowed(rule, datetime.fromisoformat(run_date).date(), now, run)
 
     for run_date in selected_dates:
+        if current_groups and not any(automatic_run_allowed(group.schedule_rule, datetime.fromisoformat(run_date).date(), now) for group in current_groups):
+            continue
         state = state_store.load(run_date)
         if state.get("state_status") == "corrupt" or state.get("generation_completed_at"):
             continue
@@ -139,6 +152,8 @@ def _schedule_on_demand_jobs(
         if state_retry is not None:
             retry_times.append(state_retry)
         for run in run_store.list_runs(run_date):
+            if not allowed(run_date, run):
+                continue
             if str(run.get("execution_state") or "") != EXECUTION_WAIT_RETRY:
                 continue
             retry_at = _timestamp(run.get("next_retry_at"), now=now)
@@ -176,6 +191,7 @@ def _schedule_on_demand_jobs(
         and bool(run.get("wechat_send_enabled"))
         and not run.get("sent_at")
         and not run.get("send_hold")
+        and allowed(today, run)
     ]
     if not ready_runs:
         return scheduled
