@@ -61,7 +61,7 @@ class CodexGPTProvider(DeepSeekV4FlashProvider):
     """复用既有总结编排，以 Codex GPT 执行底层文本调用。"""
 
     name = "codex_gpt"
-    model = "gpt-5.6-sol"
+    model = "gpt-6-astra"
 
     def __init__(self, settings: Settings):
         # 不调用父类初始化：父类会把 ai_model（DeepSeek 备用模型）写入

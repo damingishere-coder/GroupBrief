@@ -68,7 +68,7 @@ def _raw_json_from_user(user: str) -> dict:
 
 
 class FakeSummaryProvider:
-    model = "gpt-5.6-sol"
+    model = "gpt-6-astra"
 
     def __init__(self, fail: Exception | None = None):
         self.calls: list[tuple[str, str]] = []

@@ -16,8 +16,8 @@ groups:
     send_time: "08:30"
 
     # 总结模型 / Prompt 主模型（DeepSeek V4 Flash 为系统级备用）
-    summary_model: "gpt-5.6-sol"
-    prompt_model: "gpt-5.6-sol"
+    summary_model: "gpt-6-astra"
+    prompt_model: "gpt-6-astra"
 
     # 是否生图（false 时跳过生图，PROMPT_READY 后直接 READY_TO_SEND）
     image_enabled: true

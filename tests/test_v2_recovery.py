@@ -274,7 +274,7 @@ def test_startup_checks_structure(tmp_path, monkeypatch):
 
     class FakeCodex:
         def health_check(self):
-            return True, "主模型 gpt-5.6-sol 可用"
+            return True, "主模型 gpt-6-astra 可用"
 
     monkeypatch.setattr(codex_provider, "CodexGPTProvider", lambda settings: FakeCodex())
 

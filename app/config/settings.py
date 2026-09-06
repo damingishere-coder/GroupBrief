@@ -93,7 +93,7 @@ class Settings(BaseSettings):
     # 群聊总结主备路由：Codex GPT 主用，DeepSeek 备用。
     summary_provider_primary: str = "codex"
     summary_provider_fallback: str = "deepseek"
-    codex_summary_model: str = "gpt-5.6-sol"
+    codex_summary_model: str = "gpt-6-astra"
     # 结构化群聊整理在高峰期可能超过 4 分钟；600 秒仍有明确上限，
     # 同时避免把正常的长响应误判成不可自动恢复的结果未知。
     codex_summary_timeout_seconds: int = 600

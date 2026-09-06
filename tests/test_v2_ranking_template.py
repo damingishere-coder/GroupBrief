@@ -273,8 +273,8 @@ def test_group_v2_defaults():
     g = Group()
     assert g.schedule_rule == "daily_previous_day"
     assert g.send_time == "08:30"
-    assert g.summary_model == "gpt-5.6-sol"
-    assert g.prompt_model == "gpt-5.6-sol"
+    assert g.summary_model == "gpt-6-astra"
+    assert g.prompt_model == "gpt-6-astra"
     assert g.image_enabled is True
     assert g.send_target == ""
     assert g.ranking_template == "default"

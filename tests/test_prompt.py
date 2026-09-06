@@ -106,7 +106,7 @@ def test_default_summary_provider_is_codex_gpt():
     settings = Settings(_env_file=None, summary_provider_primary="codex", ai_api_key="")
     provider = PromptService(settings)._get_provider()
     assert provider.name == "codex_gpt"
-    assert provider.model == "gpt-5.6-sol"
+    assert provider.model == "gpt-6-astra"
 
 
 def test_v1_model_failure_does_not_degrade_to_template_in_real_runtime():
@@ -121,7 +121,7 @@ def test_v1_model_failure_does_not_degrade_to_template_in_real_runtime():
             return False, "failed"
 
         def generate_image_prompt(self, context):
-            return ImagePromptResult(False, error="主备都失败", provider=self.name, model="gpt-5.6-sol")
+            return ImagePromptResult(False, error="主备都失败", provider=self.name, model="gpt-6-astra")
 
     service = PromptService(Settings(_env_file=None, summary_provider_primary="codex"))
     service._provider = FailingProvider()

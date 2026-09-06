@@ -35,7 +35,7 @@ def _settings(**overrides) -> Settings:
         "_env_file": None,
         "summary_provider_primary": "codex",
         "summary_provider_fallback": "deepseek",
-        "codex_summary_model": "gpt-5.6-sol",
+        "codex_summary_model": "gpt-6-astra",
         "codex_summary_max_retries": 1,
         "codex_summary_timeout_seconds": 30,
         "codex_summary_request_concurrency": 1,
@@ -70,7 +70,7 @@ def test_codex_success_uses_stdin_read_only_and_does_not_call_fallback(monkeypat
     assert fallback.calls == 0
     assert "私密群聊正文" not in " ".join(captured["command"])
     assert "私密群聊正文" in captured["input"]
-    assert captured["command"][captured["command"].index("--model") + 1] == "gpt-5.6-sol"
+    assert captured["command"][captured["command"].index("--model") + 1] == "gpt-6-astra"
     assert captured["command"][captured["command"].index("--sandbox") + 1] == "read-only"
     assert "--ephemeral" in captured["command"]
     assert "--ignore-user-config" in captured["command"]
@@ -138,7 +138,7 @@ def test_codex_not_submitted_and_deepseek_failure_returns_clear_error(monkeypatc
 def test_default_factory_builds_codex_gpt_provider():
     provider = build_summary_provider(_settings())
     assert isinstance(provider, CodexGPTProvider)
-    assert provider.model == "gpt-5.6-sol"
+    assert provider.model == "gpt-6-astra"
 
 
 @pytest.mark.parametrize(

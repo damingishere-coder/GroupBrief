@@ -15,7 +15,7 @@ from app.weekly.store import WeeklyStore
 
 class FakeProvider:
     name = "fake_ai"
-    model = "gpt-5.6-sol"
+    model = "gpt-6-astra"
 
     def __init__(self, calls, *, fail=False):
         self.calls = calls
@@ -58,7 +58,7 @@ def _group(settings, *, send=False):
                 wechat_group_id="weekly@chatroom",
                 wechat_group_name="周报当前群名",
                 summary_provider="codex",
-                summary_model="gpt-5.6-sol",
+                summary_model="gpt-6-astra",
                 wechat_send_enabled=send,
             ),
         )
