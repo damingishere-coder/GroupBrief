@@ -8,6 +8,8 @@ from typing import Callable
 
 from app.ranking.engine import RankingEngine
 from app.services.speaker_identity import speaker_identity_key
+from app.ai.strict_prompt_contract import sanitize_strict_image_prompt, STRICT_IMAGE_FACT_CONTRACT
+from app.ai.prompt_safety import enforce_prompt_budget
 
 
 def champion_seed(ranking, messages, snapshot_hash: str) -> dict:
@@ -55,13 +57,15 @@ def build_champion(seed: dict, chat: Callable | None) -> dict:
         topic = str(payload.get("topic") or "").strip()
         match = next((row for row in sample if row["message_id"] == payload.get("message_id")), None)
         from app.ai.topic_selection import POLITICAL_TOPIC_KEYWORDS
+        greeting = f"{seed['text']}这周聊起「{topic}」格外有热情！"
         if (
             match and 2 <= len(topic) <= 20 and topic in match["text"]
             and not any(char in topic for char in '\n\r<>「」')
             and not any(keyword in topic.lower() for keyword in POLITICAL_TOPIC_KEYWORDS)
+            and sanitize_strict_image_prompt(greeting) == greeting
         ):
             result.update(
-                text=f"{seed['text']}这周聊起「{topic}」格外有热情！",
+                text=greeting,
                 evidence=[match], source="ai_verified_excerpt",
             )
     except Exception as exc:
@@ -85,6 +89,8 @@ def decorate_weekly_ranking(text: str, champion: dict) -> str:
 def weekly_image_contract(prompt: str, data) -> str:
     if data.report_kind != "weekly":
         return prompt
+    if "周报最终呈现合同（覆盖模板中的日报时间措辞）：" in prompt:
+        return prompt
     # 日期仍保留完整区间；仅把编辑用语切换为周度，原话不做全局替换。
     contract = (
         "\n\n周报最终呈现合同（覆盖模板中的日报时间措辞）：\n"
@@ -102,6 +108,21 @@ def weekly_image_contract(prompt: str, data) -> str:
             "该庆祝内容为程序确定的周榜事实，不能把“第一名”改成聊天话题的人物排名。\n"
         )
     return prompt + contract
+
+
+def budget_weekly_prompt(prompt: str, data, *, max_chars: int, max_bytes: int) -> tuple[str, dict]:
+    """先为冠军全文与后续严格合同预留空间，只压缩聊天内容。"""
+    contract = weekly_image_contract("", data)
+    reserve = contract + "\n\n" + STRICT_IMAGE_FACT_CONTRACT + "\n"
+    compacted, meta = enforce_prompt_budget(
+        prompt, max_chars=max_chars - len(reserve),
+        max_bytes=max_bytes - len(reserve.encode("utf-8")),
+    )
+    final = compacted + contract
+    if len(compacted + reserve) > max_chars or len((compacted + reserve).encode("utf-8")) > max_bytes:
+        raise ValueError("周报提示词预算不足以完整容纳冠军祝贺与事实合同")
+    meta.update(prompt_final_chars=len(final), prompt_final_bytes=len(final.encode("utf-8")))
+    return final, meta
 
 
 def validate_weekly_payload(run: dict, ranking_text: str, prompt_text: str | None = None) -> None:

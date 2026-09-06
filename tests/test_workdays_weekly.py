@@ -206,6 +206,27 @@ def test_champion_rejects_invented_topics_and_unknown_call():
     assert build_champion(seed, fail)["text"] == seed["text"]
 
 
+def test_champion_health_term_falls_back_before_strict_sanitization():
+    seed = {"name": "小王", "text": "恭喜 小王 获得本周文字发言第一名！",
+            "evidence": [{"message_id": "1", "text": "这周讨论BMI指标"}]}
+    result = build_champion(seed, lambda *a, **kw: '{"message_id":"1","topic":"BMI指标"}')
+    assert result["text"] == seed["text"]
+    assert result["evidence"] == []
+
+
+def test_champion_contract_is_reserved_inside_prompt_budget():
+    from app.ai.weekly_champion import budget_weekly_prompt
+    from app.ai.strict_prompt_contract import append_strict_image_fact_contract
+    data = SimpleNamespace(report_kind="weekly", period_start="2026-08-31 00:00:00",
+                           period_end="2026-09-06 23:59:59",
+                           weekly_champion={"name": "小王", "text": "恭喜 小王 获得本周文字发言第一名！"})
+    prompt, meta = budget_weekly_prompt("【任务】\n" + "聊天内容" * 8000, data, max_chars=24000, max_bytes=70000)
+    assert meta["prompt_final_chars"] == len(prompt)
+    final = append_strict_image_fact_contract(prompt)
+    assert len(final) <= 24000 and len(final.encode("utf-8")) <= 70000
+    assert data.weekly_champion["text"] in final
+
+
 def test_old_snapshot_period_is_not_reinterpreted_and_next_time_skips_weekend():
     window = PeriodResolver().resolve(date(2026, 9, 7), schedule_rule=WORKDAYS_WEEKLY_RULE)
     restored = restore_period(window, {"period_start": "2026-09-06 00:00:00", "period_end": "2026-09-06 23:59:59"})

@@ -934,9 +934,13 @@ class GenerationStages:
                 prompt_stripped_numeric_units=list(stripped_units),
             )
         if prompt_input.report_kind == "weekly":
+            final_prompt = self.store.prompt_path(context.group_name, context.run_date).read_text(encoding="utf-8")
             greeting = str((prompt_input.weekly_champion or {}).get("text") or "")
-            if greeting and greeting not in self.store.prompt_path(context.group_name, context.run_date).read_text(encoding="utf-8"):
+            if greeting and greeting not in final_prompt:
                 raise ValueError("周报冠军祝贺词未完整保留在生图提示词，已停止生图")
+            if len(final_prompt) > self.settings.image_prompt_max_chars or len(final_prompt.encode("utf-8")) > self.settings.image_prompt_max_bytes:
+                raise ValueError("周报最终提示词超出长度预算，已停止生图")
+            prompt_meta = {**(prompt_meta or {}), "prompt_final_chars": len(final_prompt), "prompt_final_bytes": len(final_prompt.encode("utf-8"))}
         return StageResult.proceed(
             PromptStageOutput(
                 prompt_meta=prompt_meta if isinstance(prompt_meta, dict) else None

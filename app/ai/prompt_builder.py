@@ -37,6 +37,7 @@ from app.ai.poster_copy import (
 )
 from app.ai.prompt_builder_types import PromptInput, PromptOutput
 from app.ai.prompt_safety import enforce_prompt_budget, sanitize_prompt_text
+from app.ai.weekly_champion import budget_weekly_prompt
 from app.ai.speaker_attribution import (
     AttributionName,
     build_attribution_contract,
@@ -559,11 +560,17 @@ class DeepSeekImagePromptBuilder:
             meta["summary_ms"] = summary_ms
             # 保留旧字段一版，避免历史运行分析与外部读取立即失效。
             meta["deepseek_ms"] = summary_ms
-            text, prompt_budget_meta = enforce_prompt_budget(
-                text,
-                max_chars=self.settings.image_prompt_max_chars,
-                max_bytes=self.settings.image_prompt_max_bytes,
-            )
+            if data.report_kind == "weekly":
+                text, prompt_budget_meta = budget_weekly_prompt(
+                    text, data, max_chars=self.settings.image_prompt_max_chars,
+                    max_bytes=self.settings.image_prompt_max_bytes,
+                )
+            else:
+                text, prompt_budget_meta = enforce_prompt_budget(
+                    text,
+                    max_chars=self.settings.image_prompt_max_chars,
+                    max_bytes=self.settings.image_prompt_max_bytes,
+                )
             meta.update(prompt_budget_meta)
             return PromptOutput(success=True, prompt=text, model=api_model, meta=meta)
         except (ImagePromptTemplateError, ImageThemeError, LayoutPlanError, ValueError) as e:
