@@ -1,5 +1,5 @@
 import type { Icon } from "@phosphor-icons/react";
-import { ChartBar, ChatDots, ChatsCircle, GearSix, HouseLine, ImageSquare } from "@phosphor-icons/react";
+import { ChatDots, ChatsCircle, GearSix, HouseLine, ImageSquare, ListChecks } from "@phosphor-icons/react";
 import { useCallback, useEffect, useState } from "react";
 
 export type PageKey =
@@ -23,20 +23,12 @@ export interface NavigationItem {
 }
 
 export const NAVIGATION: NavigationItem[] = [
-  { key: "dashboard", label: "总览", icon: HouseLine },
-  {
-    key: "ranking",
-    label: "当日群报",
-    icon: ChartBar,
-    activePages: ["ranking", "images"],
-    children: [
-      { key: "ranking", label: "排行榜", icon: ChartBar },
-      { key: "images", label: "AI 图片", icon: ImageSquare },
-    ],
-  },
-  { key: "groups", label: "群聊与任务", icon: ChatsCircle, activePages: ["groups", "tasks"] },
-  { key: "messages", label: "记录与归档", icon: ChatDots, activePages: ["messages", "archive"] },
-  { key: "settings", label: "设置中心", icon: GearSix },
+  { key: "dashboard", label: "今日工作台", icon: HouseLine },
+  { key: "images", label: "日报作品", icon: ImageSquare, activePages: ["ranking", "images"] },
+  { key: "groups", label: "群聊管理", icon: ChatsCircle },
+  { key: "tasks", label: "运行任务", icon: ListChecks },
+  { key: "messages", label: "消息归档", icon: ChatDots, activePages: ["messages", "archive"] },
+  { key: "settings", label: "设置", icon: GearSix },
 ];
 
 const PAGE_KEYS = new Set<PageKey>([
@@ -51,7 +43,7 @@ export interface AppRoute {
 }
 
 function hashSegments(): string[] {
-  return window.location.hash.replace(/^#\/?/, "").split("/").filter(Boolean);
+  return window.location.hash.split("?")[0].replace(/^#\/?/, "").split("/").filter(Boolean);
 }
 
 export function routeFromLocation(): AppRoute {
@@ -81,26 +73,71 @@ export function routeFromLocation(): AppRoute {
   return { page, groupMode: "detail", invalidGroupId: groupSegment };
 }
 
-export function navigateToHash(path: string): void {
-  const normalized = path.startsWith("#/") ? path : `#/${path.replace(/^\/+/, "")}`;
+export function navigateToHash(path: string, preserveDate = true): void {
+  let normalized = path.startsWith("#/") ? path : `#/${path.replace(/^\/+/, "")}`;
+  const [base, search] = normalized.split("?");
+  const params = new URLSearchParams(search);
+  const current = workspaceQuery();
+  if (preserveDate && !params.has("date") && current.has("date")) params.set("date", current.get("date") || "");
+  normalized = `${base}${params.size ? `?${params}` : ""}`;
   if (window.location.hash === normalized) return;
+  if (!allowNavigation(normalized)) return;
+  acceptedHash = normalized;
   window.location.hash = normalized;
+}
+
+let leaveGuard: (() => boolean) | undefined;
+let acceptedHash = window.location.hash;
+// Run before component subscriptions so a rejected Back never renders another report.
+window.addEventListener("hashchange", () => {
+  if (!allowNavigation(window.location.hash)) window.history.replaceState({}, "", acceptedHash);
+  else acceptedHash = window.location.hash;
+});
+function editorIdentity(hash: string) {
+  const [path, query] = hash.split("?");
+  const params = new URLSearchParams(query);
+  return `${path}:${params.get("date") || ""}:${params.get("group") || ""}:${params.get("view") || ""}`;
+}
+function allowNavigation(next: string) {
+  return editorIdentity(next) === editorIdentity(acceptedHash) || !leaveGuard || leaveGuard();
+}
+export function registerLeaveGuard(guard: () => boolean) {
+  leaveGuard = guard;
+  acceptedHash = window.location.hash;
+  return () => { if (leaveGuard === guard) leaveGuard = undefined; };
+}
+export function workspaceQuery() {
+  return new URLSearchParams(window.location.hash.split("?")[1] || "");
+}
+export function updateWorkspaceQuery(values: Record<string, string | null>) {
+  const params = workspaceQuery();
+  Object.entries(values).forEach(([key, value]) => value === null ? params.delete(key) : params.set(key, value));
+  const query = params.toString();
+  navigateToHash(`${window.location.hash.split("?")[0] || "#/dashboard"}${query ? `?${query}` : ""}`, false);
+}
+export function useWorkspaceQuery() {
+  const [query, setQuery] = useState(workspaceQuery);
+  useEffect(() => {
+    const sync = () => setQuery(workspaceQuery());
+    window.addEventListener("hashchange", sync);
+    return () => window.removeEventListener("hashchange", sync);
+  }, []);
+  return query;
 }
 
 export function usePageNavigation() {
   const [route, setRoute] = useState<AppRoute>(routeFromLocation);
 
   useEffect(() => {
+    acceptedHash = window.location.hash;
     const sync = () => setRoute(routeFromLocation());
     window.addEventListener("hashchange", sync);
-    window.addEventListener("popstate", sync);
     if (!window.location.hash || !PAGE_KEYS.has(routeFromLocation().page)) {
       window.history.replaceState({}, "", "#/dashboard");
       sync();
     }
     return () => {
       window.removeEventListener("hashchange", sync);
-      window.removeEventListener("popstate", sync);
     };
   }, []);
 

@@ -1,3 +1,4 @@
+import { createPortal } from "react-dom";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   CaretRight,
@@ -182,7 +183,7 @@ export function ImageThemePicker({
         <span className="image-theme-trigger-action" aria-hidden="true"><em>更换</em><CaretRight size={16} /></span>
       </button>
 
-      <AnimatePresence>
+      {createPortal(<AnimatePresence>
         {open && (
           <m.div className="image-theme-center-backdrop" role="presentation" onMouseDown={() => !confirming && setOpen(false)} initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.18 }}>
             <m.section ref={modalRef} tabIndex={-1} className="image-theme-center" role="dialog" aria-modal="true" aria-labelledby="image-theme-center-title" onMouseDown={(event) => event.stopPropagation()} initial={{ opacity: 0, scale: 0.985, y: 6 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.985, y: 5 }} transition={{ duration: 0.22, ease: MOTION_EASE }}>
@@ -263,7 +264,7 @@ export function ImageThemePicker({
             </m.section>
           </m.div>
         )}
-      </AnimatePresence>
+      </AnimatePresence>, document.body)}
     </div>
   );
 }

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import {
   claimRunImageCandidate,
@@ -27,9 +27,9 @@ import {
 } from "./model";
 import type { ToastFn } from "./useAIImageCatalogs";
 
-export function useAIImageRuns(groups: GroupV2[], toast: ToastFn) {
+export function useAIImageRuns(groups: GroupV2[], toast: ToastFn, target?: { groupName: string; runDate: string }) {
   const [runs, setRuns] = useState<V2Run[]>([]);
-  const [dateFilter, setDateFilter] = useState(shanghaiDateInputValue);
+  const [dateFilter, setDateFilter] = useState(() => target?.runDate || shanghaiDateInputValue());
   const [groupFilter, setGroupFilter] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
   const [selectedKey, setSelectedKey] = useState("");
@@ -57,23 +57,30 @@ export function useAIImageRuns(groups: GroupV2[], toast: ToastFn) {
   const [imageCandidates, setImageCandidates] = useState<ImageCandidate[]>([]);
   const [candidateLoading, setCandidateLoading] = useState(false);
   const [candidateClaiming, setCandidateClaiming] = useState("");
+  const loadSequence = useRef(0);
+  useEffect(() => () => { loadSequence.current += 1; }, []);
 
   const loadRuns = () => {
+    const sequence = ++loadSequence.current;
     setLoading(true);
     setError("");
     getRuns(dateFilter || undefined)
       .then((data) => {
-        setRuns(data.runs);
-        setSelectedKey((current) => data.runs.some((run) => runKey(run) === current)
+        if (sequence !== loadSequence.current) return;
+        // An explicit report never silently falls back to a different group.
+        const nextRuns = target ? [{ group_name: target.groupName, run_date: target.runDate, status: "PENDING", ...data.runs.find(run => run.group_name === target.groupName && run.run_date === target.runDate) }] : data.runs;
+        setRuns(nextRuns);
+        setSelectedKey((current) => nextRuns.some((run) => runKey(run) === current)
           ? current
-          : data.runs[0] ? runKey(data.runs[0]) : "");
+          : nextRuns[0] ? runKey(nextRuns[0]) : "");
       })
       .catch((reason: unknown) => {
+        if (sequence !== loadSequence.current) return;
         const message = `图片运行记录加载失败：${String(reason)}`;
         setError(message);
         toast(message);
       })
-      .finally(() => setLoading(false));
+      .finally(() => { if (sequence === loadSequence.current) setLoading(false); });
   };
 
   useEffect(() => {
@@ -267,6 +274,7 @@ export function useAIImageRuns(groups: GroupV2[], toast: ToastFn) {
       });
       setRunPrompt(saved);
       setRunDraft(saved.content);
+      setDetailReloadVersion(current => current + 1);
       toast("当天 Prompt 已保存；尚未重新生图，也不会自动发送");
     } catch (reason) {
       toast(`当天 Prompt 保存失败：${String(reason)}`);

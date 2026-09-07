@@ -1,3 +1,4 @@
+import { useUnsavedChanges } from "../../components/useUnsavedChanges";
 import { useEffect, useState } from "react";
 import {
   ArrowCounterClockwise,
@@ -46,12 +47,15 @@ export function TemplateEditor({ kind }: TemplateEditorProps) {
   const [names, setNames] = useState<string[]>([]);
   const [current, setCurrent] = useState("default");
   const [content, setContent] = useState("");
+  const [savedContent, setSavedContent] = useState("");
   const [preview, setPreview] = useState("");
   const [loading, setLoading] = useState(true);
   const [contentLoading, setContentLoading] = useState(false);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState<"save" | "reset" | "delete" | "preview" | "">("");
   const [confirmAction, setConfirmAction] = useState<"reset" | "delete" | null>(null);
+
+  useUnsavedChanges(content !== savedContent, Boolean(busy));
 
   const loadContent = (name: string) => {
     setContentLoading(true);
@@ -61,6 +65,7 @@ export function TemplateEditor({ kind }: TemplateEditorProps) {
       .then((template) => {
         setCurrent(template.name);
         setContent(template.content);
+        setSavedContent(template.content);
         setPreview("");
       })
       .catch((reason: unknown) => setError(`模板读取失败：${String(reason)}`))
@@ -113,6 +118,7 @@ export function TemplateEditor({ kind }: TemplateEditorProps) {
     request
       .then((data) => {
         setContent(data.content);
+        setSavedContent(data.content);
         setPreview("");
         toast("已恢复默认内容");
       })
@@ -173,7 +179,7 @@ export function TemplateEditor({ kind }: TemplateEditorProps) {
               type="button"
               className={`template-editor-list-item ${name === current ? "is-active" : ""}`}
               aria-current={name === current ? "true" : undefined}
-              onClick={() => loadContent(name)}
+              onClick={() => { if (content === savedContent || window.confirm("有未保存的模板修改，确定丢弃并切换吗？")) loadContent(name); }}
             >
               <span>{name}</span>
               {name === "default" && <small>默认</small>}

@@ -1,142 +1,122 @@
 import {
-  Bell,
-  BookOpen,
-  CalendarBlank,
-  CaretDown,
-  List,
-  X,
+  ArrowUpRight,
+  CaretLeft,
+  CaretRight,
+  Sparkle,
+  Desktop,
+  Heartbeat,
 } from "@phosphor-icons/react";
-import { useEffect, useState, type ReactNode } from "react";
-import { NAVIGATION, type PageKey } from "../../navigation";
-import { m } from "../motion";
+import { useState, type ReactNode } from "react";
+import { NAVIGATION, navigateToHash, type PageKey } from "../../navigation";
 
-interface AppShellProps {
+export default function AppShell({
+  activePage,
+  onNavigate,
+  children,
+}: {
   activePage: PageKey;
   onNavigate: (page: PageKey) => void;
   children: ReactNode;
-}
-
-function localDateLabel() {
-  return new Intl.DateTimeFormat("zh-CN", {
-    year: "numeric",
-    month: "long",
-    day: "numeric",
-    weekday: "long",
-  }).format(new Date());
-}
-
-export default function AppShell({ activePage, onNavigate, children }: AppShellProps) {
-  const [navOpen, setNavOpen] = useState(false);
-  const [accountOpen, setAccountOpen] = useState(false);
-
-  useEffect(() => {
-    setNavOpen(false);
-  }, [activePage]);
-
+}) {
+  const [compact, setCompact] = useState(false);
+  const active = NAVIGATION.find((item) =>
+    (item.activePages || [item.key]).includes(activePage),
+  );
   return (
-    <div className="app-canvas">
-      <div className="app-shell">
-        <aside className={`app-sidebar ${navOpen ? "is-open" : ""}`} aria-label="主导航">
-          <div className="app-brand">
-            <img className="app-brand-logo" src="/assets/groupbrief-logo.png" alt="GroupBrief" />
-            <div className="app-brand-copy">
-              <strong>GroupBrief 群报</strong>
-              <span>本地自动化工作台</span>
-            </div>
-            <button
-              className="icon-button sidebar-close"
-              type="button"
-              aria-label="关闭导航"
-              onClick={() => setNavOpen(false)}
-            >
-              <X size={20} />
+    <div className={`studio-shell ${compact ? "is-compact" : ""}`}>
+      <a
+        className="skip-link"
+        href="#main-content"
+        onClick={(event) => {
+          event.preventDefault();
+          document.getElementById("main-content")?.focus();
+        }}
+      >
+        跳到主要内容
+      </a>
+      <aside className="studio-sidebar" aria-label="主导航">
+        <button
+          className="studio-brand"
+          onClick={() => onNavigate("dashboard")}
+          aria-label="GroupBrief 今日工作台"
+        >
+          <span className="studio-mark">
+            <Sparkle size={25} weight="fill" />
+          </span>
+          <span className="studio-brand-text">
+            <strong>
+              GroupBrief<span>群报</span>
+            </strong>
+            <small>让每一次讨论，都有回响。</small>
+          </span>
+        </button>
+        <div className="studio-nav-label">
+          你的创作空间 <span>WORKSPACE</span>
+        </div>
+        <nav className="studio-nav">
+          {NAVIGATION.map(({ key, label, icon: Icon, activePages }, index) => {
+            const selected = (activePages || [key]).includes(activePage);
+            return (
+              <button
+                key={key}
+                type="button"
+                className={selected ? "active" : ""}
+                onClick={() => onNavigate(key)}
+                aria-current={selected ? "page" : undefined}
+                title={label}
+              >
+                <Icon size={22} weight={selected ? "fill" : "regular"} />
+                <span>{label}</span>
+                <small>0{index + 1}</small>
+              </button>
+            );
+          })}
+        </nav>
+        <div className="studio-sidebar-bottom">
+          <div className="studio-side-note">
+            <Sparkle size={23} />
+            <strong>好内容，值得被看见</strong>
+            <p>从群聊中的灵感，到每天的一份精彩。</p>
+            <button onClick={() => onNavigate("images")}>
+              打开日报作品 <ArrowUpRight size={15} />
             </button>
           </div>
-
-          <nav className="app-nav">
-            {NAVIGATION.map(({ key, label, icon: NavIcon, activePages, children }) => {
-              const parentActive = (activePages || [key]).includes(activePage);
-              return (
-                <div className={`app-nav-group ${parentActive ? "is-active" : ""}`} key={key}>
-                  <button
-                    className={`app-nav-item ${parentActive ? "active" : ""}`}
-                    type="button"
-                    aria-current={parentActive && !children ? "page" : undefined}
-                    onClick={() => onNavigate(key)}
-                  >
-                    {parentActive && <m.span className="app-nav-active-indicator" layoutId="app-nav-active-indicator" aria-hidden="true" />}
-                    <NavIcon size={21} weight={parentActive ? "fill" : "regular"} />
-                    <span>{label}</span>
-                  </button>
-                  {children && (
-                    <div className="app-nav-children" aria-label={`${label}子栏目`}>
-                      {children.map(({ key: childKey, label: childLabel, icon: ChildIcon }) => (
-                        <button
-                          key={childKey}
-                          type="button"
-                          className={`app-nav-child ${activePage === childKey ? "active" : ""}`}
-                          aria-current={activePage === childKey ? "page" : undefined}
-                          onClick={() => onNavigate(childKey)}
-                        >
-                          <ChildIcon size={17} weight={activePage === childKey ? "fill" : "regular"} />
-                          <span>{childLabel}</span>
-                        </button>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-          </nav>
-
-          <button className="app-help" type="button" onClick={() => onNavigate("system")}>
-            <BookOpen size={20} />
-            <span>帮助与系统检查</span>
+          <button
+            className="studio-system"
+            onClick={() => navigateToHash("settings?section=health")}
+            title="系统健康"
+          >
+            <Heartbeat size={19} />
+            <span>系统健康</span>
+            <ArrowUpRight size={15} />
           </button>
-        </aside>
-
-        {navOpen && <button className="sidebar-scrim" type="button" aria-label="关闭导航" onClick={() => setNavOpen(false)} />}
-
-        <section className="app-workspace">
-          <header className="app-topbar">
-            <div className="topbar-date">
-              <button className="icon-button mobile-menu" type="button" aria-label="打开导航" onClick={() => setNavOpen(true)}>
-                <List size={22} />
-              </button>
-              <CalendarBlank size={22} />
-              <span>{localDateLabel()}</span>
-            </div>
-            <div className="topbar-actions">
-              <button className="icon-button" type="button" aria-label="通知">
-                <Bell size={21} />
-              </button>
-              <span className="topbar-divider" aria-hidden="true" />
-              <div className="local-account">
-                <button
-                  className="local-account-trigger"
-                  type="button"
-                  aria-expanded={accountOpen}
-                  onClick={() => setAccountOpen((value) => !value)}
-                >
-                  <span className="local-account-avatar" aria-hidden="true">GB</span>
-                  <span>本机管理</span>
-                  <CaretDown size={16} />
-                </button>
-                {accountOpen && (
-                  <div className="local-account-menu" role="menu">
-                    <strong>本地模式</strong>
-                    <span>数据与配置仅保存在这台电脑</span>
-                    <button type="button" onClick={() => { onNavigate("system"); setAccountOpen(false); }}>
-                      打开系统状态
-                    </button>
-                  </div>
-                )}
-              </div>
-            </div>
-          </header>
-          <main className="app-content">{children}</main>
-        </section>
-      </div>
+          <button
+            className="studio-collapse"
+            onClick={() => setCompact((value) => !value)}
+            aria-label={compact ? "展开侧栏" : "收起侧栏"}
+          >
+            {compact ? <CaretRight size={17} /> : <CaretLeft size={17} />}
+            <span>收起侧栏</span>
+          </button>
+        </div>
+      </aside>
+      <section className="studio-main">
+        <header className="studio-topbar">
+          <div>
+            <span className="studio-breadcrumb">创作空间</span>
+            <span className="studio-slash">/</span>
+            <strong>{active?.label || "工作台"}</strong>
+          </div>
+          <div className="studio-local">
+            <Desktop size={16} />
+            <span>本地工作空间</span>
+            <span className="studio-avatar">GB</span>
+          </div>
+        </header>
+        <main id="main-content" className="studio-content" tabIndex={-1}>
+          {children}
+        </main>
+      </section>
     </div>
   );
 }

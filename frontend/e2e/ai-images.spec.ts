@@ -117,6 +117,10 @@ async function installFakeApi(page: Page) {
     if (path === "/api/v2/templates/image_prompt/default") {
       return json(route, { name: "default", content: "{{group_name}} {{image_theme}}" });
     }
+    if (path === "/api/v2/system/health") return json(route, { checks: {} });
+    if (path === "/api/v2/dashboard") return json(route, { cards: [] });
+    if (path.endsWith("/ranking.json")) return json(route, { top_speakers: [] });
+    if (path.endsWith("/ranking.txt")) return route.fulfill({ status: 200, body: "排行榜" });
     if (path === "/api/v2/runs") {
       calls.push(`RUN_QUERY ${url.search}`);
       return json(route, { runs: [
@@ -138,24 +142,19 @@ async function installFakeApi(page: Page) {
   return calls;
 }
 
-test("AI 图片工作台通过 Fake API 加载目录、运行与详情", async ({ page }) => {
+test("日报作品画廊打开同群工作区并读取真实接口契约", async ({ page }) => {
   const calls = await installFakeApi(page);
   await page.goto("/#/images");
-
-  await expect(page.getByRole("heading", { name: "设置群聊生图风格" })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "运行记录" })).toBeVisible();
-  await expect(page.getByRole("heading", { name: `测试群 · ${runDate}` })).toBeVisible();
-  await expect(page.getByText("测试 Prompt", { exact: true })).toBeVisible();
-  await expect(page.getByText("显示 2 / 2 条")).toBeVisible();
-
-  await page.getByPlaceholder("搜索群名", { exact: true }).fill("不存在");
-  await expect(page.getByText("显示 0 / 2 条")).toBeVisible();
-  expect(calls).toEqual(expect.arrayContaining([
-    "GET /api/groups",
-    "GET /api/v2/image-themes",
-    "GET /api/v2/templates/image_prompt/default",
-    "GET /api/v2/runs",
-  ]));
+  await expect(page.getByRole("heading", { name: "把每一天的精彩，收进作品集" })).toBeVisible();
+  await expect(page.getByText("2 份作品")).toBeVisible();
+  await page.getByRole("button", { name: "打开日报 测试群", exact: true }).click();
+  await page.getByRole("tab", { name: "图片与提示词", exact: true }).click();
+  await expect(page.getByRole("region", { name: "日报处理工作区" }).getByRole("heading", { name: "测试群", exact: true })).toBeVisible();
+  await expect(page.locator(".ai-images-run-editor textarea")).toHaveValue("测试 Prompt");
+  await page.getByRole("button", { name: "关闭日报工作区" }).click();
+  await page.getByLabel("搜索作品群名").fill("不存在");
+  await expect(page.getByText("0 份作品")).toBeVisible();
+  expect(calls).toEqual(expect.arrayContaining(["GET /api/groups", "GET /api/v2/image-themes", "GET /api/v2/templates/image_prompt/default", "GET /api/v2/runs"]));
 });
 
 test("AI 图片默认筛选上海当天，清空日期后请求全部历史", async ({ page }) => {
@@ -169,17 +168,19 @@ test("AI 图片默认筛选上海当天，清空日期后请求全部历史", as
   await page.goto("/#/images");
 
   await expect.poll(() => calls.filter((call) => call.startsWith("RUN_QUERY ")).length).toBeGreaterThan(0);
-  expect(calls.find((call) => call.startsWith("RUN_QUERY "))).toBe(`RUN_QUERY ?run_date=${today}`);
+  expect(calls.find((call) => call.startsWith("RUN_QUERY "))).toBe(`RUN_QUERY ?run_date=${today}&include_files=true`);
 
   const before = calls.filter((call) => call.startsWith("RUN_QUERY ")).length;
   await page.getByLabel("运行日期").fill("");
   await expect.poll(() => calls.filter((call) => call.startsWith("RUN_QUERY ")).length).toBeGreaterThan(before);
-  expect(calls.filter((call) => call.startsWith("RUN_QUERY ")).at(-1)).toBe("RUN_QUERY ");
+  expect(calls.filter((call) => call.startsWith("RUN_QUERY ")).at(-1)).toBe("RUN_QUERY ?include_files=true");
 });
 
 test("选题评分默认显示前两项，可展开收起并在切换运行时重置", async ({ page }) => {
   await installFakeApi(page);
   await page.goto("/#/images");
+  await page.getByRole("button", { name: "打开日报 测试群", exact: true }).click();
+  await page.getByRole("tab", { name: "图片与提示词", exact: true }).click();
 
   const scoreCard = page.getByRole("region", { name: "选题评分" });
   await expect(scoreCard.locator(".ai-images-topic-score-item")).toHaveCount(2);
@@ -197,8 +198,9 @@ test("选题评分默认显示前两项，可展开收起并在切换运行时�
   await expect(scoreCard.locator(".ai-images-topic-score-item")).toHaveCount(2);
 
   await scoreCard.getByRole("button", { name: "展开其余 2 个" }).click();
-  await page.locator(".ai-images-run-item").filter({ hasText: secondaryGroup }).click();
-  await expect(page.getByRole("heading", { name: `${secondaryGroup} · ${runDate}` })).toBeVisible();
+  await page.getByRole("button", { name: `打开日报 ${secondaryGroup}`, exact: true }).click();
+  await page.getByRole("tab", { name: "图片与提示词", exact: true }).click();
+  await expect(page.getByRole("region", { name: "日报处理工作区" }).getByRole("heading", { name: secondaryGroup, exact: true })).toBeVisible();
   await expect(scoreCard.locator(".ai-images-topic-score-item")).toHaveCount(2);
   await expect(scoreCard.getByText(`${secondaryGroup}候选 1`, { exact: true })).toBeVisible();
   await expect(scoreCard.getByRole("button", { name: "展开其余 2 个" })).toHaveAttribute("aria-expanded", "false");
@@ -206,7 +208,7 @@ test("选题评分默认显示前两项，可展开收起并在切换运行时�
 
 test("风格中心保留草稿，取消不应用，确认后一次提交", async ({ page }) => {
   const calls = await installFakeApi(page);
-  await page.goto("/#/images");
+  await page.goto("/#/images?view=styles");
 
   await page.getByRole("button", { name: /AI 自由发挥/ }).first().click();
   const dialog = page.getByRole("dialog", { name: "风格中心" });
@@ -235,7 +237,7 @@ test("风格中心保留草稿，取消不应用，确认后一次提交", async
 
 test("多群风格支持全选清空、部分失败并只重试失败群", async ({ page }) => {
   const calls = await installFakeApi(page);
-  await page.goto("/#/images");
+  await page.goto("/#/images?view=styles");
 
   await page.getByRole("button", { name: /AI 自由发挥/ }).first().click();
   const dialog = page.getByRole("dialog", { name: "风格中心" });
@@ -270,7 +272,7 @@ test("多群风格支持全选清空、部分失败并只重试失败群", async
 test("风格中心在窄屏保持可滚动且操作按钮可达", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await installFakeApi(page);
-  await page.goto("/#/images");
+  await page.goto("/#/images?view=styles");
 
   await page.getByRole("button", { name: /AI 自由发挥/ }).first().click();
   const dialog = page.getByRole("dialog", { name: "风格中心" });
@@ -289,7 +291,7 @@ test("风格中心在窄屏保持可滚动且操作按钮可达", async ({ page 
 test("风格中心桌面尺寸保持在 960×720 内", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await installFakeApi(page);
-  await page.goto("/#/images");
+  await page.goto("/#/images?view=styles");
 
   await page.getByRole("button", { name: /AI 自由发挥/ }).first().click();
   const box = await page.getByRole("dialog", { name: "风格中心" }).boundingBox();

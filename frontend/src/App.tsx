@@ -8,7 +8,6 @@ import { m, MotionProvider, PageTransition } from "./components/motion";
 const Dashboard = lazy(() => import("./pages/v2/Dashboard"));
 const Groups = lazy(() => import("./pages/v2/Groups"));
 const GroupDetail = lazy(() => import("./pages/v2/GroupDetail"));
-const Ranking = lazy(() => import("./pages/v2/Ranking"));
 const AIImages = lazy(() => import("./pages/v2/AIImages"));
 const ChatRecords = lazy(() => import("./pages/v2/ChatRecords"));
 const Tasks = lazy(() => import("./pages/v2/Tasks"));
@@ -55,18 +54,16 @@ export default function App() {
         {page === "dashboard" && <Dashboard />}
         {page === "groups" && route.groupMode === "list" && (
           <div className="combined-workspace">
-            <WorkspaceTabs active="groups" onNavigate={navigate} tabs={[{ key: "groups", label: "群聊配置" }, { key: "tasks", label: "任务中心" }]} />
             <Groups />
           </div>
         )}
         {page === "groups" && route.groupMode !== "list" && (
           <GroupDetail groupId={route.groupId} invalidGroupId={route.invalidGroupId} />
         )}
-        {page === "ranking" && <Ranking />}
+        {page === "ranking" && <AIImages />}
         {page === "images" && <AIImages />}
         {page === "tasks" && (
           <div className="combined-workspace">
-            <WorkspaceTabs active="tasks" onNavigate={navigate} tabs={[{ key: "groups", label: "群聊配置" }, { key: "tasks", label: "任务中心" }]} />
             <Tasks />
           </div>
         )}
