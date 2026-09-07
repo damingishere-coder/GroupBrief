@@ -110,7 +110,6 @@ export default function AppShell({
           <div className="studio-local">
             <Desktop size={16} />
             <span>本地工作空间</span>
-            <span className="studio-avatar">GB</span>
           </div>
         </header>
         <main id="main-content" className="studio-content" tabIndex={-1}>
