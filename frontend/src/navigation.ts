@@ -73,7 +73,7 @@ export function routeFromLocation(): AppRoute {
   return { page, groupMode: "detail", invalidGroupId: groupSegment };
 }
 
-export function navigateToHash(path: string, preserveDate = true): void {
+export function navigateToHash(path: string, preserveDate = true, replace = false): void {
   let normalized = path.startsWith("#/") ? path : `#/${path.replace(/^\/+/, "")}`;
   const [base, search] = normalized.split("?");
   const params = new URLSearchParams(search);
@@ -83,7 +83,10 @@ export function navigateToHash(path: string, preserveDate = true): void {
   if (window.location.hash === normalized) return;
   if (!allowNavigation(normalized)) return;
   acceptedHash = normalized;
-  window.location.hash = normalized;
+  if (replace) {
+    window.history.replaceState({}, "", normalized);
+    window.dispatchEvent(new HashChangeEvent("hashchange"));
+  } else window.location.hash = normalized;
 }
 
 let leaveGuard: (() => boolean) | undefined;
@@ -109,11 +112,11 @@ export function registerLeaveGuard(guard: () => boolean) {
 export function workspaceQuery() {
   return new URLSearchParams(window.location.hash.split("?")[1] || "");
 }
-export function updateWorkspaceQuery(values: Record<string, string | null>) {
+export function updateWorkspaceQuery(values: Record<string, string | null>, replace = false) {
   const params = workspaceQuery();
   Object.entries(values).forEach(([key, value]) => value === null ? params.delete(key) : params.set(key, value));
   const query = params.toString();
-  navigateToHash(`${window.location.hash.split("?")[0] || "#/dashboard"}${query ? `?${query}` : ""}`, false);
+  navigateToHash(`${window.location.hash.split("?")[0] || "#/dashboard"}${query ? `?${query}` : ""}`, false, replace);
 }
 export function useWorkspaceQuery() {
   const [query, setQuery] = useState(workspaceQuery);

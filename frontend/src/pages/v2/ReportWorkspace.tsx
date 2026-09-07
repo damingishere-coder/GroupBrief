@@ -49,9 +49,11 @@ export interface ReportTarget {
 export default function ReportWorkspace({
   target,
   onUpdated,
+  closable = true,
 }: {
   target: ReportTarget;
   onUpdated?: () => void;
+  closable?: boolean;
 }) {
   const { msg, toast } = useToast();
   const catalogs = useAIImageCatalogs(toast);
@@ -132,7 +134,7 @@ export default function ReportWorkspace({
             {model.runDirty && <span className="draft-indicator">未保存</span>}
           </p>
         </div>
-        <Button
+        {closable && <Button
           tone="ghost"
           aria-label="关闭日报工作区"
           disabled={mutating}
@@ -147,7 +149,7 @@ export default function ReportWorkspace({
           }
         >
           <X size={21} />
-        </Button>
+        </Button>}
       </header>
       <div className="report-tabs" role="tablist" aria-label="日报内容">
         {[

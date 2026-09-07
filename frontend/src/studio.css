@@ -840,6 +840,10 @@ summary {
   overflow-y: auto;
   padding: 1px 3px 4px 1px;
 }
+.studio-report-list > .gallery-card {
+  flex-shrink: 0;
+  margin-bottom: 0;
+}
 .studio-report-list .studio-report-card:hover {
   transform: none;
 }

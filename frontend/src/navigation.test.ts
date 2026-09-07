@@ -63,6 +63,14 @@ describe("hash navigation", () => {
     expect(routeFromLocation()).toEqual({ page: "settings" });
   });
 
+  it("can normalize the initial report without an extra history entry", () => {
+    window.history.replaceState({}, "", "#/images?date=2026-09-06");
+    const length = window.history.length;
+    updateWorkspaceQuery({ group: "test", panel: "preview" }, true);
+    expect(window.history.length).toBe(length);
+    expect(window.location.hash).toContain("group=test");
+  });
+
   it("keeps the product navigation in the requested order", () => {
     expect(NAVIGATION.map((item) => item.label)).toEqual([
       "今日工作台",

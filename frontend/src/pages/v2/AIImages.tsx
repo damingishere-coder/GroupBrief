@@ -1,5 +1,5 @@
 import { useReportScroll } from "../../components/useReportScroll";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   ArrowUpRight,
   ArrowsClockwise,
@@ -61,16 +61,19 @@ export default function AIImages() {
     query.get("view") ||
     (window.location.hash.split("?")[0] === "#/templates"
       ? "templates"
-      : "gallery");
+      : "workspace");
+  const isGallery = view === "gallery";
+  const collectionDate = query.get("collectionDate") ?? date;
   const group = query.get("group");
-  const rememberScroll = useReportScroll(group);
+  const rememberScroll = useReportScroll(group, false);
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState("all");
   const runs = useFetch(
-    () => getRuns(date || undefined, { includeFiles: true }),
-    [date],
+    async () => ({ ...(await getRuns(collectionDate || undefined, { includeFiles: true })), collectionDate }),
+    [collectionDate],
   );
-  const filtered = (runs.data?.runs || []).filter(
+  const currentRuns = runs.data?.collectionDate === collectionDate ? runs.data.runs : [];
+  const filtered = currentRuns.filter(
     (run) =>
       run.group_name
         .toLocaleLowerCase()
@@ -78,24 +81,41 @@ export default function AIImages() {
       (status === "all" || run.status === status),
   );
   const open = (run: V2Run) => {
+    if (!isGallery && group === run.group_name && date === run.run_date) return;
     rememberScroll();
     updateWorkspaceQuery({
       group: run.group_name,
       date: run.run_date,
       panel: "preview",
-      collectionDate: query.get("collectionDate") ?? date,
+      collectionDate,
+      view: "workspace",
+    });
+  };
+  useEffect(() => {
+    if (view !== "workspace" || group || runs.loading || runs.error || !currentRuns.length) return;
+    const first = currentRuns[0];
+    // Normalize the initial selection without adding a Back-button history step.
+    updateWorkspaceQuery({ group: first.group_name, date: first.run_date, collectionDate, panel: "preview" }, true);
+  }, [view, group, runs.loading, runs.error, runs.data, collectionDate]);
+  const changeView = (next: string) => {
+    if (next === view) return;
+    updateWorkspaceQuery({
+      view: next, group: null, panel: null, date: collectionDate, collectionDate: null,
     });
   };
   return (
     <div className="studio-gallery ai-images-page">
       <PageHeader
-        title="把每一天的精彩，收进作品集"
-        description="浏览群聊日报、打磨图片风格，让灵感拥有自己的样子。"
+        title={isGallery ? "作品画廊" : "日报作品"}
+        description={isGallery ? "按图片浏览历史日报，打开作品即可进入处理工作区。" : "在左侧切换日报，直接预览内容、编辑提示词和查看运行情况。"}
         actions={
+          <>
+          <Button tone="ghost" onClick={() => changeView(isGallery ? "workspace" : "gallery")}><SquaresFour size={17} />{isGallery ? "返回日报工作区" : "浏览画廊"}</Button>
           <Button tone="secondary" onClick={runs.reload} busy={runs.loading}>
             <ArrowsClockwise size={17} />
             刷新作品
           </Button>
+          </>
         }
       />
       <div
@@ -104,7 +124,7 @@ export default function AIImages() {
         aria-label="日报作品区域"
       >
         {[
-          ["gallery", "日报画廊", SquaresFour],
+          ["workspace", "日报工作区", ImageSquare],
           ["styles", "图片风格", Palette],
           ["templates", "排行榜模板", TextT],
         ].map(([key, label, Icon]) => {
@@ -116,13 +136,7 @@ export default function AIImages() {
               role="tab"
               aria-selected={view === key}
               className={view === key ? "active" : ""}
-              onClick={() =>
-                updateWorkspaceQuery({
-                  view: String(key),
-                  group: null,
-                  panel: null,
-                })
-              }
+              onClick={() => changeView(String(key))}
             >
               <Glyph size={20} />
               <span>{String(label)}</span>
@@ -142,10 +156,11 @@ export default function AIImages() {
               <input
                 type="date"
                 aria-label="运行日期"
-                value={date}
+                value={collectionDate}
                 onChange={(event) =>
                   updateWorkspaceQuery({
                     date: event.target.value,
+                    collectionDate: null,
                     group: null,
                     panel: null,
                   })
@@ -155,7 +170,7 @@ export default function AIImages() {
             <Button
               tone="ghost"
               onClick={() =>
-                updateWorkspaceQuery({ date: "", group: null, panel: null })
+                updateWorkspaceQuery({ date: "", collectionDate: null, group: null, panel: null })
               }
             >
               所有日期
@@ -188,10 +203,10 @@ export default function AIImages() {
             </div>
           )}
           <div
-            className={`studio-reports-layout ${group ? "with-workspace" : ""}`}
+            className={`studio-reports-layout ${!isGallery ? "with-workspace" : ""}`}
           >
             <div
-              className={group ? "studio-report-list" : "studio-gallery-grid"}
+              className={isGallery ? "studio-gallery-grid" : "studio-report-list"}
             >
               {runs.loading ? (
                 <LoadingState label="正在整理日报作品…" />
@@ -203,7 +218,7 @@ export default function AIImages() {
               ) : (
                 filtered.map((run) => (
                   <article
-                    className={`gallery-card ${group === run.group_name ? "selected" : ""}`}
+                    className={`gallery-card ${group === run.group_name && date === run.run_date ? "selected" : ""}`}
                     key={`${run.group_name}:${run.run_date}`}
                   >
                     <button
@@ -211,7 +226,7 @@ export default function AIImages() {
                       onClick={() => open(run)}
                       aria-label={`打开日报 ${run.group_name}`}
                     >
-                      {!group && (
+                      {isGallery && (
                         <div className="gallery-cover">
                           <Cover run={run} />
                           <span>{run.run_date}</span>
@@ -232,10 +247,11 @@ export default function AIImages() {
                 ))
               )}
             </div>
-            {group && (
+            {!isGallery && group && (
               <ReportWorkspace
                 key={`${date}:${group}`}
                 target={{ groupName: group, runDate: date }}
+                closable={false}
               />
             )}
           </div>

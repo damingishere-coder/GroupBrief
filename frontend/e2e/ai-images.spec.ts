@@ -142,16 +142,30 @@ async function installFakeApi(page: Page) {
   return calls;
 }
 
-test("日报作品画廊打开同群工作区并读取真实接口契约", async ({ page }) => {
+test("日报作品默认直达工作区，画廊保留为次级入口", async ({ page }) => {
   const calls = await installFakeApi(page);
   await page.goto("/#/images");
-  await expect(page.getByRole("heading", { name: "把每一天的精彩，收进作品集" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "日报作品", exact: true })).toBeVisible();
+  await expect(page.getByRole("region", { name: "日报处理工作区" })).toBeVisible();
+  await expect(page.locator(".gallery-cover")).toHaveCount(0);
   await expect(page.getByText("2 份作品")).toBeVisible();
   await page.getByRole("button", { name: "打开日报 测试群", exact: true }).click();
   await page.getByRole("tab", { name: "图片与提示词", exact: true }).click();
   await expect(page.getByRole("region", { name: "日报处理工作区" }).getByRole("heading", { name: "测试群", exact: true })).toBeVisible();
   await expect(page.locator(".ai-images-run-editor textarea")).toHaveValue("测试 Prompt");
-  await page.getByRole("button", { name: "关闭日报工作区" }).click();
+  await page.locator(".ai-images-run-editor textarea").fill("未保存的内容");
+  page.once("dialog", dialog => dialog.dismiss());
+  await page.getByRole("button", { name: "浏览画廊", exact: true }).click();
+  await expect(page.locator(".ai-images-run-editor textarea")).toHaveValue("未保存的内容");
+  await page.locator(".ai-images-run-editor textarea").fill("测试 Prompt");
+  await page.getByRole("button", { name: "浏览画廊", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "作品画廊", exact: true })).toBeVisible();
+  await expect(page.getByRole("region", { name: "日报处理工作区" })).toHaveCount(0);
+  await expect(page.locator(".gallery-cover")).toHaveCount(2);
+  await page.getByRole("button", { name: `打开日报 ${secondaryGroup}`, exact: true }).click();
+  await expect(page.getByRole("region", { name: "日报处理工作区" }).getByRole("heading", { name: secondaryGroup, exact: true })).toBeVisible();
+  await page.reload();
+  await expect(page.getByRole("region", { name: "日报处理工作区" }).getByRole("heading", { name: secondaryGroup, exact: true })).toBeVisible();
   await page.getByLabel("搜索作品群名").fill("不存在");
   await expect(page.getByText("0 份作品")).toBeVisible();
   expect(calls).toEqual(expect.arrayContaining(["GET /api/groups", "GET /api/v2/image-themes", "GET /api/v2/templates/image_prompt/default", "GET /api/v2/runs"]));
@@ -173,7 +187,8 @@ test("AI 图片默认筛选上海当天，清空日期后请求全部历史", as
   const before = calls.filter((call) => call.startsWith("RUN_QUERY ")).length;
   await page.getByLabel("运行日期").fill("");
   await expect.poll(() => calls.filter((call) => call.startsWith("RUN_QUERY ")).length).toBeGreaterThan(before);
-  expect(calls.filter((call) => call.startsWith("RUN_QUERY ")).at(-1)).toBe("RUN_QUERY ?include_files=true");
+  await expect.poll(() => calls.filter((call) => call.startsWith("RUN_QUERY ")).slice(before)).toContain("RUN_QUERY ?include_files=true");
+  await expect(page.getByLabel("运行日期")).toHaveValue("");
 });
 
 test("选题评分默认显示前两项，可展开收起并在切换运行时重置", async ({ page }) => {
@@ -298,4 +313,24 @@ test("风格中心桌面尺寸保持在 960×720 内", async ({ page }) => {
   expect(box).not.toBeNull();
   expect(box!.width).toBeLessThanOrEqual(960);
   expect(box!.height).toBeLessThanOrEqual(720);
+});
+
+
+test("默认工作区的自动选择不阻挡浏览器后退", async ({ page }) => {
+  await installFakeApi(page);
+  await page.goto("/#/images?view=gallery");
+  await page.getByRole("button", { name: "返回日报工作区", exact: true }).click();
+  await expect(page.getByRole("region", { name: "日报处理工作区" })).toBeVisible();
+  await page.goBack();
+  await expect(page.getByRole("heading", { name: "作品画廊", exact: true })).toBeVisible();
+  await expect(page.getByRole("region", { name: "日报处理工作区" })).toHaveCount(0);
+});
+
+test("当前日期无日报时保持空状态，不读取其他群详情", async ({ page }) => {
+  const calls = await installFakeApi(page);
+  await page.route("**/api/v2/runs?*", route => json(route, { runs: [], total: 0 }));
+  await page.goto("/#/images?date=2026-01-01");
+  await expect(page.getByText("这里还没有匹配的作品")).toBeVisible();
+  await expect(page.getByRole("region", { name: "日报处理工作区" })).toHaveCount(0);
+  expect(calls.some(call => /^GET \/api\/v2\/runs\//.test(call))).toBe(false);
 });
