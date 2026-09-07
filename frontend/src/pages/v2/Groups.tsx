@@ -232,8 +232,8 @@ export default function Groups() {
   return (
     <div className="groups-page">
       <PageHeader
-        title="让每个群，都有专属日报"
-        description="管理你的群聊、生成节奏与发送方式。"
+        title="群聊管理"
+        description="查看每个群的生成规则、发送时间和启用状态。"
         actions={
           <Button onClick={() => navigateToHash("/groups/new")}>
             <Plus size={18} aria-hidden="true" />
@@ -320,12 +320,29 @@ export default function Groups() {
           action={groups.length === 0 ? <Button onClick={() => navigateToHash("/groups/new")}><Plus size={17} aria-hidden="true" />新增群</Button> : undefined}
         />
       ) : (
-        <div className="studio-group-grid">
+        <div className="studio-group-list" aria-label="群聊配置列表">
           {filteredGroups.map(group => <article className="studio-group-card" key={group.id}>
-            <header><span className="group-monogram">{Array.from(group.wechat_group_name || group.display_name)[0]}</span><div><h2>{group.wechat_group_name || group.display_name}</h2><small>GROUP / {String(group.id).padStart(2, "0")}</small></div><ToggleSwitch checked={group.enabled} label={`${group.display_name} 启用状态`} busy={toggleBusy === `${group.id}:enabled`} onChange={() => toggle(group, "enabled")} /></header>
-            <dl><div><dt>生成规则</dt><dd>{SCHEDULE_LABELS[group.schedule_rule || "daily_previous_day"] || group.schedule_rule}</dd></div><div><dt>发送批次</dt><dd>{group.send_time || "08:30"}</dd></div><div><dt>AI 图片</dt><dd><ToggleSwitch checked={group.image_enabled} label={`${group.display_name} AI 图片开关`} busy={toggleBusy === `${group.id}:image_enabled`} onChange={() => toggle(group, "image_enabled")} /></dd></div><div><dt>发送目标</dt><dd>{group.effective_send_target || "未设置"}</dd></div></dl>
-            <details><summary>绑定与模板信息</summary><p>归档名称：{group.display_name}</p><p>微信 ID：{group.wechat_group_id}</p><p>排行模板：{group.ranking_template || "default"} · Prompt：{group.image_prompt_template || "default"}</p><p>更新于 {formatDateTime(group.updated_at)}</p></details>
-            <footer><Button tone="secondary" onClick={() => navigateToHash(`/groups/${group.id}`)} aria-label={`编辑 ${group.display_name}`}><PencilSimple size={15} />编辑配置</Button><Button tone="ghost" onClick={() => testRead(group)} busy={testBusy === group.id} title="测试读取" aria-label={`测试读取 ${group.display_name}`}><Flask size={16} /></Button><Button tone="ghost" onClick={() => setDeleteTarget(group)} title="移入回收站" aria-label={`删除 ${group.display_name}`}><Trash size={16} /></Button></footer>
+            <header>
+              <span className="group-monogram" aria-hidden="true">{Array.from(group.wechat_group_name || group.display_name)[0]}</span>
+              <div>
+                <h2>{group.wechat_group_name || group.display_name}</h2>
+                <ToggleSwitch checked={group.enabled} label={`${group.display_name} 启用状态`} busy={toggleBusy === `${group.id}:enabled`} onChange={() => toggle(group, "enabled")} />
+              </div>
+            </header>
+            <dl>
+              <div><dt>生成规则</dt><dd>{SCHEDULE_LABELS[group.schedule_rule || "daily_previous_day"] || group.schedule_rule}</dd></div>
+              <div><dt>发送时间</dt><dd className="group-send-time">{group.send_time || "08:30"}</dd></div>
+              <div><dt>AI 图片</dt><dd><ToggleSwitch checked={group.image_enabled} label={`${group.display_name} AI 图片开关`} busy={toggleBusy === `${group.id}:image_enabled`} onChange={() => toggle(group, "image_enabled")} /></dd></div>
+            </dl>
+            <footer>
+              <Button tone="secondary" onClick={() => navigateToHash(`/groups/${group.id}`)} aria-label={`编辑 ${group.display_name}`}><PencilSimple size={18} />编辑配置</Button>
+              <Button tone="ghost" onClick={() => testRead(group)} busy={testBusy === group.id} aria-label={`测试读取 ${group.display_name}`}><Flask size={18} />测试读取</Button>
+              <Button tone="ghost" onClick={() => setDeleteTarget(group)} title="移入回收站" aria-label={`删除 ${group.display_name}`}><Trash size={18} /></Button>
+            </footer>
+            <div className="group-row-secondary">
+              <p><span>发送至</span>{group.effective_send_target || "未设置"}</p>
+              <details><summary>绑定与模板信息</summary><p>归档名称：{group.display_name}</p><p>微信 ID：{group.wechat_group_id}</p><p>排行模板：{group.ranking_template || "default"} · Prompt：{group.image_prompt_template || "default"}</p><p>更新于 {formatDateTime(group.updated_at)}</p></details>
+            </div>
             {testResults[group.id] && <TestResult result={testResults[group.id]} />}
           </article>)}
         </div>
