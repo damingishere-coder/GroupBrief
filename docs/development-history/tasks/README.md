@@ -1,0 +1,25 @@
+# 历史任务与审计记录
+
+本目录收纳原根目录的 21 份历史任务与审计文件，保留原内容供追溯。文中的命令、根目录相对路径、部署状态和待办描述均属于记录当时，不应直接当作当前操作指南。当前使用、升级和发布请看[文档中心](../../README.md)。
+
+- [AI 图片风格中心、多群同步与当天筛选任务](GROUPBRIEF_AI_IMAGE_STYLE_BATCH_TASK.md)
+- [GroupBrief 每日前一日规则修复与 2026-08-29 补跑任务](GROUPBRIEF_DAILY_PREVIOUS_DAY_RECOVERY_TASK.md)
+- [GroupBrief 总览实时任务节点与日志窗口任务](GROUPBRIEF_DASHBOARD_RUNTIME_WINDOWS_TASK.md)
+- [GroupBrief Eason 排行榜与图片事实修复任务](GROUPBRIEF_EASON_RANKING_IMAGE_FIX_TASK.md)
+- [GroupBrief 定点调度重构任务](GROUPBRIEF_FIXED_DAILY_SCHEDULER_TASK.md)
+- [群报图片尺寸规则放宽任务](GROUPBRIEF_FLEXIBLE_IMAGE_DIMENSIONS_TASK.md)
+- [米游3.2 与 Eason 群报生图恢复任务](GROUPBRIEF_GROUP27_28_IMAGE_RECOVERY_TASK.md)
+- [GroupBrief 图片自动化恢复任务](GROUPBRIEF_IMAGE_AUTOMATION_RECOVERY_TASK.md)
+- [GroupBrief 六群顺序生图恢复任务](GROUPBRIEF_IMAGE_QUEUE_RECOVERY_TASK.md)
+- [茶馆 Level 3 诊断图禁发任务](GROUPBRIEF_L3_DIAGNOSTIC_FALLBACK_GUARD_TASK.md)
+- [GroupBrief 自用可靠闭环与每周洞察实施任务](GROUPBRIEF_NEXT_STAGE_TASK.md)
+- [GroupBrief PR #1 CI 合并任务](GROUPBRIEF_PR1_CI_MERGE_TASK.md)
+- [排行榜成员名称稳定性修复任务](GROUPBRIEF_RANKING_MEMBER_NAME_STABILITY_TASK.md)
+- [GroupBrief 无人值守稳定性审计报告](GROUPBRIEF_RELIABILITY_AUDIT.md)
+- [GroupBrief 无人值守稳定性整改任务](GROUPBRIEF_RELIABILITY_REMEDIATION_TASK.md)
+- [GroupBrief 六群排行榜与生图规则统一任务](GROUPBRIEF_SIX_GROUP_RANKING_SYNC_TASK.md)
+- [群报说话人归属契约修复任务](GROUPBRIEF_SPEAKER_ATTRIBUTION_CONTRACT_TASK.md)
+- [GroupBrief 每日微信发送稳定性修复任务](GROUPBRIEF_WECHAT_DAILY_SEND_HARDENING_TASK.md)
+- [GroupBrief 微信群聊搜索验证修复任务](GROUPBRIEF_WECHAT_UIA_SEARCH_FIX_TASK.md)
+- [图片日期数字误判永久修复与 2026-09-04 恢复任务](IMAGE_LEADING_ZERO_RECOVERY_TASK.md)
+- [GroupBrief V1 全面工程体检](PROJECT_AUDIT.md)
