@@ -322,3 +322,44 @@ for (const width of [1280, 1440, 1920]) {
     await expect(page.getByLabel("运行日期")).toHaveValue(runDate);
   });
 }
+
+// Public documentation captures are opt-in and use only the intercepted demo API.
+test("capture public 2.0 screenshots", async ({ page }) => {
+  test.skip(process.env.GROUPBRIEF_CAPTURE_DOCS !== "1", "仅更新公开截图时运行");
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.clock.setFixedTime(new Date("2026-08-25T08:00:00+08:00"));
+  const calls = await installFakeApi(page);
+  const { readFileSync } = await import("node:fs");
+  const demoImage = `data:image/svg+xml;base64,${readFileSync("../assets/brand/demo-report.svg").toString("base64")}`;
+  const demoRun = { group_id: 7, group_name: "灵感交流室", run_date: runDate, status: "READY_TO_SEND", updated_at: "2026-08-25 08:00:00", image_delivery_eligible: true, send_hold: false, files: ["ranking.json", "ranking.txt", "daily_image.png"] };
+  await page.route("**/api/groups", route => json(route, [{ id: 7, display_name: "灵感交流室", wechat_send_enabled: false }]));
+  await page.route("**/api/v2/runs**", route => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/v2/runs") return json(route, { runs: [demoRun], total: 1 });
+    if (/\/api\/v2\/runs\/[^/]+\/[^/]+$/.test(path)) return json(route, { run: demoRun, files: demoRun.files });
+    return route.fallback();
+  });
+  await page.route("**/api/v2/dashboard*", route => json(route, {
+    ...dashboard,
+    enabled_groups: 3,
+    counts: { pending: 0, generated: 3, sent: 0, failed: 0, held: 0 },
+    cards: ["灵感交流室", "设计与生活", "一起学编程"].map((name, index) => ({
+      ...dashboard.cards[0], group_id: 7 + index, group_name: name,
+      message_count: [128, 86, 64][index], speaker_count: [18, 12, 9][index],
+      wechat_send_enabled: false, image_enabled: true, image_url: demoImage, image_status: "success",
+      ranking_preview: [{ rank: 1, name: "小林", count: 28 }, { rank: 2, name: "阿橙", count: 23 }, { rank: 3, name: "晴天", count: 17 }],
+    })),
+  }));
+  await page.route("**/daily_image.png*", route => route.fulfill({ contentType: "image/svg+xml", body: readFileSync("../assets/brand/demo-report.svg") }));
+  await page.route("**/ranking.json*", route => json(route, { message_count: 128, speaker_count: 18, top_speakers: [{ rank: 1, name: "小林", count: 28 }, { rank: 2, name: "阿橙", count: 23 }, { rank: 3, name: "晴天", count: 17 }] }));
+  await page.goto(`/#/dashboard?date=${runDate}`);
+  await expect(page.locator(".studio-report-card")).toHaveCount(3);
+  await page.evaluate(() => document.fonts.ready);
+  await page.screenshot({ path: "../assets/screenshots/dashboard.png", fullPage: true, animations: "disabled" });
+  await page.getByRole("button", { name: "打开日报 灵感交流室", exact: true }).click();
+  await expect(page.getByRole("button", { name: "立即生成", exact: true })).toBeVisible();
+  await expect(page.getByRole("img", { name: /日报/ }).last()).toBeVisible();
+  await page.evaluate(() => window.scrollTo(0, 320));
+  await page.screenshot({ path: "../assets/screenshots/report-workspace.png", fullPage: false, animations: "disabled" });
+  expect(calls.filter(call => call.path.includes("/pipeline/"))).toEqual([]);
+});

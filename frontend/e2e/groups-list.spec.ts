@@ -18,6 +18,10 @@ for (const width of [1920, 1280, 820, 390]) {
     await page.goto("/#/groups");
     const cards = page.locator(".studio-group-card");
     await expect(cards).toHaveCount(2);
+    if (process.env.GROUPBRIEF_CAPTURE_DOCS === "1" && width === 1280) {
+      await page.evaluate(() => document.fonts.ready);
+      await page.screenshot({ path: "../assets/screenshots/group-management.png", fullPage: true, animations: "disabled" });
+    }
     await expect(cards.first().getByText("08:30", { exact: true })).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
     await page.getByRole("tab", { name: "已停用", exact: true }).click();

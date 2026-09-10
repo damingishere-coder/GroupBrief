@@ -5,7 +5,7 @@ title GroupBrief
 cd /d "%~dp0"
 
 echo ============================================
-echo   GroupBrief v1.0.0
+echo   GroupBrief v2.0.0
 echo ============================================
 
 where python >nul 2>nul

@@ -16,6 +16,7 @@ from app.config.settings import Settings, get_settings
 from app.db import repository as repo
 from app.db.models import ProviderHealth as StoredProviderHealth
 from app.scheduler.calendar_rules import get_report_window
+from app.version import APP_VERSION
 
 router = APIRouter(prefix="/api/system", tags=["system"])
 
@@ -382,7 +383,7 @@ def status(session: Session = Depends(repo.get_session), settings: Settings = De
 
     groups = repo.list_groups(session, only_enabled=True)
     return {
-        "version": "1.0.0",
+        "version": APP_VERSION,
         "status": "running",
         "scheduler_owner": settings.scheduler_owner,
         "scheduler_active": get_scheduler() is not None,

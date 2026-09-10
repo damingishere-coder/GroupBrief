@@ -10,14 +10,14 @@
 
 ## 本地开发
 
-环境要求：Windows 10/11、Python 3.10+、Node.js 18+。
+环境要求：Windows 10/11、Python 3.10+、Node.js 22+。
 
 ```powershell
 git clone https://github.com/damingishere-coder/GroupBrief.git
 Set-Location GroupBrief
 Copy-Item .env.example .env
 python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt -r requirements-dev.txt -c requirements.lock
 Set-Location frontend
 npm ci
 npm run build
@@ -36,7 +36,9 @@ Set-Location ..
 .\.venv\Scripts\python.exe -m pytest tests -q
 .\.venv\Scripts\python.exe -m compileall -q app scripts tests
 Set-Location frontend
+npm test
 npm run build
+npm run test:e2e
 Set-Location ..
 docker compose config --quiet
 git diff --check
@@ -50,3 +52,7 @@ git diff --check
 - 说明用户可见变化、验证命令和结果。
 - 对外部环境未验证的能力明确写出限制，不用测试结果替代真实端到端验收。
 - 不重写他人的提交历史，不提交运行产物、数据库、日志、`.env` 或开发过程备份。
+
+## 分支与版本
+
+以 `master` 为唯一主线，在短期 `codex/*` 分支开发，经 PR 与 CI 合并。正式版本使用标签与 Release 固定，已完成任务按证据清理，详见[分支与发布约定](docs/BRANCHING.md)。

@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="350" viewBox="0 0 1280 350" role="img" aria-labelledby="title desc">
+  <title id="title">GroupBrief 2.0 群报</title>
+  <desc id="desc">让每一次讨论，都有回响。Windows 本地群报工作台。</desc>
+  <defs>
+    <linearGradient id="bg" x2="1" y2="1"><stop stop-color="#27204e"/><stop offset=".55" stop-color="#6652c9"/><stop offset="1" stop-color="#9180ec"/></linearGradient>
+    <linearGradient id="card" x2="1" y2="1"><stop stop-color="#fff" stop-opacity=".24"/><stop offset="1" stop-color="#fff" stop-opacity=".07"/></linearGradient>
+  </defs>
+  <rect width="1280" height="350" rx="28" fill="url(#bg)"/>
+  <circle cx="1170" cy="50" r="215" fill="#fff" opacity=".045"/>
+  <circle cx="1160" cy="50" r="275" fill="none" stroke="#fff" opacity=".08"/>
+  <g font-family="Segoe UI,Microsoft YaHei,sans-serif">
+    <rect x="66" y="48" width="133" height="30" rx="15" fill="#fff" fill-opacity=".13"/>
+    <text x="132" y="69" text-anchor="middle" font-size="13" letter-spacing="2" fill="#e9e1ff">MEET 2.0</text>
+    <text x="62" y="157" font-size="63" font-weight="700" letter-spacing="-2" fill="#fff">GroupBrief</text>
+    <text x="440" y="155" font-size="38" font-weight="600" fill="#e7ddff">群报</text>
+    <text x="66" y="215" font-size="27" fill="#fff">让每一次讨论，都有回响。</text>
+    <text x="66" y="279" font-size="15" letter-spacing="2" fill="#d3c9f5">LOCAL WORKSPACE / DAILY STORIES</text>
+    <g transform="translate(816 55) rotate(7 150 120)">
+      <rect width="318" height="240" rx="23" fill="url(#card)" stroke="#fff" stroke-opacity=".3"/>
+      <rect x="24" y="26" width="40" height="40" rx="12" fill="#ffb29b"/>
+      <path d="M44 34l4 12 12 4-12 4-4 12-4-12-12-4 12-4z" fill="#764e90"/>
+      <text x="79" y="53" fill="#fff" font-size="20" font-weight="600">DAILY BRIEF</text>
+      <rect x="25" y="92" width="265" height="8" rx="4" fill="#fff" opacity=".65"/>
+      <rect x="25" y="114" width="218" height="8" rx="4" fill="#fff" opacity=".3"/>
+      <rect x="25" y="136" width="240" height="8" rx="4" fill="#fff" opacity=".3"/>
+      <rect x="25" y="177" width="92" height="33" rx="16" fill="#ffb29b"/>
+      <text x="71" y="199" text-anchor="middle" font-size="13" fill="#51355b">每 日 精 彩</text>
+      <circle cx="258" cy="192" r="15" fill="#fff" opacity=".15"/>
+      <path d="M251 192h14m-5-5 5 5-5 5" fill="none" stroke="#fff" stroke-width="2"/>
+    </g>
+  </g>
+</svg>

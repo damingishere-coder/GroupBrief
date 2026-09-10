@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="600" viewBox="0 0 960 600">
+  <rect width="960" height="600" rx="28" fill="#f5f0ff"/>
+  <circle cx="920" cy="45" r="200" fill="#e1d7fb"/>
+  <circle cx="885" cy="35" r="115" fill="#d5c5f7"/>
+  <g font-family="Microsoft YaHei,Segoe UI,sans-serif">
+    <text x="52" y="70" fill="#795dc2" font-size="20" letter-spacing="4">GROUPBRIEF / DAILY STORIES</text>
+    <text x="50" y="156" fill="#312451" font-size="55" font-weight="700">把灵感，留在今天。</text>
+    <text x="54" y="203" fill="#6e5d87" font-size="22">一份关于交流、创造和共同成长的记录</text>
+    <rect x="50" y="250" width="545" height="220" rx="22" fill="#fff"/>
+    <text x="78" y="297" fill="#795dc2" font-size="19">今日话题</text>
+    <text x="78" y="347" fill="#312451" font-size="28" font-weight="600">从一个想法，到第一件作品</text>
+    <text x="78" y="392" fill="#6e5d87" font-size="21">分享小小的进展，也收藏彼此的经验。</text>
+    <text x="78" y="430" fill="#6e5d87" font-size="21">让每一次讨论，都成为明天的起点。</text>
+    <rect x="617" y="250" width="293" height="220" rx="22" fill="#ffddca"/>
+    <text x="649" y="298" fill="#925a46" font-size="19">来自群聊的温度</text>
+    <text x="645" y="362" fill="#653e3b" font-size="36" font-weight="700">一起分享</text>
+    <text x="645" y="414" fill="#653e3b" font-size="36" font-weight="700">一起成长</text>
+    <text x="52" y="537" fill="#8b7b9f" font-size="18">匿名演示内容 · 非真实聊天 · 非 AI 生成结果</text>
+    <text x="907" y="537" text-anchor="end" fill="#795dc2" font-size="18">2026 / 08 / 25</text>
+  </g>
+</svg>
