@@ -1,3 +1,4 @@
+import { useWorkspaceQuery, updateWorkspaceQuery } from "../../navigation";
 import { useEffect, useMemo, useState } from "react";
 import {
   ArrowsClockwise,
@@ -131,7 +132,9 @@ function initials(name: string): string {
 export default function ChatRecords() {
   const { msg, toast } = useToast();
   const [entries, setEntries] = useState<RunEntry[]>([]);
-  const [dateFilter, setDateFilter] = useState(shanghaiDateInputValue);
+  const queryParams = useWorkspaceQuery();
+  const dateFilter = queryParams.get("date") ?? shanghaiDateInputValue();
+  const setDateFilter = (date: string) => updateWorkspaceQuery({ date, group: null });
   const [groupFilter, setGroupFilter] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
   const [selectedKey, setSelectedKey] = useState("");

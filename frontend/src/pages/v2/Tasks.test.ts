@@ -37,7 +37,9 @@ describe("send unknown resolution confirmations", () => {
         onCancel: vi.fn(),
       }));
     });
-    const markup = container.innerHTML;
+    const dialog = document.body.querySelector('[role="dialog"]');
+    const markup = dialog?.outerHTML || "";
+    expect(container.querySelector('[role="dialog"]')).toBeNull();
 
     expect(markup).toContain('role="dialog"');
     expect(markup).toContain(title);

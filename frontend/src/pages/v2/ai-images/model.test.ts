@@ -1,3 +1,4 @@
+import { imageDeliveryAllowed } from "./model";
 import { describe, expect, it } from "vitest";
 
 import type { GroupV2, V2Run } from "../../../api";
@@ -52,5 +53,24 @@ describe("AI 图片视图模型", () => {
     expect(regenerationPollDelay("running", 1)).toBe(4000);
     expect(regenerationPollDelay("running", 10)).toBe(30_000);
     expect(regenerationPollDelay("fallback_queued", 1)).toBe(10_000);
+  });
+});
+
+
+describe("raw run image delivery provenance", () => {
+  const ready = { group_name: "test", run_date: "2026-09-06", status: "IMAGE_READY" };
+  it("accepts generated images without requiring an enriched API field", () => {
+    expect(imageDeliveryAllowed({ ...ready, image_fallback_level: 1, image_status: "success" })).toBe(true);
+  });
+  it.each([
+    { image_delivery_eligible: false },
+    { image_fallback_level: 3 },
+    { image_fallback_level: "invalid" },
+    { image_variant: " Pillow " },
+    { image_status: "failed" },
+    { image_job: { status: "ambiguous_result" } },
+    { recovery_status: "existing_output_reused", last_error_summary: "fallback=L3" },
+  ])("blocks diagnostic or uncertain image provenance: %j", (metadata) => {
+    expect(imageDeliveryAllowed({ ...ready, ...metadata })).toBe(false);
   });
 });

@@ -1,3 +1,4 @@
+import { createPortal } from "react-dom";
 import { CircleNotch, Info, X } from "@phosphor-icons/react";
 import { forwardRef, useEffect, useRef, type ButtonHTMLAttributes, type ReactNode } from "react";
 import { AnimatePresence, m, MOTION_EASE } from "../motion";
@@ -54,7 +55,7 @@ export function LoadingState({ label = "正在加载…" }: { label?: string }) 
 }
 
 export function Toast({ message, onClose }: { message: string; onClose?: () => void }) {
-  return (
+  return createPortal(
     <AnimatePresence>
       {message && (
         <m.div className="ui-toast" role="status" aria-live="polite" initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 8 }} transition={{ duration: 0.18, ease: MOTION_EASE }}>
@@ -62,11 +63,11 @@ export function Toast({ message, onClose }: { message: string; onClose?: () => v
           {onClose && <button type="button" aria-label="关闭提示" onClick={onClose}><X size={16} /></button>}
         </m.div>
       )}
-    </AnimatePresence>
+    </AnimatePresence>, document.body
   );
 }
 
-export function ConfirmDialog({ open, title, description, confirmLabel = "确认", busy = false, onConfirm, onCancel }: { open: boolean; title: string; description: string; confirmLabel?: string; busy?: boolean; onConfirm: () => void; onCancel: () => void }) {
+export function ConfirmDialog({ open, title, description, children, confirmLabel = "确认", busy = false, onConfirm, onCancel }: { open: boolean; title: string; description: string; children?: ReactNode; confirmLabel?: string; busy?: boolean; onConfirm: () => void; onCancel: () => void }) {
   const cancelRef = useRef<HTMLButtonElement>(null);
   const returnFocusRef = useRef<HTMLElement | null>(null);
   const busyRef = useRef(busy);
@@ -109,13 +110,14 @@ export function ConfirmDialog({ open, title, description, confirmLabel = "确认
       window.requestAnimationFrame(() => returnFocusRef.current?.focus());
     };
   }, [open]);
-  return (
+  return createPortal(
     <AnimatePresence>
       {open && (
         <m.div className="ui-dialog-backdrop" role="presentation" onMouseDown={() => !busy && onCancel()} initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.18 }}>
           <m.section className="ui-dialog" role="dialog" aria-modal="true" aria-labelledby="confirm-dialog-title" onMouseDown={(event) => event.stopPropagation()} initial={{ opacity: 0, scale: 0.985, y: 5 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.985, y: 4 }} transition={{ duration: 0.2, ease: MOTION_EASE }}>
             <h2 id="confirm-dialog-title">{title}</h2>
             <p>{description}</p>
+            {children}
             <div className="ui-dialog-actions">
               <Button ref={cancelRef} tone="secondary" onClick={onCancel} disabled={busy}>取消</Button>
               <Button tone="danger" onClick={onConfirm} busy={busy}>{busy ? "处理中…" : confirmLabel}</Button>
@@ -123,6 +125,6 @@ export function ConfirmDialog({ open, title, description, confirmLabel = "确认
           </m.section>
         </m.div>
       )}
-    </AnimatePresence>
+    </AnimatePresence>, document.body
   );
 }
