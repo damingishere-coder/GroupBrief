@@ -101,6 +101,7 @@ async function json(route: Route, body: unknown) {
 
 async function installFakeApi(page: Page, held = false, diagnostic = false) {
   const calls: { path: string; search: string; body: unknown }[] = [];
+  let promptContent = "原始提示词";
   await page.route("**/api/**", async (route) => {
     const request = route.request();
     const url = new URL(request.url());
@@ -153,6 +154,18 @@ async function installFakeApi(page: Page, held = false, diagnostic = false) {
         },
       });
     }
+    if (path === "/api/groups") return json(route, [{ id: 7, display_name: "测试群", wechat_send_enabled: true }]);
+    if (path === "/api/v2/image-themes") return json(route, { themes: [] });
+    if (path === "/api/v2/templates/image_prompt/default") return json(route, { name: "default", content: "默认提示词" });
+    if (path === "/api/system/ready") return json(route, { ok: true, checks: { wechat_sender: { ok: true } } });
+    if (path === "/api/v2/system/recovery") return json(route, { incomplete: [], integrity: [] });
+    if (path === "/api/v2/recovery/backlog") return json(route, { items: [], expected_version: "test" });
+    const run = { group_id: 7, group_name: "测试群", run_date: runDate, status: diagnostic ? "SENT" : "READY_TO_SEND", updated_at: "2026-08-25 08:00:00", image_delivery_eligible: !diagnostic, send_hold: held, files: ["ranking.json", "ranking.txt"] };
+    if (path === "/api/v2/runs") return json(route, { runs: [run], total: 1 });
+    if (/\/api\/v2\/runs\/[^/]+\/[^/]+\/prompt$/.test(path)) { if (request.method() === "PUT") promptContent = (body as { content: string }).content; return json(route, { content: promptContent, revision: "test", image_theme: "ai_free" }); }
+    if (/\/api\/v2\/runs\/[^/]+\/[^/]+$/.test(path)) return json(route, { run, files: run.files });
+    if (path.endsWith("/ranking.json")) return json(route, { top_speakers: [{ rank: 1, name: "成员甲", count: 12 }], message_count: 12, speaker_count: 1 });
+    if (path.endsWith("/ranking.txt")) return route.fulfill({ status: 200, body: "成员甲 12 条消息" });
     if (path === "/api/v2/pipeline/generate") {
       return json(route, {
         results: [{ status: "ready_to_send", group_name: "测试群", detail: "Fake 生成完成" }],
@@ -171,17 +184,16 @@ async function installFakeApi(page: Page, held = false, diagnostic = false) {
 
 test("Dashboard 生成与发送确认只命中 Fake API", async ({ page }) => {
   const calls = await installFakeApi(page);
-  await page.goto("/#/dashboard");
+  await page.goto(`/#/dashboard?date=${runDate}`);
 
-  await expect(page.getByRole("heading", { name: "运行总览" })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "任务节点" })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "运行日志" })).toBeVisible();
-  await expect(page.getByText("00:15 每日任务已启动")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "今天的精彩，从这里开始" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "运行日志" })).toHaveCount(0);
   await expect(page.getByText("测试群", { exact: true }).first()).toBeVisible();
   await page.getByLabel("运行日期").fill(runDate);
+  await page.getByRole("button", { name: "打开日报 测试群", exact: true }).click();
 
   await page.getByRole("button", { name: "立即生成" }).click();
-  await expect(page.getByText("生成完成：Fake 生成完成")).toBeVisible();
+  await expect(page.getByText("生成状态：Fake 生成完成")).toBeVisible();
   const generate = calls.find((call) => call.path === "/api/v2/pipeline/generate");
   expect(generate?.body).toEqual({ group_id: 7, force: true, run_date: runDate });
 
@@ -196,10 +208,10 @@ test("Dashboard 生成与发送确认只命中 Fake API", async ({ page }) => {
   expect(send?.body).toEqual({ group_id: 7, run_date: runDate });
 });
 
-test("Dashboard 日志筛选和窄屏布局只使用只读 Fake API", async ({ page }) => {
+test("运行任务承接日志筛选并只使用只读 Fake API", async ({ page }) => {
   const calls = await installFakeApi(page);
-  await page.setViewportSize({ width: 390, height: 844 });
-  await page.goto("/#/dashboard");
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.goto("/#/tasks");
 
   await expect(page.getByRole("heading", { name: "任务节点" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "运行日志" })).toBeVisible();
@@ -215,8 +227,9 @@ test("Dashboard 日志筛选和窄屏布局只使用只读 Fake API", async ({ p
 
 test("Dashboard 人工核对只写状态，不调用发送接口", async ({ page }) => {
   const calls = await installFakeApi(page, true);
-  await page.goto("/#/dashboard");
+  await page.goto(`/#/dashboard?date=${runDate}`);
   await page.getByLabel("运行日期").fill(runDate);
+  await page.getByRole("button", { name: "打开日报 测试群", exact: true }).click();
 
   const resolveButton = page.getByRole("button", { name: "人工核对" });
   await resolveButton.click();
@@ -241,9 +254,9 @@ test("Dashboard 人工核对只写状态，不调用发送接口", async ({ page
 
 test("Dashboard 对历史已发送诊断图同时显示失败事实且不提供重发", async ({ page }) => {
   const calls = await installFakeApi(page, false, true);
-  await page.goto("/#/dashboard");
+  await page.goto(`/#/dashboard?date=${runDate}`);
 
-  await expect(page.getByText("已发送", { exact: true })).toBeVisible();
+  await expect(page.locator(".studio-report-card").getByText("已发送", { exact: true })).toBeVisible();
   await expect(page.getByText("图片生成失败（已发送）", { exact: true })).toBeVisible();
   await expect(page.getByText("诊断图不可发送", { exact: true })).toBeVisible();
   const image = page.getByAltText("测试群 不可发送诊断图");
@@ -258,8 +271,95 @@ test.describe("减少动态效果", () => {
   test.use({ reducedMotion: "reduce" });
   test("页面转场降级后仍到达最终可访问状态", async ({ page }) => {
     await installFakeApi(page);
-    await page.goto("/#/dashboard");
-    await expect(page.getByRole("heading", { name: "运行总览" })).toBeVisible();
-    await expect(page.getByText("成员甲")).toBeVisible();
+    await page.goto(`/#/dashboard?date=${runDate}`);
+    await expect(page.getByRole("heading", { name: "今天的精彩，从这里开始" })).toBeVisible();
+    await page.getByRole("button", { name: "打开日报 测试群", exact: true }).click();
+    await expect(page.getByText("成员甲", { exact: true })).toBeVisible();
   });
+});
+
+
+test("日报草稿保护跨页、关闭与浏览器后退，保存不触发发送", async ({ page }) => {
+  const calls = await installFakeApi(page);
+  await page.goto(`/#/dashboard?date=${runDate}`);
+  await page.getByRole("button", { name: "打开日报 测试群", exact: true }).click();
+  await page.getByRole("tab", { name: "图片与提示词", exact: true }).click();
+  const editor = page.locator(".ai-images-run-editor textarea");
+  await editor.fill("修改后的日报提示词");
+  await expect(page.getByRole("button", { name: "立即发送", exact: true })).toBeDisabled();
+  page.once("dialog", dialog => dialog.dismiss());
+  await page.getByRole("button", { name: "关闭日报工作区" }).click();
+  await expect(editor).toHaveValue("修改后的日报提示词");
+  page.once("dialog", dialog => dialog.dismiss());
+  await page.getByRole("button", { name: "群聊管理 03" }).click();
+  await expect(editor).toHaveValue("修改后的日报提示词");
+  await page.goBack(); // Previous tab inside the same report: preserve the draft without asking.
+  await expect(page.getByRole("tab", { name: "日报预览", exact: true })).toHaveAttribute("aria-selected", "true");
+  page.once("dialog", dialog => dialog.dismiss());
+  await page.goBack(); // Leaving the report is rejected.
+  await expect(page.getByRole("region", { name: "日报处理工作区" })).toBeVisible();
+  await page.getByRole("tab", { name: "图片与提示词", exact: true }).click();
+  await expect(editor).toHaveValue("修改后的日报提示词");
+  await page.getByRole("button", { name: "保存 Prompt", exact: true }).click();
+  await expect(page.getByText("当天 Prompt 已保存；尚未重新生图，也不会自动发送")).toBeVisible();
+  await expect(editor).toHaveValue("修改后的日报提示词");
+  expect(calls.some(call => call.path === "/api/v2/pipeline/send")).toBe(false);
+  expect(calls.some(call => call.path.endsWith("/prompt") && (call.body as { expected_revision?: string })?.expected_revision === "test")).toBe(true);
+});
+
+for (const width of [1280, 1440, 1920]) {
+  test(`桌面 ${width} 首页和日报工作区没有横向溢出`, async ({ page }) => {
+    await installFakeApi(page);
+    await page.setViewportSize({ width, height: 900 });
+    await page.goto(`/#/dashboard?date=${runDate}`);
+    await expect(page.getByRole("heading", { name: "今天的精彩，从这里开始" })).toBeVisible();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+    await page.getByRole("button", { name: "打开日报 测试群", exact: true }).click();
+    await expect(page.getByRole("region", { name: "日报处理工作区" })).toBeVisible();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+    await page.reload();
+    await expect(page.getByRole("region", { name: "日报处理工作区" })).toBeVisible();
+    await expect(page.getByLabel("运行日期")).toHaveValue(runDate);
+  });
+}
+
+// Public documentation captures are opt-in and use only the intercepted demo API.
+test("capture public 2.0 screenshots", async ({ page }) => {
+  test.skip(process.env.GROUPBRIEF_CAPTURE_DOCS !== "1", "仅更新公开截图时运行");
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.clock.setFixedTime(new Date("2026-08-25T08:00:00+08:00"));
+  const calls = await installFakeApi(page);
+  const { readFileSync } = await import("node:fs");
+  const demoImage = `data:image/svg+xml;base64,${readFileSync("../assets/brand/demo-report.svg").toString("base64")}`;
+  const demoRun = { group_id: 7, group_name: "灵感交流室", run_date: runDate, status: "READY_TO_SEND", updated_at: "2026-08-25 08:00:00", image_delivery_eligible: true, send_hold: false, files: ["ranking.json", "ranking.txt", "daily_image.png"] };
+  await page.route("**/api/groups", route => json(route, [{ id: 7, display_name: "灵感交流室", wechat_send_enabled: false }]));
+  await page.route("**/api/v2/runs**", route => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/v2/runs") return json(route, { runs: [demoRun], total: 1 });
+    if (/\/api\/v2\/runs\/[^/]+\/[^/]+$/.test(path)) return json(route, { run: demoRun, files: demoRun.files });
+    return route.fallback();
+  });
+  await page.route("**/api/v2/dashboard*", route => json(route, {
+    ...dashboard,
+    enabled_groups: 3,
+    counts: { pending: 0, generated: 3, sent: 0, failed: 0, held: 0 },
+    cards: ["灵感交流室", "设计与生活", "一起学编程"].map((name, index) => ({
+      ...dashboard.cards[0], group_id: 7 + index, group_name: name,
+      message_count: [128, 86, 64][index], speaker_count: [18, 12, 9][index],
+      wechat_send_enabled: false, image_enabled: true, image_url: demoImage, image_status: "success",
+      ranking_preview: [{ rank: 1, name: "小林", count: 28 }, { rank: 2, name: "阿橙", count: 23 }, { rank: 3, name: "晴天", count: 17 }],
+    })),
+  }));
+  await page.route("**/daily_image.png*", route => route.fulfill({ contentType: "image/svg+xml", body: readFileSync("../assets/brand/demo-report.svg") }));
+  await page.route("**/ranking.json*", route => json(route, { message_count: 128, speaker_count: 18, top_speakers: [{ rank: 1, name: "小林", count: 28 }, { rank: 2, name: "阿橙", count: 23 }, { rank: 3, name: "晴天", count: 17 }] }));
+  await page.goto(`/#/dashboard?date=${runDate}`);
+  await expect(page.locator(".studio-report-card")).toHaveCount(3);
+  await page.evaluate(() => document.fonts.ready);
+  await page.screenshot({ path: "../assets/screenshots/dashboard.png", fullPage: true, animations: "disabled" });
+  await page.getByRole("button", { name: "打开日报 灵感交流室", exact: true }).click();
+  await expect(page.getByRole("button", { name: "立即生成", exact: true })).toBeVisible();
+  await expect(page.getByRole("img", { name: /日报/ }).last()).toBeVisible();
+  await page.evaluate(() => window.scrollTo(0, 320));
+  await page.screenshot({ path: "../assets/screenshots/report-workspace.png", fullPage: false, animations: "disabled" });
+  expect(calls.filter(call => call.path.includes("/pipeline/"))).toEqual([]);
 });

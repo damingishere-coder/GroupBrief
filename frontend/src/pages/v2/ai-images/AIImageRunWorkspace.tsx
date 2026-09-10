@@ -30,6 +30,8 @@ import type { ToastFn } from "./useAIImageCatalogs";
 import type { AIImageRunsModel } from "./useAIImageRuns";
 
 interface AIImageRunWorkspaceProps {
+  embedded?: boolean;
+  sendAllowed?: boolean;
   model: AIImageRunsModel;
   themes: ImageThemeOption[];
   catalogLoading: boolean;
@@ -38,6 +40,8 @@ interface AIImageRunWorkspaceProps {
 }
 
 export function AIImageRunWorkspace({
+  embedded = false,
+  sendAllowed = true,
   model,
   themes,
   catalogLoading,
@@ -91,6 +95,7 @@ export function AIImageRunWorkspace({
     claimCandidate,
     confirmSend,
   } = model;
+  const editingLocked = runSaving || rebuildingPrompt || regenerating || restoring || sending || ["queued", "running", "fallback_queued"].includes(regenStatus);
   const [topicsExpanded, setTopicsExpanded] = useState(false);
   const topicScoreListId = useId();
   const topicSelection = runPrompt?.topic_selection;
@@ -104,18 +109,18 @@ export function AIImageRunWorkspace({
 
   return (
     <>
-      <section className="ai-images-filter-bar" aria-label="运行记录筛选">
+      {!embedded && <section className="ai-images-filter-bar" aria-label="运行记录筛选">
         <label><span>运行日期</span><input type="date" value={dateFilter} onChange={(event) => setDateFilter(event.target.value)} /></label>
         <label><span>群名</span><input type="search" value={groupFilter} placeholder="搜索群名" onChange={(event) => setGroupFilter(event.target.value)} /></label>
         <label><span>状态</span><select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}><option value="all">全部状态</option>{Object.entries(STATUS_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
         <span className="ai-images-filter-count">显示 {filteredRuns.length} / {runs.length} 条</span>
-      </section>
+      </section>}
 
-      <div className="ai-images-workspace">
-        <section className="ai-images-run-list">
+      <div className={`ai-images-workspace ${embedded ? "is-embedded" : ""}`}>
+        {!embedded && <section className="ai-images-run-list">
           <div className="ai-images-section-head"><div><h2>运行记录</h2><p>选择群和日期编辑当次内容。</p></div><ImageSquare size={22} /></div>
           {!filteredRuns.length ? <EmptyState title="没有匹配记录" description="请调整筛选条件，或先运行一次日报。" /> : <div className="ai-images-run-items">{filteredRuns.map((run) => <button type="button" key={runKey(run)} className={`ai-images-run-item ${selectedKey === runKey(run) ? "is-active" : ""}`} onClick={() => setSelectedKey(runKey(run))}><div><strong>{run.group_name}</strong><span>{run.run_date} · {formatDateTime(run.updated_at)}</span></div><StatusPill status={run.status} /></button>)}</div>}
-        </section>
+        </section>}
 
         <section className="ai-images-detail-panel">
           <ContentSwap swapKey={detailLoading ? "loading" : detail ? selectedKey : "empty"}>
@@ -134,11 +139,11 @@ export function AIImageRunWorkspace({
                 </article>)}</div>
               </section>}
               {runPrompt && <div className="ai-images-run-theme-row">
-                <ImageThemePicker themes={themes} value={runTheme} customValue={runCustom} onConfirm={(key, custom) => applyRunTheme(key, custom)} label="替换当天大主题" loading={catalogLoading} error={themesError} disabled={runSaving} />
+                <ImageThemePicker themes={themes} value={runTheme} customValue={runCustom} onConfirm={(key, custom) => applyRunTheme(key, custom)} label="替换当天大主题" loading={catalogLoading} error={themesError} disabled={editingLocked} />
               </div>}
               <div className="ai-images-asset-grid">
                 <div className="ai-images-preview-card"><div className="ai-images-content-heading"><h3>日报图片</h3><span>daily_image.png</span></div>{detail.files.includes("daily_image.png") && !imageLoadError ? <ImagePreviewTrigger src={currentImageSrc} alt="真实日报图片" imageClassName="ai-images-real-image" className="ai-images-real-image-trigger" onError={() => { setImageLoadError(true); setImageViewerOpen(false); }} onOpen={() => setImageViewerOpen(true)} /> : <EmptyState title="尚无可读图片" description="重新生图失败时会保留旧图；没有旧图时这里保持为空。" />}</div>
-                {runPrompt ? <div className="ai-images-prompt-card ai-images-run-editor"><div className="ai-images-content-heading"><h3>当天生图 Prompt</h3><Button tone="ghost" className="ui-button-compact" onClick={() => copyText(runDraft, toast)} disabled={!runDraft}><Copy size={16} />复制</Button></div><textarea value={runDraft} onChange={(event) => setRunDraft(event.target.value)} /><div className="ai-images-run-actions"><Button tone="ghost" onClick={restoreCurrentPrompt} busy={restoring} disabled={!runPrompt.has_original}><ArrowCounterClockwise size={16} />恢复最初版本</Button><Button tone="secondary" onClick={saveCurrentPrompt} busy={runSaving} disabled={!runDirty}><FloppyDisk size={16} />保存 Prompt</Button><Button tone="secondary" onClick={rebuildCurrentPrompt} busy={rebuildingPrompt} disabled={runDirty || ["queued", "running"].includes(regenStatus)}><Sparkle size={16} />复用已校验选题重建 Prompt</Button><Button tone="primary" onClick={regenerate} busy={regenerating} disabled={runDirty || rebuildingPrompt || ["queued", "running"].includes(regenStatus)}><Play size={16} />按现有 Prompt 重画</Button></div></div> : <div className="ai-images-prompt-card"><EmptyState title="当天 Prompt 加载失败" description={runPromptError || "当天 Prompt 暂不可用；日报图片和运行状态仍可查看。"} action={<Button tone="secondary" onClick={() => setDetailReloadVersion((current) => current + 1)}>重新读取 Prompt</Button>} /></div>}
+                {runPrompt ? <div className="ai-images-prompt-card ai-images-run-editor"><div className="ai-images-content-heading"><h3>当天生图 Prompt</h3><Button tone="ghost" className="ui-button-compact" onClick={() => copyText(runDraft, toast)} disabled={!runDraft}><Copy size={16} />复制</Button></div><textarea aria-label="当天生图提示词" disabled={editingLocked} value={runDraft} onChange={(event) => setRunDraft(event.target.value)} /><div className="ai-images-run-actions"><Button tone="ghost" onClick={restoreCurrentPrompt} busy={restoring} disabled={editingLocked || !runPrompt.has_original}><ArrowCounterClockwise size={16} />恢复最初版本</Button><Button tone="secondary" onClick={saveCurrentPrompt} busy={runSaving} disabled={editingLocked || !runDirty}><FloppyDisk size={16} />保存 Prompt</Button><Button tone="secondary" onClick={rebuildCurrentPrompt} busy={rebuildingPrompt} disabled={runDirty || ["queued", "running", "fallback_queued", "ambiguous_result", "result_unknown"].includes(regenStatus)}><Sparkle size={16} />复用已校验选题重建 Prompt</Button><Button tone="primary" onClick={regenerate} busy={regenerating} disabled={runDirty || rebuildingPrompt || ["queued", "running", "fallback_queued", "ambiguous_result", "result_unknown"].includes(regenStatus)}><Play size={16} />按现有 Prompt 重画</Button></div></div> : <div className="ai-images-prompt-card"><EmptyState title="当天 Prompt 加载失败" description={runPromptError || "当天 Prompt 暂不可用；日报图片和运行状态仍可查看。"} action={<Button tone="secondary" onClick={() => setDetailReloadVersion((current) => current + 1)}>重新读取 Prompt</Button>} /></div>}
               </div>
               {["ambiguous_result", "result_unknown"].includes(regenStatus) && <section className="ai-images-candidate-card" aria-label="生图候选人工认领">
                 <div className="ai-images-content-heading"><div><h3>本次任务候选图片</h3><span>只显示当前 job_id、群和日期都匹配的候选</span></div></div>
@@ -149,7 +154,7 @@ export function AIImageRunWorkspace({
                   <Button tone="secondary" busy={candidateClaiming === candidate.candidate_id} disabled={Boolean(candidateClaiming)} onClick={() => { void claimCandidate(candidate); }}>确认归属并替换</Button>
                 </article>)}</div>}
               </section>}
-              {regenStatus === "ready_for_review" && <div className="ai-images-review-actions"><WarningCircle size={18} /><span>请先检查新图。只有再次确认后才会发送文字和图片。</span><Button tone="primary" onClick={() => setSendConfirmOpen(true)}><PaperPlaneTilt size={17} />发送 / 重新发送</Button></div>}
+              {regenStatus === "ready_for_review" && <div className="ai-images-review-actions"><WarningCircle size={18} /><span>请先检查新图。只有再次确认后才会发送文字和图片。</span><Button tone="primary" disabled={!sendAllowed || runDirty} onClick={() => setSendConfirmOpen(true)}><PaperPlaneTilt size={17} />发送 / 重新发送</Button></div>}
               {detail.run.error && <div className="ai-images-run-error">主任务错误：{String(detail.run.error)}</div>}
             </>
             )}

@@ -1,3 +1,6 @@
+import { RuntimeOverview } from "./RuntimeOverview";
+import { navigateToHash, updateWorkspaceQuery, useWorkspaceQuery } from "../../navigation";
+import { shanghaiDateInputValue } from "../../date";
 import { useEffect, useMemo, useState } from "react";
 import {
   ArrowsClockwise,
@@ -106,8 +109,10 @@ export default function Tasks() {
   const [selectedBacklog, setSelectedBacklog] = useState<Set<string>>(new Set());
   const [confirmingBacklog, setConfirmingBacklog] = useState(false);
   const [showBacklogConfirm, setShowBacklogConfirm] = useState(false);
-  const [dateFilter, setDateFilter] = useState("");
-  const [groupFilter, setGroupFilter] = useState("");
+  const queryParams = useWorkspaceQuery();
+  const dateFilter = queryParams.get("date") || "";
+  const setDateFilter = (date: string) => updateWorkspaceQuery({ date });
+  const [groupFilter, setGroupFilter] = useState(() => queryParams.get("group") || "");
   const [statusFilter, setStatusFilter] = useState("all");
   const [selectedKey, setSelectedKey] = useState("");
   const [loading, setLoading] = useState(true);
@@ -265,10 +270,11 @@ export default function Tasks() {
   return (
     <div className="tasks-page">
       <PageHeader
-        title="任务中心"
+        title="运行任务"
         description="查看真实运行状态、输出完整性与错误；后端未记录阶段事件时不会虚构进度。"
         actions={<><StatusBadge tone={health.loading ? "neutral" : healthy ? "success" : "warning"}>{health.loading ? "健康检查中" : healthy ? "系统健康" : "需要关注"}</StatusBadge><Button tone="ghost" onClick={loadTasks} busy={loading}><ArrowsClockwise size={17} aria-hidden="true" />刷新任务</Button></>}
       />
+      <RuntimeOverview date={dateFilter || shanghaiDateInputValue()} />
 
       <section className="tasks-kpi-grid" aria-label="真实任务统计">
         <div className="tasks-kpi"><ListChecks size={19} aria-hidden="true" /><span>当前任务</span><strong>{totalCount}</strong><small>来自当前筛选日期的 runs</small></div>
@@ -329,7 +335,7 @@ export default function Tasks() {
         <section className="tasks-detail-panel" aria-label="任务详情">
           {!selectedEntry ? <EmptyState title="暂无任务详情" description="当前没有可展示的真实运行任务。" /> : (
             <>
-              <div className="tasks-detail-head"><div><span className="tasks-eyebrow">真实运行状态</span><h2>{selectedEntry.run.group_name} · {selectedEntry.run.run_date}</h2><p><StatusPill status={String(selectedEntry.run.status || "")} /> · 更新时间 {formatDateTime(selectedEntry.run.updated_at)}</p></div></div>
+              <Button tone="secondary" onClick={() => navigateToHash(`images?${new URLSearchParams({ group: selectedEntry.run.group_name, date: selectedEntry.run.run_date })}`)}>打开对应日报 ↗</Button><div className="tasks-detail-head"><div><span className="tasks-eyebrow">真实运行状态</span><h2>{selectedEntry.run.group_name} · {selectedEntry.run.run_date}</h2><p><StatusPill status={String(selectedEntry.run.status || "")} /> · 更新时间 {formatDateTime(selectedEntry.run.updated_at)}</p></div></div>
               <div className="tasks-summary-grid"><div><span>统计周期</span><strong>{selectedEntry.run.period_start || "—"} ~ {selectedEntry.run.period_end || "—"}</strong></div><div><span>消息数</span><strong>{typeof selectedEntry.run.message_count === "number" ? selectedEntry.run.message_count : "—"}</strong></div><div><span>发言人数</span><strong>{typeof selectedEntry.run.speaker_count === "number" ? selectedEntry.run.speaker_count : "—"}</strong></div></div>
               <div className="tasks-detail-note"><Clock size={18} aria-hidden="true" /><span>当前后端未记录阶段事件；页面不显示虚构进度、耗时或事件时间线。</span></div>
               {String(selectedEntry.run.status).toUpperCase() === "PENDING" && selectedEntry.files.length === 0 && !selectedEntry.run.started_at && !selectedEntry.run.finished_at && !selectedEntry.run.updated_at && <div className="tasks-warning"><WarningCircle size={18} aria-hidden="true" /><span>该记录仅有 PENDING 状态，未发现文件或时间证据，不能确认任务已真实创建。</span></div>}

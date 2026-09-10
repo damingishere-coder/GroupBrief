@@ -1,3 +1,4 @@
+import { useUnsavedChanges } from "../../../components/useUnsavedChanges";
 import { useEffect, useMemo, useState } from "react";
 import { CheckCircle, FloppyDisk, MagnifyingGlass, Sparkle, WarningCircle } from "@phosphor-icons/react";
 
@@ -54,6 +55,7 @@ export function ImageStylePanel({
   const [applyCount, setApplyCount] = useState(1);
   const [themeError, setThemeError] = useState("");
   const [saving, setSaving] = useState(false);
+  useUnsavedChanges(themeConfirmed && selectedIds.length > 0, saving);
   const [result, setResult] = useState<BatchImageThemeResponse | null>(null);
 
   useEffect(() => {

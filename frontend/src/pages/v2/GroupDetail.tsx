@@ -1,3 +1,4 @@
+import { useUnsavedChanges } from "../../components/useUnsavedChanges";
 import { useEffect, useState, type ReactNode } from "react";
 import {
   ArrowLeft,
@@ -128,10 +129,12 @@ function Field({
 export default function GroupDetail({ groupId, invalidGroupId }: GroupDetailProps) {
   const { msg, toast } = useToast();
   const [form, setForm] = useState<GroupPayload>({ ...EMPTY_FORM });
+  const [originalForm, setOriginalForm] = useState<GroupPayload>({ ...EMPTY_FORM });
   const [loading, setLoading] = useState(Boolean(groupId));
   const [loadError, setLoadError] = useState("");
   const [saving, setSaving] = useState(false);
   const [executing, setExecuting] = useState(false);
+  const markSaved = useUnsavedChanges(!loading && JSON.stringify(form) !== JSON.stringify(originalForm), saving || executing);
   const [executionDate, setExecutionDate] = useState(todayLocal());
   const [execution, setExecution] = useState<ExecutionState | null>(null);
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -169,6 +172,7 @@ export default function GroupDetail({ groupId, invalidGroupId }: GroupDetailProp
             return;
           }
           setForm(toForm(group));
+          setOriginalForm(toForm(group));
         })
         .catch((error: unknown) => active && setLoadError(String(error)))
         .finally(() => active && setLoading(false));
@@ -267,6 +271,9 @@ export default function GroupDetail({ groupId, invalidGroupId }: GroupDetailProp
     request
       .then((result) => {
         toast("restored" in result && result.restored ? "已恢复原群及历史归档，当前保持停用" : "群配置已保存");
+        setForm(payload);
+        setOriginalForm(payload);
+        markSaved();
         navigateToHash(`/groups/${result.id}`);
       })
       .catch((error: unknown) => toast(`保存失败：${String(error)}`))

@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   ArrowsClockwise,
   Flask,
@@ -232,8 +232,8 @@ export default function Groups() {
   return (
     <div className="groups-page">
       <PageHeader
-        title="群聊配置"
-        description="管理真实微信群绑定、统计规则、生成和发送设置。"
+        title="群聊管理"
+        description="查看每个群的生成规则、发送时间和启用状态。"
         actions={
           <Button onClick={() => navigateToHash("/groups/new")}>
             <Plus size={18} aria-hidden="true" />
@@ -247,7 +247,7 @@ export default function Groups() {
           <div className="groups-section-icon"><LinkSimple size={19} aria-hidden="true" /></div>
           <div>
             <h2>按真实群名搜索并绑定</h2>
-            <p>复用 WeChatDataAnalysis 的群解析能力，避免手动输入错误 ID。</p>
+            <p>输入群名找到真实微信群，再绑定到你的工作空间。</p>
           </div>
         </div>
         <div className="groups-search-row">
@@ -320,82 +320,31 @@ export default function Groups() {
           action={groups.length === 0 ? <Button onClick={() => navigateToHash("/groups/new")}><Plus size={17} aria-hidden="true" />新增群</Button> : undefined}
         />
       ) : (
-        <div className="groups-table-wrap">
-          <table className="groups-table">
-            <caption className="sr-only">群聊配置列表</caption>
-            <thead>
-              <tr>
-                <th>群名称 / 绑定信息</th>
-                <th>启用状态</th>
-                <th>统计规则</th>
-                <th>发送批次</th>
-                <th>排行榜配置</th>
-                <th>AI 图片</th>
-                <th>发送目标</th>
-                <th>最近配置</th>
-                <th>操作</th>
-              </tr>
-            </thead>
-            <tbody>
-              {filteredGroups.map((group) => {
-                const testResult = testResults[group.id];
-                const currentName = group.wechat_group_name || group.display_name || "未命名群";
-                const archiveNameDiffers = Boolean(group.display_name && group.display_name !== currentName);
-                return (
-                  <Fragment key={group.id}>
-                    <tr>
-                      <td data-label="群名称 / 绑定信息">
-                        <div className="groups-name-cell">
-                          <strong>{currentName}</strong>
-                          {archiveNameDiffers && <span>归档名称：{group.display_name}</span>}
-                          {group.wechat_group_id && <small>ID：{group.wechat_group_id}</small>}
-                        </div>
-                      </td>
-                      <td data-label="启用状态">
-                        <ToggleSwitch checked={group.enabled} label={`${group.display_name} 启用状态`} busy={toggleBusy === `${group.id}:enabled`} onChange={() => toggle(group, "enabled")} />
-                      </td>
-                      <td data-label="统计规则"><span className="groups-muted-cell">{SCHEDULE_LABELS[group.schedule_rule || "daily_previous_day"] || group.schedule_rule}</span></td>
-                      <td data-label="发送批次"><strong>{group.send_time || "08:30"}</strong></td>
-                      <td data-label="排行榜配置">
-                        <div className="groups-template-cell">
-                          <strong>{group.ranking_template || "default"}</strong>
-                          <span>Prompt：{group.image_prompt_template || "default"}</span>
-                        </div>
-                      </td>
-                      <td data-label="AI 图片">
-                        <ToggleSwitch checked={group.image_enabled} label={`${group.display_name} AI 图片开关`} busy={toggleBusy === `${group.id}:image_enabled`} onChange={() => toggle(group, "image_enabled")} />
-                      </td>
-                      <td data-label="发送目标">
-                        <div className="groups-target-cell">
-                          <span>{group.effective_send_target || "未设置"}</span>
-                          <small>{group.send_target_mode === "manual" ? "人工覆盖" : "自动跟随"}</small>
-                        </div>
-                      </td>
-                      <td data-label="最近配置"><span className="groups-muted-cell">{formatDateTime(group.updated_at)}</span></td>
-                      <td data-label="操作">
-                        <div className="groups-row-actions">
-                          <Button tone="ghost" className="ui-button-compact groups-action-button" onClick={() => testRead(group)} busy={testBusy === group.id} title="测试读取" aria-label={`测试读取 ${group.display_name}`}>
-                            <Flask size={16} aria-hidden="true" />
-                          </Button>
-                          <Button tone="secondary" className="ui-button-compact groups-action-button" onClick={() => navigateToHash(`/groups/${group.id}`)} title="编辑群配置" aria-label={`编辑 ${group.display_name}`}>
-                            <PencilSimple size={16} aria-hidden="true" />
-                          </Button>
-                          <Button tone="danger" className="ui-button-compact groups-action-button" onClick={() => setDeleteTarget(group)} title="删除群配置" aria-label={`删除 ${group.display_name}`}>
-                            <Trash size={16} aria-hidden="true" />
-                          </Button>
-                        </div>
-                      </td>
-                    </tr>
-                    {testResult && (
-                      <tr className="groups-test-row">
-                        <td colSpan={9}><TestResult result={testResult} /></td>
-                      </tr>
-                    )}
-                  </Fragment>
-                );
-              })}
-            </tbody>
-          </table>
+        <div className="studio-group-list" aria-label="群聊配置列表">
+          {filteredGroups.map(group => <article className="studio-group-card" key={group.id}>
+            <header>
+              <span className="group-monogram" aria-hidden="true">{Array.from(group.wechat_group_name || group.display_name)[0]}</span>
+              <div>
+                <h2>{group.wechat_group_name || group.display_name}</h2>
+                <ToggleSwitch checked={group.enabled} label={`${group.display_name} 启用状态`} busy={toggleBusy === `${group.id}:enabled`} onChange={() => toggle(group, "enabled")} />
+              </div>
+            </header>
+            <dl>
+              <div><dt>生成规则</dt><dd>{SCHEDULE_LABELS[group.schedule_rule || "daily_previous_day"] || group.schedule_rule}</dd></div>
+              <div><dt>发送时间</dt><dd className="group-send-time">{group.send_time || "08:30"}</dd></div>
+              <div><dt>AI 图片</dt><dd><ToggleSwitch checked={group.image_enabled} label={`${group.display_name} AI 图片开关`} busy={toggleBusy === `${group.id}:image_enabled`} onChange={() => toggle(group, "image_enabled")} /></dd></div>
+            </dl>
+            <footer>
+              <Button tone="secondary" onClick={() => navigateToHash(`/groups/${group.id}`)} aria-label={`编辑 ${group.display_name}`}><PencilSimple size={18} />编辑配置</Button>
+              <Button tone="ghost" onClick={() => testRead(group)} busy={testBusy === group.id} aria-label={`测试读取 ${group.display_name}`}><Flask size={18} />测试读取</Button>
+              <Button tone="ghost" onClick={() => setDeleteTarget(group)} title="移入回收站" aria-label={`删除 ${group.display_name}`}><Trash size={18} /></Button>
+            </footer>
+            <div className="group-row-secondary">
+              <p><span>发送至</span>{group.effective_send_target || "未设置"}</p>
+              <details><summary>绑定与模板信息</summary><p>归档名称：{group.display_name}</p><p>微信 ID：{group.wechat_group_id}</p><p>排行模板：{group.ranking_template || "default"} · Prompt：{group.image_prompt_template || "default"}</p><p>更新于 {formatDateTime(group.updated_at)}</p></details>
+            </div>
+            {testResults[group.id] && <TestResult result={testResults[group.id]} />}
+          </article>)}
         </div>
       )}
 

@@ -17,8 +17,7 @@ from app.api import v2_templates, v2_ui
 from app.config.settings import PROJECT_ROOT, get_settings
 from app.core.logging import setup_logging
 from app.db import repository
-
-APP_VERSION = "1.0.0"
+from app.version import APP_VERSION
 
 
 def _should_start_scheduler(settings) -> bool:

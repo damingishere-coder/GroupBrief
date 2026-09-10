@@ -54,6 +54,8 @@ test("390px 窄屏可核对 48 小时外恢复清单且确认接口不包含发�
         results: [{ group_name: "低风险测试群", status: "ready_to_send" }],
       });
     }
+    if (url.pathname === "/api/v2/dashboard") return json(route, { cards: [] });
+    if (url.pathname === "/api/v2/runtime/logs") return json(route, { items: [] });
     throw new Error(`E2E 出现未拦截 API：${request.method()} ${url.pathname}`);
   });
 

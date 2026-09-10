@@ -54,16 +54,15 @@ test("任务中心使用批量 files 且不再逐条请求运行详情", async (
         items: [],
       });
     }
+    if (url.pathname === "/api/v2/dashboard") return json(route, { cards: [] });
+    if (url.pathname === "/api/v2/runtime/logs") return json(route, { items: [] });
     throw new Error(`E2E 出现未拦截 API：${request.method()} ${url.pathname}`);
   });
 
   await page.goto("/#/tasks");
 
-  await expect(page.getByRole("heading", { name: "任务中心" })).toBeVisible();
-  const activeTab = page.getByRole("tab", { name: "任务中心" });
-  await expect(activeTab.locator(".workspace-tab-label")).toHaveText("任务中心");
-  await expect(activeTab.locator(".workspace-tab-label")).toHaveCSS("z-index", "1");
-  await expect(activeTab.locator(".workspace-tab-indicator")).toHaveCSS("z-index", "0");
+  await expect(page.getByRole("heading", { name: "运行任务", level: 1 })).toBeVisible();
+  await expect(page.getByRole("button", { name: "运行任务 04" })).toHaveAttribute("aria-current", "page");
   await expect(page.getByText("messages.json", { exact: true })).toBeVisible();
   expect(calls.filter((call) => call.startsWith("GET /api/v2/runs/"))).toEqual([]);
   expect(calls.some((call) => call.startsWith("GET /api/v2/system/health"))).toBe(false);
@@ -100,6 +99,8 @@ test("聊天记录使用批量 files 且只读取选中的消息文件", async (
         content: "Fake 归档消息",
       }]);
     }
+    if (url.pathname === "/api/v2/dashboard") return json(route, { cards: [] });
+    if (url.pathname === "/api/v2/runtime/logs") return json(route, { items: [] });
     throw new Error(`E2E 出现未拦截 API：${request.method()} ${url.pathname}`);
   });
 

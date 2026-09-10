@@ -1,3 +1,5 @@
+import { useWorkspaceQuery, updateWorkspaceQuery } from "../../navigation";
+import { useUnsavedChanges } from "../../components/useUnsavedChanges";
 import { useEffect, useMemo, useState } from "react";
 import {
   CheckCircle,
@@ -225,11 +227,15 @@ function RecoveryPanel({ recovery, loading, error }: { recovery: RecoveryInfo | 
 
 export default function Settings() {
   const { msg, toast } = useToast();
-  const [tab, setTab] = useState<SettingsTab>("settings");
+  const queryParams = useWorkspaceQuery();
+  const section = queryParams.get("section") || (window.location.hash.split("?")[0] === "#/system" ? "health" : "settings");
+  const tab: SettingsTab = section === "health" || section === "startup" || section === "recovery" ? section : "settings";
+  const setTab = (value: SettingsTab) => updateWorkspaceQuery({ section: value });
   const [values, setValues] = useState<SettingsValues>({});
   const [original, setOriginal] = useState<SettingsValues>({});
   const [settingsLoading, setSettingsLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  useUnsavedChanges(JSON.stringify(values) !== JSON.stringify(original), saving);
   const [settingsError, setSettingsError] = useState("");
   const [health, setHealth] = useState<SystemHealth | null>(null);
   const [startup, setStartup] = useState<StartupCheck["checks"] | null>(null);
@@ -312,10 +318,10 @@ export default function Settings() {
       <div className="settings-secret-banner" id="settings-secret-note"><Key size={19} /><span>API Key、Token、密码等敏感值只显示掩码；留空或保持 <code>******</code> 不会修改现有密钥。</span></div>
 
       <div className="settings-tabs" role="tablist" aria-label="设置中心区域">
-        <button type="button" role="tab" aria-selected={tab === "settings"} className={`settings-tab ${tab === "settings" ? "is-active" : ""}`} onClick={() => setTab("settings")}>{tab === "settings" && <m.span className="settings-tab-indicator" layoutId="settings-tab-indicator" />}<GearSix size={17} />运行设置</button>
-        <button type="button" role="tab" aria-selected={tab === "health"} className={`settings-tab ${tab === "health" ? "is-active" : ""}`} onClick={() => setTab("health")}>{tab === "health" && <m.span className="settings-tab-indicator" layoutId="settings-tab-indicator" />}<Heartbeat size={17} />系统健康</button>
-        <button type="button" role="tab" aria-selected={tab === "startup"} className={`settings-tab ${tab === "startup" ? "is-active" : ""}`} onClick={() => setTab("startup")}>{tab === "startup" && <m.span className="settings-tab-indicator" layoutId="settings-tab-indicator" />}<PlugsConnected size={17} />启动检查</button>
-        <button type="button" role="tab" aria-selected={tab === "recovery"} className={`settings-tab ${tab === "recovery" ? "is-active" : ""}`} onClick={() => setTab("recovery")}>{tab === "recovery" && <m.span className="settings-tab-indicator" layoutId="settings-tab-indicator" />}<WarningCircle size={17} />恢复信息</button>
+        <button type="button" role="tab" aria-selected={tab === "settings"} className={`settings-tab ${tab === "settings" ? "is-active" : ""}`} onClick={() => setTab("settings")}>{tab === "settings" && <m.span className="settings-tab-indicator" layoutId="settings-tab-indicator" />}<GearSix size={17} /><span>运行设置</span></button>
+        <button type="button" role="tab" aria-selected={tab === "health"} className={`settings-tab ${tab === "health" ? "is-active" : ""}`} onClick={() => setTab("health")}>{tab === "health" && <m.span className="settings-tab-indicator" layoutId="settings-tab-indicator" />}<Heartbeat size={17} /><span>系统健康</span></button>
+        <button type="button" role="tab" aria-selected={tab === "startup"} className={`settings-tab ${tab === "startup" ? "is-active" : ""}`} onClick={() => setTab("startup")}>{tab === "startup" && <m.span className="settings-tab-indicator" layoutId="settings-tab-indicator" />}<PlugsConnected size={17} /><span>启动检查</span></button>
+        <button type="button" role="tab" aria-selected={tab === "recovery"} className={`settings-tab ${tab === "recovery" ? "is-active" : ""}`} onClick={() => setTab("recovery")}>{tab === "recovery" && <m.span className="settings-tab-indicator" layoutId="settings-tab-indicator" />}<WarningCircle size={17} /><span>恢复信息</span></button>
       </div>
 
       <ContentSwap swapKey={tab}>

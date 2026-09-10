@@ -120,3 +120,19 @@ export function renderGroupPreview(
     content.replace(/<!--[\s\S]*?-->/g, "").trim(),
   ).trim();
 }
+
+/** Mirror the server image provenance guard for raw run.json detail responses. */
+export function imageDeliveryAllowed(run: V2Run | undefined): boolean {
+  if (!run || run.image_delivery_eligible === false) return false;
+  const normalized = (value: unknown) => String(value || "").trim().toLowerCase();
+  const level = Number(run.image_fallback_level || 0);
+  const job = run.image_job as { status?: unknown } | undefined;
+  if (!Number.isFinite(level) || level >= 3 || normalized(run.image_variant) === "pillow"
+    || ["failed", "diagnostic_fallback"].includes(normalized(run.image_status))
+    || ["failed", "ambiguous_result", "diagnostic_fallback"].includes(normalized(job?.status))) return false;
+  if (normalized(run.image_recovery_status || run.recovery_status) === "existing_output_reused") {
+    const history = [run.last_error_summary, run.image_fallback_reason, run.prompt_fallback_reason].map(normalized).join(" ");
+    if (history.includes("本地诊断图") || history.includes("fallback=l3")) return false;
+  }
+  return true;
+}
