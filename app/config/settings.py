@@ -33,6 +33,9 @@ _ENVIRONMENT_ONLY_FIELDS = frozenset(
         "weekly_generate_time",
         "weekly_send_time",
         "output_root_override",
+        "knowledge_enabled",
+        "knowledge_min_free_bytes",
+        "knowledge_group_ids",
     }
 )
 
@@ -58,6 +61,10 @@ class Settings(BaseSettings):
     database_url: str = "sqlite:///data/groupbrief.db"
     sqlite_busy_timeout_seconds: int = 15
     sqlite_retry_max_attempts: int = 3
+    # Optional knowledge worker; schema is installed only by offline migration.
+    knowledge_enabled: bool = False
+    knowledge_group_ids: str = ""
+    knowledge_min_free_bytes: int = 1024 * 1024 * 1024
 
     # V1 兼容历史读取；正式 V2 使用下方 WeChatDataAnalysis MCP/导出配置。
     history_provider_primary: str = "wechat_data_analysis"
