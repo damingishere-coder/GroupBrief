@@ -83,7 +83,7 @@ from app.ai.topic_selection import (
     selected_topics_json,
 )
 from app.config.settings import Settings, get_settings
-from app.providers.ai.base import ExternalCallResultUnknownError
+from app.providers.ai.base import ExternalCallInvalidResponseError, ExternalCallResultUnknownError
 from app.providers.ai.codex import build_summary_provider
 
 logger = logging.getLogger("groupbrief.ai")
@@ -472,17 +472,17 @@ class DeepSeekImagePromptBuilder:
                     )
                     if last_violations:
                         prompt += "\n上次具体违反：" + "；".join(last_violations[:8])
-                raw_copy = self._prompt_chat(
-                    (POSTER_EDITOR_SYSTEM.replace("日报", "周报").replace("当天", "本周")
-                     if data.report_kind == "weekly" else POSTER_EDITOR_SYSTEM),
-                    prompt,
-                    response_format="json_object",
-                    temperature=0.35,
-                    max_tokens=6000,
-                )
                 final_calls += 1
                 attempt_repairs: list[dict[str, Any]] = []
                 try:
+                    raw_copy = self._prompt_chat(
+                        (POSTER_EDITOR_SYSTEM.replace("日报", "周报").replace("当天", "本周")
+                         if data.report_kind == "weekly" else POSTER_EDITOR_SYSTEM),
+                        prompt,
+                        response_format="json_object",
+                        temperature=0.35,
+                        max_tokens=6000,
+                    )
                     copy = parse_poster_copy(
                         raw_copy,
                         editor_source,
@@ -499,7 +499,7 @@ class DeepSeekImagePromptBuilder:
                         template_text=template_text,
                         report_kind=data.report_kind,
                     )
-                except PosterCopyError as exc:
+                except (PosterCopyError, ExternalCallInvalidResponseError) as exc:
                     last_violations = [str(exc)]
                     logger.warning(
                         "漫画编辑稿校验失败（第 %s/%s 次）：%s",
@@ -744,17 +744,17 @@ class DeepSeekImagePromptBuilder:
             recent_history=history,
             style_layout_locked=style_layout_locked,
         )
-        last_error: LayoutPlanError | None = None
+        last_error: LayoutPlanError | ExternalCallInvalidResponseError | None = None
         for attempt in range(STRUCTURED_ANALYSIS_MAX_ATTEMPTS):
             prompt = user_prompt if attempt == 0 else user_prompt + _LAYOUT_RETRY_INSTRUCTION
-            raw = self._prompt_chat(
-                LAYOUT_DIRECTOR_SYSTEM,
-                prompt,
-                response_format="json_object",
-                temperature=0.4,
-                max_tokens=LAYOUT_DIRECTOR_MAX_TOKENS,
-            )
             try:
+                raw = self._prompt_chat(
+                    LAYOUT_DIRECTOR_SYSTEM,
+                    prompt,
+                    response_format="json_object",
+                    temperature=0.4,
+                    max_tokens=LAYOUT_DIRECTOR_MAX_TOKENS,
+                )
                 return (
                     parse_layout_plan(
                         raw,
@@ -764,7 +764,7 @@ class DeepSeekImagePromptBuilder:
                     ),
                     attempt + 1,
                 )
-            except LayoutPlanError as exc:
+            except (LayoutPlanError, ExternalCallInvalidResponseError) as exc:
                 last_error = exc
                 logger.warning(
                     "版式导演结构化响应校验失败（第 %s/%s 次）：%s",
@@ -792,19 +792,19 @@ class DeepSeekImagePromptBuilder:
     ) -> tuple[list[dict], int]:
         """格式或证据校验失败时完整重做一次，绝不接受截断 JSON。"""
         allowed_ids = tuple(allowed_message_ids)
-        last_error: TopicSelectionError | None = None
+        last_error: TopicSelectionError | ExternalCallInvalidResponseError | None = None
         for attempt in range(STRUCTURED_ANALYSIS_MAX_ATTEMPTS):
             prompt = user_prompt if attempt == 0 else user_prompt + _STRUCTURED_RETRY_INSTRUCTION
-            raw = self._analysis_chat(
-                system,
-                prompt,
-                response_format="json_object",
-                temperature=0.1,
-                max_tokens=TOPIC_CANDIDATE_MAX_TOKENS,
-            )
             try:
+                raw = self._analysis_chat(
+                    system,
+                    prompt,
+                    response_format="json_object",
+                    temperature=0.1,
+                    max_tokens=TOPIC_CANDIDATE_MAX_TOKENS,
+                )
                 return parse_topic_candidates(raw, allowed_ids), attempt + 1
-            except TopicSelectionError as exc:
+            except (TopicSelectionError, ExternalCallInvalidResponseError) as exc:
                 last_error = exc
                 logger.warning("候选主题结构化响应校验失败（第 %s/%s 次）：%s", attempt + 1, STRUCTURED_ANALYSIS_MAX_ATTEMPTS, exc)
         assert last_error is not None
@@ -817,19 +817,19 @@ class DeepSeekImagePromptBuilder:
         chunk: ConversationChunk,
     ) -> tuple[list[dict], int]:
         """片段事件 JSON 失败时完整重做一次，并返回真实模型调用次数。"""
-        last_error: ValueError | None = None
+        last_error: ValueError | ExternalCallInvalidResponseError | None = None
         for attempt in range(STRUCTURED_ANALYSIS_MAX_ATTEMPTS):
             prompt = user_prompt if attempt == 0 else user_prompt + _STRUCTURED_RETRY_INSTRUCTION
-            raw = self._analysis_chat(
-                system,
-                prompt,
-                response_format="json_object",
-                temperature=0.1,
-                max_tokens=EVENT_CARD_MAX_TOKENS,
-            )
             try:
+                raw = self._analysis_chat(
+                    system,
+                    prompt,
+                    response_format="json_object",
+                    temperature=0.1,
+                    max_tokens=EVENT_CARD_MAX_TOKENS,
+                )
                 return parse_event_cards(raw, chunk), attempt + 1
-            except ValueError as exc:
+            except (ValueError, ExternalCallInvalidResponseError) as exc:
                 last_error = exc
                 logger.warning("片段事件结构化响应校验失败（第 %s/%s 次）：%s", attempt + 1, STRUCTURED_ANALYSIS_MAX_ATTEMPTS, exc)
         assert last_error is not None

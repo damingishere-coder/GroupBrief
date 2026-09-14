@@ -8,6 +8,9 @@ import re
 
 import pytest
 
+from app.ai.conversation_segments import ConversationChunk
+from app.providers.ai.base import ExternalCallInvalidResponseError, ExternalCallResultUnknownError
+
 from app.ai.image_themes import STYLE_FAMILY_KEYS
 from app.ai.layouts import LayoutPlan, PanelBeat
 from app.ai.poster_copy import (
@@ -471,6 +474,85 @@ def test_public_presets_remain_compatible():
         assert output.success, key
         assert output.meta["resolved_theme"] == key
         assert "本次手动视觉风格：" in output.prompt
+
+
+@pytest.mark.parametrize("stage", ["candidates", "layout", "editor"])
+def test_provider_invalid_json_uses_existing_stage_retry_budget(stage):
+    class ValidLayout(FakeSummaryProvider):
+        def _chat(self, messages, **kwargs):
+            return super()._chat(messages, **kwargs).replace('"comedy_device": "接话反差"', '"comedy_device": "反差"')
+
+    class InvalidOnce(ValidLayout):
+        attempts = 0
+
+        def _chat(self, messages, **kwargs):
+            user = messages[1]["content"]
+            matches = {
+                "candidates": '"candidates"' in user,
+                "layout": "可选分镜骨架" in user and "已入选主题" in user,
+                "editor": '"copy_version":"fixed-chat-comic-v2"' in user,
+            }
+            if matches[stage]:
+                self.attempts += 1
+                if self.attempts == 1:
+                    raise ExternalCallInvalidResponseError("Codex GPT JSON 无效")
+            return super()._chat(messages, **kwargs)
+
+    baseline = _builder(ValidLayout()).build(_input())
+    provider = InvalidOnce()
+    output = _builder(provider).build(_input())
+    assert output.success, output.error
+    assert provider.attempts == 2
+    assert output.meta["api_call_count"] == baseline.meta["api_call_count"] + 1
+
+
+@pytest.mark.parametrize("stage", ["candidates", "layout", "editor"])
+def test_unknown_provider_result_is_never_retried(stage):
+    class Unknown(FakeSummaryProvider):
+        attempts = 0
+
+        def _chat(self, messages, **kwargs):
+            user = messages[1]["content"]
+            matches = {
+                "candidates": '"candidates"' in user,
+                "layout": "可选分镜骨架" in user and "已入选主题" in user,
+                "editor": '"copy_version":"fixed-chat-comic-v2"' in user,
+            }
+            if matches[stage]:
+                self.attempts += 1
+                raise ExternalCallResultUnknownError("request result unknown")
+            return super()._chat(messages, **kwargs)
+
+    provider = Unknown()
+    with pytest.raises(ExternalCallResultUnknownError):
+        _builder(provider).build(_input())
+    assert provider.attempts == 1
+
+
+@pytest.mark.parametrize("failure", ["once", "always", "unknown"])
+def test_event_provider_json_failure_has_bounded_retry(monkeypatch, failure):
+    builder = _builder()
+    calls = []
+
+    def chat(system, prompt, **kwargs):
+        calls.append(prompt)
+        if failure == "unknown":
+            raise ExternalCallResultUnknownError("unknown")
+        if failure == "always" or len(calls) == 1:
+            raise ExternalCallInvalidResponseError("invalid JSON")
+        return json.dumps({"events": [{"title": "票房", "content": "票房讨论", "message_ids": ["m1"]}]})
+
+    monkeypatch.setattr(builder, "_analysis_chat", chat)
+    chunk = ConversationChunk("消息", ("m1",), "开始", "结束", 2)
+    if failure == "once":
+        cards, count = builder._event_cards_with_retry("system", "prompt", chunk)
+        assert cards[0]["message_ids"] == ["m1"] and count == 2
+        assert calls[1] != calls[0]
+    else:
+        expected = ExternalCallResultUnknownError if failure == "unknown" else ExternalCallInvalidResponseError
+        with pytest.raises(expected):
+            builder._event_cards_with_retry("system", "prompt", chunk)
+    assert len(calls) == (1 if failure == "unknown" else 2)
 
 
 def test_persisted_topics_and_layout_only_call_editor_once():
