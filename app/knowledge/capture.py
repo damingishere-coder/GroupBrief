@@ -169,3 +169,7 @@ def schedule_knowledge(settings, now=None):
             day=(now.date()-timedelta(days=now.weekday()+1)).isoformat()
             enqueue(settings.db_path,'insight',{'group_id':group['id'],'kind':'weekly','day':day,'data_version':version,
                     'content_version':content_versions[group['id']]},group_id=group['id'],priority=5)
+        if getattr(settings,'knowledge_monthly_enabled',False) and now.time()>=time(11):
+            day=(now.date().replace(day=1)-timedelta(days=1)).isoformat()
+            enqueue(settings.db_path,'insight',{'group_id':group['id'],'kind':'monthly','day':day,'data_version':version,'automatic':True,
+                    'content_version':content_versions[group['id']]},group_id=group['id'],priority=6)

@@ -8,10 +8,11 @@ from app.knowledge.db import canonical,digest
 def version(con,group_id):
     if not con.execute("SELECT 1 FROM sqlite_master WHERE name='storylines'").fetchone():return ''
     return digest([[tuple(r) for r in con.execute('SELECT id,version FROM memories WHERE group_id=? ORDER BY id',(group_id,))],
-                   [tuple(r) for r in con.execute('SELECT id,version FROM storylines WHERE group_id=? ORDER BY id',(group_id,))]])
+                   [tuple(r) for r in con.execute('SELECT id,version FROM storylines WHERE group_id=? ORDER BY id',(group_id,))],
+                   [tuple(r) for r in con.execute("SELECT id,input_hash FROM knowledge_jobs WHERE group_id=? AND job_kind='memory' AND status='SUCCEEDED' AND json_extract(scope_json,'$.mode')='supplement' ORDER BY id",(group_id,))]])
 
 
-def collect(con,group_id,start,end,previous,tz):
+def collect(con,group_id,start,end,previous,tz,kind='weekly'):
     from datetime import datetime
     from zoneinfo import ZoneInfo
     content_version=version(con,group_id)
@@ -57,6 +58,15 @@ def collect(con,group_id,start,end,previous,tz):
     topic_items.sort(key=lambda t:(-t['discussion_days'],-t['evidence_messages'],t['memory_id']))
     sections.insert(0,{'key':'topics','kind':'topic_trends','title':'基于已识别讨论的话题变化','items':topic_items,
                        'note':'证据消息量不是全群话题消息总量；新出现表示在当前已索引历史中首次观察到。'})
+    if kind=='monthly':
+        analysis_ids={r[0] for r in con.execute("SELECT DISTINCT j.value FROM knowledge_jobs k,json_each(k.scope_json,'$.message_ids') j WHERE k.group_id=? AND k.job_kind='memory' AND k.status='SUCCEEDED' AND json_extract(k.scope_json,'$.mode')='supplement'",(group_id,))}
+        message_ids={r[0] for r in con.execute('SELECT id FROM messages WHERE group_id=? AND sent_at>=? AND sent_at<?',(group_id,previous,end))}
+        complete=message_ids.issubset(analysis_ids)
+        observed=set(topics)
+        prior={e['memory_id']:e['title'] for e in rows if e['observed_end']<start}
+        missing=[{'memory_id':mid,'title':title,'discussion_days':0,'participants':0,'evidence_messages':0,'entry_count':0,'lifecycle':'not_observed'} for mid,title in prior.items() if mid not in observed] if complete else []
+        sections.insert(1,{'key':'lifecycle','kind':'lifecycle','title':'上月出现、本月未再次观察到','items':missing,
+                           'note':'没有新的观察不代表事件结束。' if complete else '完整记忆分析覆盖不足，暂不推断哪些话题本月未再出现。'})
     ids=[e['id'] for e in current if any(m[0]==e['id'] for m in manifest)]
     for story in con.execute('SELECT * FROM storylines WHERE group_id=? AND status=?',(group_id,'active')):
         linked=[r[0] for r in con.execute('SELECT memory_entry_id FROM storyline_entries WHERE storyline_id=?',(story['id'],))]
@@ -64,4 +74,18 @@ def collect(con,group_id,start,end,previous,tz):
         if updates:
             sections.append({'key':f'storyline:{story["id"]}','kind':'storyline','title':story['title'],
                              'storyline_id':story['id'],'entry_ids':updates,'summary':'\n'.join(e['summary'] for e in current if e['id'] in updates)})
+            if kind=='monthly':
+                history=[dict(r) for r in con.execute('''SELECT e.* FROM memory_entries e JOIN storyline_entries s ON s.memory_entry_id=e.id
+                   WHERE s.storyline_id=? AND e.observed_end<? AND e.status='active' ORDER BY coalesce(e.event_at,e.observed_start),e.id''',(story['id'],end))]
+                nodes=[]
+                for entry in history:
+                    sources=[dict(r) for r in con.execute('''SELECT s.*,m.validation_state,m.fact_sha256 FROM memory_sources s JOIN messages m ON m.id=s.message_id WHERE s.entry_id=?''',(entry['id'],))]
+                    if not sources or any(s['validation_state']!='valid' for s in sources):continue
+                    key=f'storyline:{story["id"]}:entry:{entry["id"]}'
+                    local_day=datetime.fromisoformat(entry['event_at'] or entry['observed_start']).astimezone(ZoneInfo(tz)).date().isoformat()
+                    basis='事件日期' if entry['event_at'] else '发言观察日期'
+                    nodes.append({'key':key,'text':f'{local_day}（{basis}） '+entry['summary'],'message_ids':sorted({s['message_id'] for s in sources})})
+                    for s in sources:evidence.append({'section_key':key,'claim_key':s['claim_key'],'message_id':s['message_id'],'memory_entry_id':entry['id']})
+                    manifest.append([entry['id'],entry['entry_key'],[[s['message_id'],s['fact_sha256']] for s in sources]])
+                sections[-1]['claims']=nodes
     return {'version':content_version,'sections':sections,'evidence':evidence,'manifest':manifest}

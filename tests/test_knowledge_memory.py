@@ -215,3 +215,53 @@ def test_supplement_preview_does_not_resubmit_scheduled_messages(memories):
     assert first['message_count']==4
     start_backfill(s,first['version'],**first['filters'])
     assert preview(s,1,'2026-09-01','2026-09-03','supplement')['message_count']==0
+
+
+def test_abandoned_unknown_call_cannot_be_retried(memories,monkeypatch):
+    from app.knowledge.ai_operations import call,HoldUnknown,resolve_unknown
+    monkeypatch.setattr('app.knowledge.capture.require_primary_idle',lambda s:None)
+    s,j=ai_setup(memories)
+    def unknown(_):raise TimeoutError('unknown')
+    with pytest.raises(HoldUnknown):call(s,j,[],invoke=unknown)
+    jobs.finish(s.db_path,j,'HOLD_UNKNOWN',{})
+    with connect(s.db_path) as con:op=con.execute('SELECT id FROM ai_operations').fetchone()[0]
+    resolve_unknown(s.db_path,j['id'],op,'abandon','保留未知费用，不再调用')
+    with pytest.raises(Conflict):jobs.control(s.db_path,j['id'],'retry')
+
+
+def test_supplement_recall_is_bounded_and_does_not_replace_sources(memories,monkeypatch):
+    from app.knowledge.memory_pipeline import preview,run
+    path,output=memories
+    memory.append_candidates(path,1,'legacy:installation',[candidate(title='推荐工具与入职计划')],[1])
+    s=SimpleNamespace(db_path=path,output_dir=output,app_timezone='Asia/Shanghai')
+    p=preview(s,1,'2026-09-01','2026-09-03','supplement')
+    jobs.enqueue(path,'memory',p['scopes'][0],group_id=1);job=jobs.claim(path,'extract')
+    captured=[]
+    monkeypatch.setattr('app.knowledge.ai_operations.call',lambda settings,job,messages:(captured.append(messages) or {'candidates':[]}))
+    assert run(s,job)['entries']==[]
+    payload=json.loads(captured[0][-1]['content'])
+    assert 1<=len(payload['matching_candidates'])<=5
+    assert {r['message_id'] for r in payload['messages']}=={1,2,3,4}
+
+
+def test_response_receipt_recovers_crash_before_database_commit(memories,monkeypatch):
+    from app.knowledge.ai_operations import call,recover_artifacts
+    monkeypatch.setattr('app.knowledge.capture.require_primary_idle',lambda s:None)
+    s,j=ai_setup(memories);calls=[]
+    invoke=lambda messages:(calls.append(messages) or '{"candidates":[]}')
+    call(s,j,[],invoke=invoke)
+    with connect(s.db_path,write=True) as con,transaction(con):
+        con.execute("UPDATE ai_operations SET status='SUBMITTING',response_hash='',response_path='',validated_result_json='{}'")
+        con.execute("UPDATE knowledge_jobs SET lease_until='2000-01-01' WHERE id=?",(j['id'],))
+    recover_artifacts(s)
+    resumed=jobs.claim(s.db_path,'new-owner')
+    assert resumed['id']==j['id']
+    assert call(s,resumed,[],invoke=invoke)=={'candidates':[]}
+    assert len(calls)==1
+
+
+def test_disabled_memory_does_not_consume_queue_or_block_index(memories):
+    path,_=memories
+    jobs.enqueue(path,'memory',{'pending':True},group_id=1,priority=1)
+    jobs.enqueue(path,'index',{'pending':True},priority=5)
+    assert jobs.claim(path,'worker',allow_memory=False)['job_kind']=='index'

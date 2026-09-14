@@ -23,7 +23,7 @@ def enqueue(path: Path, kind: str, scope: dict, *, group_id=None, priority=10) -
         return dict(con.execute("SELECT * FROM knowledge_jobs WHERE job_key=?", (key,)).fetchone())
 
 
-def claim(path: Path, owner: str, *, lease_seconds: int = 120) -> dict | None:
+def claim(path: Path, owner: str, *, lease_seconds: int = 120, allow_memory: bool = True, allow_monthly: bool = True) -> dict | None:
     now = now_iso()
     until = (datetime.now(timezone.utc) + timedelta(seconds=lease_seconds)).isoformat(timespec="microseconds")
     with connect(path, write=True) as con, transaction(con):
@@ -39,7 +39,9 @@ def claim(path: Path, owner: str, *, lease_seconds: int = 120) -> dict | None:
         if con.execute("SELECT 1 FROM knowledge_jobs WHERE status='RUNNING' LIMIT 1").fetchone():
             return None
         job = con.execute("""SELECT * FROM knowledge_jobs WHERE status IN ('PENDING','WAIT_RETRY')
-            AND next_retry_at<=? AND pause_requested=0 ORDER BY priority,id LIMIT 1""", (now,)).fetchone()
+            AND next_retry_at<=? AND pause_requested=0 AND (? OR job_kind!='memory')
+            AND (? OR NOT(job_kind='insight' AND json_extract(scope_json,'$.kind')='monthly' AND coalesce(json_extract(scope_json,'$.automatic'),0)=1))
+            ORDER BY priority,id LIMIT 1""", (now,allow_memory,allow_monthly)).fetchone()
         if not job:
             return None
         token = uuid.uuid4().hex
@@ -83,6 +85,9 @@ def control(path: Path, job_id: int, action: str) -> dict:
             con.execute("UPDATE knowledge_jobs SET pause_requested=1,status=?,updated_at=? WHERE id=?",
                         ("RUNNING" if row["status"] == "RUNNING" else "PAUSED", now_iso(), job_id))
         else:
+            if con.execute("SELECT 1 FROM sqlite_master WHERE name='ai_operations'").fetchone():
+                if con.execute("SELECT 1 FROM ai_operations WHERE job_id=? AND status IN ('SUBMITTING','HOLD_UNKNOWN','ABANDONED') LIMIT 1",(job_id,)).fetchone():
+                    raise Conflict('存在未核清或已放弃的未知调用，禁止普通重试')
             if row["status"] not in {"FAILED", "PAUSED", "PARTIAL", "WAIT_RETRY", "WAIT_BUDGET"}:
                 raise Conflict("当前任务不可安全重试；未知调用必须单独核对")
             con.execute("UPDATE knowledge_jobs SET status='PENDING',pause_requested=0,error_code='',next_retry_at='',updated_at=? WHERE id=?",

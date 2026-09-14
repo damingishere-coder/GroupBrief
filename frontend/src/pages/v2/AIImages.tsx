@@ -101,13 +101,13 @@ export default function AIImages() {
   const changeView = (next: string) => {
     if (next === view) return;
     updateWorkspaceQuery({
-      view: next, group: null, panel: null, date: collectionDate, collectionDate: null,
+      view: next, group: null, panel: null, date: collectionDate, collectionDate: null, insight:null, message:null,
     });
   };
   return (
     <div className="studio-gallery ai-images-page">
       <PageHeader
-        title={isGallery ? "作品画廊" : "日报作品"}
+        title={isGallery ? "作品画廊" : "群报作品"}
         description={isGallery ? "按图片浏览历史日报，打开作品即可进入处理工作区。" : "在左侧切换日报，直接预览内容、编辑提示词和查看运行情况。"}
         actions={
           <>
@@ -129,6 +129,7 @@ export default function AIImages() {
           ["styles", "图片风格", Palette],
           ["templates", "排行榜模板", TextT],
           ["weekly", "Weekly · 周度洞察", TextT],
+          ["monthly", "Monthly · 月度洞察", TextT],
         ].map(([key, label, Icon]) => {
           const Glyph = Icon as typeof Palette;
           return (
@@ -146,7 +147,7 @@ export default function AIImages() {
           );
         })}
       </div>
-      {view === 'weekly' ? <InsightWorkspace /> : view === "styles" ? (
+      {view === 'weekly' || view === 'monthly' ? <InsightWorkspace key={view} /> : view === "styles" ? (
         <Styles />
       ) : view === "templates" ? (
         <TemplateEditor kind="ranking" />

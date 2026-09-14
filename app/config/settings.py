@@ -40,6 +40,7 @@ _ENVIRONMENT_ONLY_FIELDS = frozenset(
         "knowledge_source_scope",
         "knowledge_memory_enabled",
         "knowledge_memory_ai_enabled",
+        "knowledge_monthly_enabled",
     }
 )
 
@@ -72,6 +73,7 @@ class Settings(BaseSettings):
     knowledge_source_scope: str = ""
     knowledge_memory_enabled: bool = False
     knowledge_memory_ai_enabled: bool = False
+    knowledge_monthly_enabled: bool = False
     knowledge_memory_call_budget: int = 3
     knowledge_memory_input_budget: int = 24000
     knowledge_memory_output_budget: int = 4000

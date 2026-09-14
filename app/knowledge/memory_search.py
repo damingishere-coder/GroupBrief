@@ -66,5 +66,7 @@ def search(path,query,*,sort='relevance',limit=20,cursor=None,group_id=None,memo
             if len(items)==limit:break
         more=used<len(rows)
         next_cursor=base64.urlsafe_b64encode(canonical({'epoch':epoch,'query_hash':query_hash,'offset':offset+used}).encode()).decode() if more else None
+        warnings=['记忆是摘要索引，请点击来源核对原文。']
+        if index['watermark'].get('data_version')!=epoch:warnings.append('索引尚未追上当前记忆，请更新索引后重试；空结果不能表示没有相关记忆。')
         return {'items':items,'next_cursor':next_cursor,'data_version':epoch,'index_version':version,'ai_calls':0,
-                'warnings':['记忆是摘要索引，请点击来源核对原文。']}
+                'warnings':warnings}
