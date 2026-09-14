@@ -27,6 +27,12 @@ def process_one(settings) -> bool:
     if not job:
         return False
     try:
+        if job['job_kind']=='index':
+            from app.knowledge.search import build_index
+            result=build_index(settings.db_path,settings.output_dir,rebuild=json.loads(job['scope_json']).get('rebuild',False),
+                               fence=lambda con:assert_owner(con,job),checkpoint=lambda:heartbeat(settings.db_path,job,{}))
+            finish(settings.db_path,job,'SUCCEEDED',result)
+            return True
         if job['job_kind']=='capture':
             from app.knowledge.capture import PrimaryBusy, capture_day
             from app.knowledge.jobs import defer
@@ -132,6 +138,11 @@ def main():
                 scan_recent(settings)
                 from app.knowledge.capture import schedule_knowledge
                 schedule_knowledge(settings)
+                with connect(settings.db_path) as con:
+                    search_ready=con.execute("SELECT 1 FROM sqlite_master WHERE name='search_state'").fetchone()
+                if search_ready:
+                    from app.knowledge.search import enqueue_index
+                    enqueue_index(settings.db_path,settings.output_dir)
                 last_scan = time.monotonic()
             process_one(settings)
         except Exception:

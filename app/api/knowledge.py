@@ -5,7 +5,7 @@ from typing import Literal
 
 from app.config.settings import Settings, get_settings
 from app.knowledge import service
-from app.knowledge.db import Conflict, KnowledgeUnavailable
+from app.knowledge.db import Conflict, KnowledgeUnavailable, QueryTimedOut
 from app.knowledge.jobs import control
 
 router = APIRouter(prefix="/api/v2", tags=["knowledge"])
@@ -14,6 +14,8 @@ router = APIRouter(prefix="/api/v2", tags=["knowledge"])
 def invoke(fn, *args, **kwargs):
     try:
         return fn(*args, **kwargs)
+    except QueryTimedOut as exc:
+        raise HTTPException(504,detail={'code':'SEARCH_TIMEOUT','message':str(exc)}) from exc
     except KnowledgeUnavailable as exc:
         raise HTTPException(503, detail={"code": "KNOWLEDGE_UNAVAILABLE", "message": str(exc)}) from exc
     except Conflict as exc:
@@ -141,3 +143,41 @@ def insight(report_id: int, settings: Settings = Depends(get_settings)):
 def insight_messages(report_id: int, offset: int = Query(0,ge=0), limit: int = Query(20,ge=1,le=100),settings: Settings=Depends(get_settings)):
     from app.knowledge.insights import report_messages
     return invoke(report_messages,settings.db_path,report_id,offset,limit)
+
+
+@router.get('/search')
+def search_messages(q: str = Query(min_length=1,max_length=256), object_type: Literal['message','report']='message',
+                    sort: Literal['relevance','time']='relevance',group_id: int | None=None,
+                    start: str | None=None,end: str | None=None,sender_id: str | None=None,message_type: str | None=None,
+                    include_deleted: bool=False,include_orphans: bool=False,limit: int=Query(20,ge=1,le=100),cursor: str | None=None,
+                    settings: Settings=Depends(get_settings)):
+    from app.knowledge.search import search
+    return invoke(search,settings.db_path,settings.output_dir,q,object_type=object_type,sort=sort,limit=limit,cursor=cursor,
+                  group_id=group_id,start=start,end=end,sender_id=sender_id,message_type=message_type,
+                  include_deleted=include_deleted,include_orphans=include_orphans)
+
+
+@router.get('/search/status')
+def search_status(settings: Settings=Depends(get_settings)):
+    from app.knowledge.search import search_status
+    return invoke(search_status,settings.db_path)
+
+
+@router.get('/search/reports/{ref:path}')
+def search_report(ref: str,expected_hash: str | None=None,settings: Settings=Depends(get_settings)):
+    from app.knowledge.search import legacy_report
+    return invoke(legacy_report,settings.db_path,settings.output_dir,ref,expected_hash)
+
+
+class IndexRequest(BaseModel):
+    model_config=ConfigDict(extra='forbid')
+    rebuild: bool=False
+
+
+@router.post('/knowledge/index',status_code=202)
+def update_index(body: IndexRequest,settings: Settings=Depends(get_settings)):
+    from app.knowledge.search import enqueue_index
+    if not settings.knowledge_enabled:
+        raise HTTPException(409,detail='知识 worker 未启用')
+    job=invoke(enqueue_index,settings.db_path,settings.output_dir,body.rebuild)
+    return {'job_id':job['id'],'status':job['status']}

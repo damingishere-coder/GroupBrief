@@ -62,6 +62,16 @@ def test_migration_explicit_idempotent_and_preserves_core(foundation, tmp_path):
         migrate(path, path)
 
 
+def test_wal_migration_manifest_matches_closed_output(foundation,tmp_path):
+    from app.knowledge.db import digest
+    path,_=foundation
+    with sqlite3.connect(path) as con:
+        con.execute('PRAGMA journal_mode=WAL')
+    output=tmp_path/'wal-copy.db'
+    result=migrate(path,output)
+    assert result['output_sha256']==digest(output.read_bytes())
+
+
 def test_missing_schema_does_not_create_database(tmp_path):
     path = tmp_path / 'missing.db'
     with pytest.raises(KnowledgeUnavailable), connect(path):

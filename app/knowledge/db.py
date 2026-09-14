@@ -21,6 +21,10 @@ class Conflict(ValueError):
     pass
 
 
+class QueryTimedOut(KnowledgeUnavailable):
+    pass
+
+
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
@@ -120,6 +124,8 @@ def connect(path: Path, *, write: bool = False, require_schema: bool = True):
         finally:
             con.close()
     except sqlite3.OperationalError as exc:
+        if str(exc)=='interrupted':
+            raise QueryTimedOut('搜索超时，请增加群聊、日期或更具体的关键词') from exc
         raise KnowledgeUnavailable("知识库暂不可用：" + str(exc)) from exc
 
 

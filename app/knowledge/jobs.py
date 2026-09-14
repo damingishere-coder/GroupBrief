@@ -31,7 +31,9 @@ def claim(path: Path, owner: str, *, lease_seconds: int = 120) -> dict | None:
         # and are never recovered by this local-only lease rule.
         con.execute("""UPDATE knowledge_jobs SET status=CASE WHEN pause_requested=1 THEN 'PAUSED' ELSE 'WAIT_RETRY' END,
             lease_token='',lease_owner='',lease_until='',updated_at=?
-            WHERE status='RUNNING' AND lease_until<? AND job_kind IN ('import','scan','insight','capture')""", (now, now))
+            WHERE status='RUNNING' AND lease_until<? AND job_kind IN ('import','scan','insight','capture','index')""", (now, now))
+        if con.execute("SELECT 1 FROM knowledge_jobs WHERE status='RUNNING' LIMIT 1").fetchone():
+            return None
         job = con.execute("""SELECT * FROM knowledge_jobs WHERE status IN ('PENDING','WAIT_RETRY')
             AND next_retry_at<=? AND pause_requested=0 ORDER BY priority,id LIMIT 1""", (now,)).fetchone()
         if not job:
