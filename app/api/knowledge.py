@@ -1,0 +1,95 @@
+"""Knowledge API is optional, independent from V2 delivery routes."""
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, ConfigDict, Field
+
+from app.config.settings import Settings, get_settings
+from app.knowledge import service
+from app.knowledge.db import Conflict, KnowledgeUnavailable
+from app.knowledge.jobs import control
+
+router = APIRouter(prefix="/api/v2", tags=["knowledge"])
+
+
+def invoke(fn, *args, **kwargs):
+    try:
+        return fn(*args, **kwargs)
+    except KnowledgeUnavailable as exc:
+        raise HTTPException(503, detail={"code": "KNOWLEDGE_UNAVAILABLE", "message": str(exc)}) from exc
+    except Conflict as exc:
+        raise HTTPException(409, detail=str(exc)) from exc
+    except KeyError as exc:
+        raise HTTPException(404, detail="记录不存在") from exc
+    except (ValueError, OSError) as exc:
+        raise HTTPException(422, detail=str(exc)) from exc
+
+
+@router.get("/knowledge/status")
+def knowledge_status(settings: Settings = Depends(get_settings)):
+    try:
+        return {**service.status(settings.db_path), "worker_enabled": settings.knowledge_enabled}
+    except KnowledgeUnavailable as exc:
+        return {"available": False, "worker_enabled": False, "reason": str(exc)}
+
+
+@router.get("/messages")
+def messages(group_id: int | None = None, sender_id: str | None = None,
+             start: str | None = None, end: str | None = None, message_type: str | None = None,
+             include_deleted: bool = False, include_orphans: bool = False,
+             limit: int = Query(20, ge=1, le=100), cursor: str | None = None,
+             settings: Settings = Depends(get_settings)):
+    return invoke(service.list_messages, settings.db_path, group_id=group_id, sender_id=sender_id,
+                  start=start, end=end, message_type=message_type, include_deleted=include_deleted,
+                  include_orphans=include_orphans, limit=limit, cursor=cursor)
+
+
+@router.get("/messages/{message_id}")
+def message(message_id: int, settings: Settings = Depends(get_settings)):
+    return invoke(service.message_detail, settings.db_path, message_id)
+
+
+@router.get("/messages/{message_id}/sources")
+def sources(message_id: int, limit: int = Query(20, ge=1, le=100), offset: int = Query(0, ge=0), settings: Settings = Depends(get_settings)):
+    return invoke(service.message_sources, settings.db_path, message_id, limit=limit, offset=offset)
+
+
+@router.get("/messages/{message_id}/context")
+def context(message_id: int, radius: int = Query(10, ge=1, le=30), settings: Settings = Depends(get_settings)):
+    return invoke(service.message_context, settings.db_path, message_id, radius)
+
+
+@router.get("/knowledge/jobs")
+def jobs(limit: int = Query(50, ge=1, le=100), settings: Settings = Depends(get_settings)):
+    return invoke(service.list_jobs, settings.db_path, limit)
+
+
+@router.post("/knowledge/jobs/{job_id}/pause")
+def pause(job_id: int, settings: Settings = Depends(get_settings)):
+    return invoke(control, settings.db_path, job_id, "pause")
+
+
+@router.post("/knowledge/jobs/{job_id}/retry")
+def retry(job_id: int, settings: Settings = Depends(get_settings)):
+    return invoke(control, settings.db_path, job_id, "retry")
+
+
+class BackfillFilter(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    group_id: int | None = Field(None, gt=0)
+    start: str | None = None
+    end: str | None = None
+
+
+class BackfillRequest(BackfillFilter):
+    expected_version: str = Field(min_length=64, max_length=64)
+
+
+@router.post("/knowledge/backfill/preview")
+def preview(body: BackfillFilter, settings: Settings = Depends(get_settings)):
+    return invoke(service.preview_backfill, settings.db_path, settings.output_dir, **body.model_dump())
+
+
+@router.post("/knowledge/backfill", status_code=202)
+def backfill(body: BackfillRequest, settings: Settings = Depends(get_settings)):
+    if not settings.knowledge_enabled:
+        raise HTTPException(409, detail="知识 worker 未启用，暂不能启动后台导入")
+    return invoke(service.start_backfill, settings.db_path, settings.output_dir, **body.model_dump())

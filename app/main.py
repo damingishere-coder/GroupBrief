@@ -83,7 +83,11 @@ async def lifespan(app: FastAPI):
         from app.scheduler.manager import start_scheduler
 
         start_scheduler(settings)
+    from app.knowledge.runtime import start_worker, stop_worker
+
+    knowledge_worker = start_worker(settings)
     yield
+    stop_worker(knowledge_worker)
     if scheduler_started:
         from app.scheduler.manager import stop_scheduler
 
@@ -109,6 +113,9 @@ app.include_router(email.router)
 app.include_router(logs.router)
 app.include_router(v2_templates.router)
 app.include_router(v2_ui.router)
+from app.api.knowledge import router as knowledge_router
+
+app.include_router(knowledge_router)
 
 
 @app.get("/api/version")
