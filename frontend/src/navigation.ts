@@ -28,7 +28,7 @@ export interface NavigationItem {
 
 export const NAVIGATION: NavigationItem[] = [
   { key: "dashboard", label: "今日工作台", icon: HouseLine },
-  { key: "images", label: "日报作品", icon: ImageSquare, activePages: ["ranking", "images"] },
+  { key: "images", label: "群报作品", icon: ImageSquare, activePages: ["ranking", "images"] },
   { key: "groups", label: "群聊管理", icon: ChatsCircle },
   { key: "tasks", label: "运行任务", icon: ListChecks, activePages: ["tasks", "knowledge"] },
   { key: "messages", label: "消息归档", icon: ChatDots, activePages: ["messages", "archive", "search", "memories", "storylines"] },

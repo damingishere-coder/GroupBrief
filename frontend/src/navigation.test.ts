@@ -74,7 +74,7 @@ describe("hash navigation", () => {
   it("keeps the product navigation in the requested order", () => {
     expect(NAVIGATION.map((item) => item.label)).toEqual([
       "今日工作台",
-      "日报作品",
+      "群报作品",
       "群聊管理",
       "运行任务",
       "消息归档",

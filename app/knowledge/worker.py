@@ -23,7 +23,11 @@ logger = logging.getLogger(__name__)
 def process_one(settings) -> bool:
     if shutil.disk_usage(settings.db_path.parent).free < settings.knowledge_min_free_bytes:
         return False
-    job = claim(settings.db_path, f"{os.getpid()}:{uuid.uuid4().hex}")
+    if getattr(settings,'knowledge_memory_enabled',False):
+        from app.knowledge.ai_operations import recover_artifacts
+        recover_artifacts(settings)
+    job = claim(settings.db_path, f"{os.getpid()}:{uuid.uuid4().hex}",allow_memory=getattr(settings,'knowledge_memory_enabled',False),
+                allow_monthly=getattr(settings,'knowledge_monthly_enabled',False))
     if not job:
         return False
     try:

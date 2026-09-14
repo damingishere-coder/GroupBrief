@@ -145,7 +145,7 @@ async function installFakeApi(page: Page) {
 test("日报作品默认直达工作区，画廊保留为次级入口", async ({ page }) => {
   const calls = await installFakeApi(page);
   await page.goto("/#/images");
-  await expect(page.getByRole("heading", { name: "日报作品", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "群报作品", exact: true })).toBeVisible();
   await expect(page.getByRole("region", { name: "日报处理工作区" })).toBeVisible();
   await expect(page.locator(".gallery-cover")).toHaveCount(0);
   await expect(page.getByText("2 份作品")).toBeVisible();

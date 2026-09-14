@@ -93,6 +93,8 @@ def call(settings,job,messages,*,purpose='memory',invoke=None):
             else:
                 text=invoke(messages)
             write_response(file,text)
+            write_response(file.with_name('receipt.json'),canonical({'operation_key':key,'input_hash':operation['input_hash'],
+                           'response_hash':digest(text.encode('utf-8'))}))
         except ExternalCallNotSubmittedError:
             with connect(path,write=True) as con,transaction(con):
                 assert_owner(con,job)
@@ -108,6 +110,7 @@ def call(settings,job,messages,*,purpose='memory',invoke=None):
             con.execute("UPDATE ai_operations SET status='RECEIVED',response_path=?,response_hash=?,usage_json=?,updated_at=? WHERE id=?",
                         (file.relative_to(settings.output_dir).as_posix(),digest(text.encode('utf-8')),
                          canonical({'input_estimate':input_estimate,'output_estimate':len(text.encode('utf-8')),'basis':'utf8_bytes_upper_estimate','actual_tokens':None}),now_iso(),operation['id']))
+            con.execute('UPDATE ai_operations SET budget_output=max(budget_output,?) WHERE id=?',(len(text.encode('utf-8')),operation['id']))
     try:
         from app.providers.ai.codex import _strip_json_fence
         value=Extraction.model_validate_json(_strip_json_fence(text)).model_dump()
@@ -129,6 +132,29 @@ def recover(con):
         unknown=con.execute("SELECT 1 FROM ai_operations WHERE job_id=? AND status IN ('SUBMITTING','HOLD_UNKNOWN')",(row['id'],)).fetchone()
         con.execute("UPDATE ai_operations SET status='HOLD_UNKNOWN',updated_at=? WHERE job_id=? AND status='SUBMITTING'",(now,row['id']))
         con.execute("UPDATE knowledge_jobs SET status=?,lease_owner='',lease_token='',lease_until='',updated_at=? WHERE id=?",('HOLD_UNKNOWN' if unknown else 'WAIT_RETRY',now,row['id']))
+
+
+def recover_artifacts(settings):
+    """A complete local response receipt can close the response/DB crash window."""
+    with connect(settings.db_path) as con:
+        if not con.execute("SELECT 1 FROM sqlite_master WHERE name='ai_operations'").fetchone():return
+        rows=[dict(r) for r in con.execute("""SELECT o.* FROM ai_operations o JOIN knowledge_jobs j ON j.id=o.job_id
+            WHERE o.status IN ('SUBMITTING','HOLD_UNKNOWN') AND
+            (j.status='HOLD_UNKNOWN' OR (j.status='RUNNING' AND j.lease_until<?))""",(now_iso(),))]
+    for op in rows:
+        file=settings.output_dir/'.knowledge'/'operations'/str(op['id'])/'response.txt'
+        try:
+            receipt=json.loads(file.with_name('receipt.json').read_text(encoding='utf-8'))
+            raw=file.read_bytes();sha=digest(raw)
+            if receipt!={'operation_key':op['operation_key'],'input_hash':op['input_hash'],'response_hash':sha}:continue
+        except (OSError,ValueError):continue
+        with connect(settings.db_path,write=True) as con,transaction(con):
+            job=con.execute('SELECT * FROM knowledge_jobs WHERE id=?',(op['job_id'],)).fetchone()
+            current=con.execute('SELECT status FROM ai_operations WHERE id=?',(op['id'],)).fetchone()
+            if current[0] not in {'SUBMITTING','HOLD_UNKNOWN'} or not(job['status']=='HOLD_UNKNOWN' or (job['status']=='RUNNING' and job['lease_until']<now_iso())):continue
+            con.execute("UPDATE ai_operations SET status='RECEIVED',response_path=?,response_hash=?,budget_output=max(budget_output,?),updated_at=? WHERE id=?",
+                        (file.relative_to(settings.output_dir).as_posix(),sha,len(raw),now_iso(),op['id']))
+            con.execute("UPDATE knowledge_jobs SET status='WAIT_RETRY',lease_owner='',lease_token='',lease_until='',error_code='',updated_at=? WHERE id=?",(now_iso(),op['job_id']))
 
 
 def resolve_unknown(path,job_id,operation_id,resolution,note):

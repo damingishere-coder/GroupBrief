@@ -3,6 +3,7 @@ export interface SearchHit {
   type: 'message' | 'report' | 'memory'; id?: number; ref?: string; group_id: number | null;
   sender_name?: string; sent_at?: string; title?: string; period_start?: string;
   insight_id?: number; source_hash?: string; validation_state?: string;
+  kind?: string;
   snippet: { text: string; match: boolean }[];
 }
 export interface SearchPage { items: SearchHit[]; next_cursor: string | null; index_version: number; data_version: string; warnings: string[]; ai_calls: number }

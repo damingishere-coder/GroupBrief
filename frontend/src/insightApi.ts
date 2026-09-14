@@ -1,6 +1,6 @@
 import { get, post } from './api';
 import type { MessageRecord } from './knowledgeApi';
-export type InsightKind = 'weekly';
+export type InsightKind = 'weekly' | 'monthly';
 export interface InsightSummary {
   id: number; group_id: number; kind: InsightKind; period_start: string; period_end: string;
   revision: number; status: string; ai_status: string;
@@ -20,6 +20,9 @@ export interface InsightDetail extends InsightSummary {
     champion: MemberInsight | null; comparison: Record<string, MetricChange>;
     daily_counts: { date: string; count: number | null; complete: boolean }[];
     inactive_previous_members: MemberInsight[];
+    month_days?: number; known_daily_average?: number;
+    weekly_trends?: {week_start: string;from: string;through: string;days: number;known_messages: number;complete: boolean}[];
+    keywords?: {word: string;message_count: number}[];keyword_basis?: string;
   };
 }
 export interface InsightSection {
@@ -28,8 +31,8 @@ export interface InsightSection {
   items?: {memory_id: number; title: string; discussion_days: number; participants: number; evidence_messages: number; entry_count: number; lifecycle: string}[];
 }
 export const insightApi = {
-  list: (group?: string, history = false) => get<{ items: InsightSummary[] }>(`/v2/insights?kind=weekly&include_history=${history}${group ? `&group_id=${encodeURIComponent(group)}` : ''}`),
+  list: (group?: string, history = false, kind: InsightKind = 'weekly') => get<{ items: InsightSummary[] }>(`/v2/insights?kind=${kind}&include_history=${history}${group ? `&group_id=${encodeURIComponent(group)}` : ''}`),
   detail: (id: number) => get<InsightDetail>(`/v2/insights/${id}`),
-  build: (group_id: number, day: string) => post<{ job_id: number }>('/v2/insights/build', { group_id, day, kind: 'weekly' }),
+  build: (group_id: number, day: string, kind: InsightKind = 'weekly') => post<{ job_id: number }>('/v2/insights/build', { group_id, day, kind }),
   messages: (id: number, offset = 0) => get<{ items: MessageRecord[]; next_offset: number | null }>(`/v2/insights/${id}/messages?offset=${offset}`),
 };

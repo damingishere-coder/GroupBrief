@@ -88,7 +88,7 @@ export default function Search() {
         {hit.validation_state && hit.validation_state !== 'valid' && <p>来源状态：{hit.validation_state}</p>}
         {hit.type === 'message' ? <button onClick={() => updateWorkspaceQuery({ message: String(hit.id) })}>查看来源 #{hit.id}</button>
           : hit.type === 'memory' ? <button onClick={() => navigateToHash(`memories?memory=${hit.id}`,false)}>查看记忆与证据</button>
-          : hit.insight_id ? <button onClick={() => navigateToHash(`images?view=weekly&insight=${hit.insight_id}`, false)}>查看周期洞察</button>
+          : hit.insight_id ? <button onClick={() => navigateToHash(`images?view=${hit.kind==='monthly'?'monthly':'weekly'}&insight=${hit.insight_id}`, false)}>查看周期洞察</button>
           : <button onClick={() => updateWorkspaceQuery({ reportRef: hit.ref || null, reportHash: hit.source_hash || null })}>查看历史群报文字</button>}
       </article>)}{result.next_cursor && <button disabled={busy} onClick={() => void more()}>更多结果</button>}
     </section>}

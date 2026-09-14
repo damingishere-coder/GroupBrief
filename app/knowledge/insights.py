@@ -146,7 +146,7 @@ def build(path, group_id, kind, day, tz='Asia/Shanghai', fence=None):
         previous_rows = [r for r in rows if r['sent_at']<start]
         coverage_now, coverage_before = coverage(con,group_id,start,end), coverage(con,group_id,previous,start)
         from app.knowledge.insight_content import collect
-        content=collect(con,group_id,start,end,previous,tz)
+        content=collect(con,group_id,start,end,previous,tz,kind=kind)
     current = compute(current_rows,start,end,policy,tz)
     before = compute(previous_rows,previous,start,policy,tz)
     comparable = coverage_now['complete'] and coverage_before['complete'] and coverage_now['source_scopes']==coverage_before['source_scopes']
@@ -176,6 +176,13 @@ def build(path, group_id, kind, day, tz='Asia/Shanghai', fence=None):
     manifest = {'metrics_version': METRICS_VERSION, 'policy': policy, 'timezone': tz,
                 'period': [start,end,previous], 'messages': [[r['id'],r['fact_sha256'],r['validation_state']] for r in rows],
                 'coverage': {'current': coverage_now,'previous': coverage_before}}
+    if kind=='monthly':
+        manifest['monthly_version']='monthly-1'
+        from app.knowledge.monthly import metrics as monthly_metrics
+        monthly_metrics(current,current_rows,start,end,tz)
+        lifecycle=next((s for s in content['sections'] if s['kind']=='lifecycle'),None)
+        if lifecycle and not comparable:
+            lifecycle['items']=[];lifecycle['note']='两期消息覆盖不足，不能判断本月未再出现的话题。'
     if content['version']:
         manifest['content']={'version':content['version'],'entries':content['manifest'],'sections':content['sections']}
     input_hash = digest(manifest)
@@ -199,7 +206,7 @@ def build(path, group_id, kind, day, tz='Asia/Shanghai', fence=None):
             VALUES(?,?,?,?,?,1,?,?,?,?,?,?,?)''', (group_id,kind,start,end,revision,METRICS_VERSION,input_hash,canonical(manifest),canonical(manifest['coverage']),canonical(current),'READY' if coverage_now['complete'] else 'PARTIAL',now_iso()))
         report_id=cursor.lastrowid
         if content['version']:
-            con.execute('UPDATE report_insights SET sections_json=? WHERE id=?',(canonical(content['sections']),report_id))
+            con.execute("UPDATE report_insights SET sections_json=?,ai_status='REUSED_ANALYSIS' WHERE id=?",(canonical(content['sections']),report_id))
             for ev in content['evidence']:
                 con.execute('''INSERT INTO report_evidence(report_id,group_id,section_key,claim_key,message_id,memory_entry_id)
                     VALUES(?,?,?,?,?,?)''',(report_id,group_id,ev['section_key'],ev['claim_key'],ev['message_id'],ev['memory_entry_id']))
