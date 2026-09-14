@@ -5,11 +5,13 @@ import argparse
 import json
 import sqlite3
 import sys
+from contextlib import closing
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app.knowledge.db import CHECKSUM, MIGRATION_ID, connect, digest, install_schema
-from app.knowledge.insights import install_schema as install_insights
+from app.knowledge.insights import CHECKSUM as INSIGHT_CHECKSUM, MIGRATION_ID as INSIGHT_ID, install_schema as install_insights
+from app.knowledge.search import CHECKSUM as SEARCH_CHECKSUM, MIGRATION_ID as SEARCH_ID, install_schema as install_search
 
 
 def migrate(source: Path, output: Path | None = None) -> dict:
@@ -23,7 +25,9 @@ def migrate(source: Path, output: Path | None = None) -> dict:
             raise ValueError('核心 Schema 尚未升级')
         if con.execute('PRAGMA integrity_check').fetchone()[0] != 'ok' or con.execute('PRAGMA foreign_key_check').fetchall():
             raise ValueError('源库完整性检查失败')
-        result = {"migration": MIGRATION_ID, "checksum": CHECKSUM, "core_counts": core, "core_hashes": fingerprints, "dry_run": output is None}
+        extensions = {MIGRATION_ID: CHECKSUM, INSIGHT_ID: INSIGHT_CHECKSUM, SEARCH_ID: SEARCH_CHECKSUM}
+        result = {"migration": MIGRATION_ID, "checksum": CHECKSUM, "extensions": extensions,
+                  "core_counts": core, "core_hashes": fingerprints, "dry_run": output is None}
         if output is None:
             return result
         output = output.resolve()
@@ -33,10 +37,11 @@ def migrate(source: Path, output: Path | None = None) -> dict:
         # Atomically reserve ownership; never overwrite a raced-in user file.
         output.open('xb').close()
         try:
-            with sqlite3.connect(output) as destination:
+            with closing(sqlite3.connect(output)) as destination:
                 con.backup(destination)
             install_schema(output)
             install_insights(output)
+            install_search(output)
             with connect(output) as after:
                 for table, count in core.items():
                     if after.execute(f'SELECT count(*) FROM "{table}"').fetchone()[0] != count:
@@ -45,6 +50,11 @@ def migrate(source: Path, output: Path | None = None) -> dict:
                         raise ValueError('核心数据内容发生变化')
                 if after.execute('PRAGMA integrity_check').fetchone()[0] != 'ok':
                     raise ValueError('目标库完整性校验失败')
+                if after.execute('PRAGMA foreign_key_check').fetchall():
+                    raise ValueError('目标库外键校验失败')
+                installed = dict(after.execute('SELECT migration_id,checksum FROM schema_migrations'))
+                if any(installed.get(key) != value for key, value in extensions.items()):
+                    raise ValueError('扩展迁移版本校验失败')
             result.update(output=str(output), output_sha256=digest(output.read_bytes()), integrity='ok')
             output.with_suffix(output.suffix+'.manifest.json').write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding='utf-8')
             return result

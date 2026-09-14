@@ -10,6 +10,7 @@ export type PageKey =
   | "messages"
   | "tasks"
   | "knowledge"
+  | "search"
   | "archive"
   | "settings"
   | "history"
@@ -28,12 +29,12 @@ export const NAVIGATION: NavigationItem[] = [
   { key: "images", label: "日报作品", icon: ImageSquare, activePages: ["ranking", "images"] },
   { key: "groups", label: "群聊管理", icon: ChatsCircle },
   { key: "tasks", label: "运行任务", icon: ListChecks, activePages: ["tasks", "knowledge"] },
-  { key: "messages", label: "消息归档", icon: ChatDots, activePages: ["messages", "archive"] },
+  { key: "messages", label: "消息归档", icon: ChatDots, activePages: ["messages", "archive", "search"] },
   { key: "settings", label: "设置", icon: GearSix },
 ];
 
 const PAGE_KEYS = new Set<PageKey>([
-  "dashboard", "groups", "tasks", "knowledge", "messages", "archive", "ranking", "images", "settings",
+  "dashboard", "groups", "tasks", "knowledge", "messages", "archive", "ranking", "images", "settings", "search",
 ]);
 
 export interface AppRoute {

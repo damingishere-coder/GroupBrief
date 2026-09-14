@@ -24,6 +24,12 @@
 .insight-table table { width: 100%; white-space: nowrap; text-align: left; border-collapse: collapse; }
 .insight-table th, .insight-table td { padding: 10px; border-bottom: 1px solid #e8e5f1; }
 .insight-workspace pre { overflow-wrap: anywhere; white-space: pre-wrap; }
+.studio-search-entry { border: 1px solid #e2ddef; border-radius: 10px; background: #f7f4fc; color: #6d56aa; padding: 7px 10px; cursor: pointer; }
+.studio-search-entry kbd { font-size: 10px; margin-left: 6px; }
+.search-filters { margin: 16px 0; }
+.search-workspace form input { max-width: none; width: min(420px, 55vw); }
+.search-workspace mark { background: #eee3a9; color: #44391c; border-radius: 3px; }
+@media (max-width: 600px) { .studio-search-entry kbd { display: none; } }
 @media (max-width: 1000px) { .insight-columns { grid-template-columns: minmax(0, 1fr); } }
 .evidence-drawer details { padding: 12px 0; border-top: 1px solid #eeebf4; }
 @media (max-width: 600px) { .knowledge-page section { padding: 16px; } .evidence-drawer { inset: 8px; width: auto; padding: 16px; } }

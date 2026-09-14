@@ -6,8 +6,23 @@ import {
   Desktop,
   Heartbeat,
 } from "@phosphor-icons/react";
-import { useState, type ReactNode } from "react";
-import { NAVIGATION, navigateToHash, type PageKey } from "../../navigation";
+import { useEffect, useState, type ReactNode } from "react";
+import { NAVIGATION, navigateToHash, routeFromLocation, workspaceQuery, type PageKey } from "../../navigation";
+import { listGroups } from '../../api';
+
+async function openSearch() {
+  const original = window.location.hash;
+  const query = workspaceQuery();
+  let group = query.get('groupId') || query.get('insightGroup') || String(routeFromLocation().groupId || '');
+  if (!group && query.get('group')) {
+    try {
+      const value = query.get('group');
+      const matches = (await listGroups()).filter(g => String(g.id) === value || g.display_name === value || g.wechat_group_name === value);
+      if (matches.length === 1) group = String(matches[0].id);
+    } catch { /* Search remains available even if the group list is unavailable. */ }
+  }
+  if (window.location.hash === original) navigateToHash(`search${group ? `?groupId=${encodeURIComponent(group)}` : ''}`, false);
+}
 
 export default function AppShell({
   activePage,
@@ -19,6 +34,15 @@ export default function AppShell({
   children: ReactNode;
 }) {
   const [compact, setCompact] = useState(false);
+  useEffect(() => {
+    const shortcut = (event: KeyboardEvent) => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') {
+        event.preventDefault(); void openSearch();
+      }
+    };
+    window.addEventListener('keydown', shortcut);
+    return () => window.removeEventListener('keydown', shortcut);
+  }, []);
   const active = NAVIGATION.find((item) =>
     (item.activePages || [item.key]).includes(activePage),
   );
@@ -108,6 +132,7 @@ export default function AppShell({
             <strong>{active?.label || "工作台"}</strong>
           </div>
           <div className="studio-local">
+            <button className="studio-search-entry" onClick={() => void openSearch()}>搜索群聊 <kbd>Ctrl K</kbd></button>
             <Desktop size={16} />
             <span>本地工作空间</span>
           </div>
