@@ -100,7 +100,7 @@ window.addEventListener("hashchange", () => {
 function editorIdentity(hash: string) {
   const [path, query] = hash.split("?");
   const params = new URLSearchParams(query);
-  return `${path}:${params.get("date") || ""}:${params.get("group") || ""}:${params.get("view") || ""}:${params.get("message") || ""}`;
+  return `${path}:${params.get("date") || ""}:${params.get("group") || ""}:${params.get("view") || ""}:${params.get("message") || ""}:${params.get('insight') || ''}:${params.get('insightGroup') || ''}`;
 }
 function allowNavigation(next: string) {
   return editorIdentity(next) === editorIdentity(acceptedHash) || !leaveGuard || leaveGuard();

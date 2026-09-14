@@ -36,6 +36,8 @@ _ENVIRONMENT_ONLY_FIELDS = frozenset(
         "knowledge_enabled",
         "knowledge_min_free_bytes",
         "knowledge_group_ids",
+        "knowledge_capture_enabled",
+        "knowledge_source_scope",
     }
 )
 
@@ -64,6 +66,8 @@ class Settings(BaseSettings):
     # Optional knowledge worker; schema is installed only by offline migration.
     knowledge_enabled: bool = False
     knowledge_group_ids: str = ""
+    knowledge_capture_enabled: bool = False
+    knowledge_source_scope: str = ""
     knowledge_min_free_bytes: int = 1024 * 1024 * 1024
 
     # V1 兼容历史读取；正式 V2 使用下方 WeChatDataAnalysis MCP/导出配置。

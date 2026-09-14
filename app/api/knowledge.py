@@ -1,6 +1,7 @@
 """Knowledge API is optional, independent from V2 delivery routes."""
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
+from typing import Literal
 
 from app.config.settings import Settings, get_settings
 from app.knowledge import service
@@ -93,3 +94,50 @@ def backfill(body: BackfillRequest, settings: Settings = Depends(get_settings)):
     if not settings.knowledge_enabled:
         raise HTTPException(409, detail="知识 worker 未启用，暂不能启动后台导入")
     return invoke(service.start_backfill, settings.db_path, settings.output_dir, **body.model_dump())
+
+
+@router.get('/insights')
+def insights(group_id: int | None = None, kind: Literal['weekly'] | None = None,
+             include_history: bool = False, limit: int = Query(30,ge=1,le=100), settings: Settings = Depends(get_settings)):
+    from app.knowledge.insights import list_reports
+    return invoke(list_reports,settings.db_path,group_id,kind,include_history,limit)
+
+
+class InsightBuild(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    group_id: int = Field(gt=0)
+    kind: Literal['weekly'] = 'weekly'
+    day: str
+
+
+@router.post('/insights/build', status_code=202)
+def build_insight(body: InsightBuild, settings: Settings = Depends(get_settings)):
+    from app.knowledge.insights import period_bounds
+    from app.knowledge.jobs import enqueue
+    from app.knowledge.db import connect
+    from app.knowledge.service import data_version
+    invoke(period_bounds,body.kind,body.day,settings.app_timezone)
+    if not settings.knowledge_enabled:
+        raise HTTPException(409,detail='知识 worker 未启用')
+    def queue():
+        with connect(settings.db_path) as con:
+            version=data_version(con)
+            if not con.execute('SELECT 1 FROM groups WHERE id=? AND deleted_at IS NULL',(body.group_id,)).fetchone():
+                raise KeyError(body.group_id)
+            # Fail before enqueue when the additive report schema is absent.
+            con.execute('SELECT id FROM report_insights LIMIT 0')
+        job=enqueue(settings.db_path,'insight',{**body.model_dump(),'data_version':version},group_id=body.group_id,priority=5)
+        return {'job_id':job['id'],'status':job['status']}
+    return invoke(queue)
+
+
+@router.get('/insights/{report_id}')
+def insight(report_id: int, settings: Settings = Depends(get_settings)):
+    from app.knowledge.insights import detail
+    return invoke(detail,settings.db_path,report_id)
+
+
+@router.get('/insights/{report_id}/messages')
+def insight_messages(report_id: int, offset: int = Query(0,ge=0), limit: int = Query(20,ge=1,le=100),settings: Settings=Depends(get_settings)):
+    from app.knowledge.insights import report_messages
+    return invoke(report_messages,settings.db_path,report_id,offset,limit)

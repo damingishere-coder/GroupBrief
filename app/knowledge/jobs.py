@@ -31,7 +31,7 @@ def claim(path: Path, owner: str, *, lease_seconds: int = 120) -> dict | None:
         # and are never recovered by this local-only lease rule.
         con.execute("""UPDATE knowledge_jobs SET status=CASE WHEN pause_requested=1 THEN 'PAUSED' ELSE 'WAIT_RETRY' END,
             lease_token='',lease_owner='',lease_until='',updated_at=?
-            WHERE status='RUNNING' AND lease_until<? AND job_kind IN ('import','scan')""", (now, now))
+            WHERE status='RUNNING' AND lease_until<? AND job_kind IN ('import','scan','insight','capture')""", (now, now))
         job = con.execute("""SELECT * FROM knowledge_jobs WHERE status IN ('PENDING','WAIT_RETRY')
             AND next_retry_at<=? AND pause_requested=0 ORDER BY priority,id LIMIT 1""", (now,)).fetchone()
         if not job:
@@ -94,3 +94,11 @@ def public_job(row) -> dict:
     for name in ("scope", "checkpoint", "result"):
         value[name] = json.loads(value.pop(name + "_json"))
     return value
+
+
+def defer(path: Path, job: dict, reason: str, seconds=90):
+    with connect(path,write=True) as con,transaction(con):
+        assert_owner(con,job)
+        next_time=(datetime.now(timezone.utc)+timedelta(seconds=seconds)).isoformat(timespec='microseconds')
+        con.execute("""UPDATE knowledge_jobs SET status='WAIT_RETRY',next_retry_at=?,error_code=?,
+          lease_token='',lease_owner='',lease_until='',updated_at=? WHERE id=?""",(next_time,reason,now_iso(),job['id']))
