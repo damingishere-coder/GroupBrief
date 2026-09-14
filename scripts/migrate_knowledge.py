@@ -9,6 +9,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app.knowledge.db import CHECKSUM, MIGRATION_ID, connect, digest, install_schema
+from app.knowledge.insights import install_schema as install_insights
 
 
 def migrate(source: Path, output: Path | None = None) -> dict:
@@ -35,6 +36,7 @@ def migrate(source: Path, output: Path | None = None) -> dict:
             with sqlite3.connect(output) as destination:
                 con.backup(destination)
             install_schema(output)
+            install_insights(output)
             with connect(output) as after:
                 for table, count in core.items():
                     if after.execute(f'SELECT count(*) FROM "{table}"').fetchone()[0] != count:

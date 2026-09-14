@@ -25,6 +25,7 @@ import { useAIImageCatalogs } from "./ai-images/useAIImageCatalogs";
 import { StatusPill } from "./ai-images/model";
 import ReportWorkspace from "./ReportWorkspace";
 import { TemplateEditor } from "./Templates";
+import InsightWorkspace from './InsightWorkspace';
 
 function Cover({ run }: { run: V2Run }) {
   const [broken, setBroken] = useState(false);
@@ -127,6 +128,7 @@ export default function AIImages() {
           ["workspace", "日报工作区", ImageSquare],
           ["styles", "图片风格", Palette],
           ["templates", "排行榜模板", TextT],
+          ["weekly", "Weekly · 周度洞察", TextT],
         ].map(([key, label, Icon]) => {
           const Glyph = Icon as typeof Palette;
           return (
@@ -144,7 +146,7 @@ export default function AIImages() {
           );
         })}
       </div>
-      {view === "styles" ? (
+      {view === 'weekly' ? <InsightWorkspace /> : view === "styles" ? (
         <Styles />
       ) : view === "templates" ? (
         <TemplateEditor kind="ranking" />

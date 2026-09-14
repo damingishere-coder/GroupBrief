@@ -27,6 +27,24 @@ def process_one(settings) -> bool:
     if not job:
         return False
     try:
+        if job['job_kind']=='capture':
+            from app.knowledge.capture import PrimaryBusy, capture_day
+            from app.knowledge.jobs import defer
+            try:
+                result=capture_day(settings,job)
+            except PrimaryBusy:
+                defer(settings.db_path,job,'PRIMARY_BUSY')
+                return True
+            finish(settings.db_path,job,'SUCCEEDED',result)
+            return True
+        if job["job_kind"] == "insight":
+            from app.knowledge.insights import build
+            scope = json.loads(job['scope_json'])
+            heartbeat(settings.db_path, job, {})
+            result = build(settings.db_path, scope['group_id'], scope['kind'], scope['day'],
+                           settings.app_timezone, fence=lambda con: assert_owner(con, job))
+            finish(settings.db_path, job, 'SUCCEEDED', result)
+            return True
         if job["job_kind"] != "import":
             raise ValueError("不支持的知识任务类型")
         scope = json.loads(job["scope_json"])
@@ -112,6 +130,8 @@ def main():
         try:
             if time.monotonic() - last_scan > 300:
                 scan_recent(settings)
+                from app.knowledge.capture import schedule_knowledge
+                schedule_knowledge(settings)
                 last_scan = time.monotonic()
             process_one(settings)
         except Exception:

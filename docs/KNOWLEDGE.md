@@ -1,6 +1,6 @@
 # Memory & Insight 分阶段实施
 
-## 当前交付：Phase 0 消息来源与本地导入
+## 当前交付：Phase 0 消息来源与本地导入 + Phase 1 周度洞察
 
 此阶段新增可选的统一消息层、来源记录、后台导入账本和消息证据页面。
 不改变日报流水线、图片、发送账本或原 output 文件。没有 AI 调用。
@@ -28,7 +28,7 @@ python scripts/migrate_knowledge.py --source data/groupbrief.db --output data/gr
 不创建第二个监听端口或 Windows 计划任务。测试的 `GROUPBRIEF_NO_SCHEDULER=1` 同时禁用它。
 该 worker 每五分钟扫描 `KNOWLEDGE_GROUP_IDS=1` 等明确灰度群的最近八个运行日期快照；
 该配置默认为空，不自动扫描任何群。更早内容或其他群使用显式 Backfill。
-当前阶段尚不从微信独立补采缺日。
+Phase 1 可选独立缺日读取见下文；默认仍关闭。
 
 回滚：关闭 KNOWLEDGE_ENABLED，恢复上一版代码和前端，保留扩展表及数据。
 旧核心 schema 版本保持不变，不需要恢复整库，不覆盖升级后发送记录。
@@ -52,7 +52,7 @@ python scripts/migrate_knowledge.py --source data/groupbrief.db --output data/gr
 
 ## 后续阶段
 
-1. Phase 1：完整消息覆盖、全员确定性 Weekly Insight、独立缺日读取和周期 revision。
+1. Phase 1（已实现）：全员确定性 Weekly Insight、可选独立缺日读取和周期 revision。
 2. Phase 2：中文 FTS5、跨日期检索、报告索引及性能验收。
 3. Phase 3：AI 操作账本、分析复用、增量 Memory、证据验证、合并和撤销。
 4. Phase 4：Storyline 时间轴和内容型周报。
@@ -60,3 +60,39 @@ python scripts/migrate_knowledge.py --source data/groupbrief.db --output data/gr
 6. Phase 6：存在实际召回缺口后再试点 Semantic Search。
 
 各阶段独立 PR、检查、灰度和回滚。AI 未知结果不得自动重试；历史 AI 首批近 90 天仍需成本预览。
+
+## Phase 1：Weekly Insight
+
+在现有“日报作品”内选择“Weekly · 周度洞察”。选择群及周期内日期即可提交计算任务；
+可查看全部成员排行、发言天数、排名变化、新晋 Top、消息量变化、周冠军和每日趋势。
+缺数据时显示已知消息数，隐藏不可靠的环比与冠军；未知日不画成 0。
+身份不确定时展示人数范围，停止确定的个人排名变化推断。
+
+新增 `report_insights`、`report_evidence` 两张扩展表。再次执行副本迁移脚本安装本阶段结构，
+不修改核心版本。每期报告冻结规则、消息 ID / hash、基准期和覆盖记录；相同输入复用，
+迟到数据产生新 revision，旧报告不变。来源入口使用该 revision 的消息集合。
+统计全由程序计算，此阶段 AI 状态为 DISABLED，不生成或发送新图片。
+
+### 独立缺日读取
+
+配置 `KNOWLEDGE_CAPTURE_ENABLED=true` 和明确的 `KNOWLEDGE_SOURCE_SCOPE` 后才允许补采；
+默认两个条件均不满足，不会访问微信。scope 表示本机账号与数据源范围，不是凭据。
+必须确认历史与当前来源确属同一账号才能复用 `legacy:installation`，否则使用独立 scope；
+不同 scope 不自动合并，混合来源周期不出正式环比。
+
+灰度群每天 09:15 后检查最近七个自然日（包括周末）的覆盖缺口。优先使用已导入完整快照，
+只补读缺口；每页最多等待 10 秒、一次完整取数最多 30 秒，避免长期占用微信读取服务。
+读取前检查生成锁及现有发送 claim；主流程启动后不再提交下一页。结果保存到
+`output/.knowledge/captures/<job_id>/<lease_token>/`，不覆盖日报归档；MCP 原始记录与来源一起保留。
+只有明确的分页终止标记、有效结构和无源记录冲突才允许声明完整覆盖。
+
+每日 10:00 后为空闲灰度群检查上一完整自然周。新的输入版本触发重算，相同结果复用。
+该检查也能在周一停机后恢复。报告新旧版本始终只在工作台呈现，不进入现有自动发送链路。
+月报仅有时间边界基础函数，尚未开放接口或调度；后续阶段另行交付内容结构。
+
+### 验证记录
+
+Phase 0：真实数据库副本导入 158 份可验证归档后得到 130,933 条去重消息，约 17 秒；
+另外 6 份 hash 不一致归档被拒绝。原正式数据库和归档保持未修改。
+Phase 1：增加跨日活跃人数、全员排行、零基数、数据缺口、身份不确定、迟到数据 revision、
+闰年/跨年边界、分页完整性、主流程发送阻塞和 API 来源回溯测试。
