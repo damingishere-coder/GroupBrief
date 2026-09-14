@@ -21,7 +21,7 @@ import hashlib
 import re
 from time import perf_counter
 import unicodedata
-from datetime import datetime
+from datetime import datetime, time
 from pathlib import Path
 
 from app.config.settings import Settings, get_settings
@@ -453,8 +453,13 @@ class WeChatDataAnalysisProvider(ChatHistoryProvider):
         while day <= last_day:
             anchor = self._anchor_for_day(group_id, day, tz, stats, fetch_deadline)
             if anchor:
+                # Each day's anchor must drain only that day's part of the window.
+                # Using the full report window here rescans the whole week seven
+                # times on legacy servers and exhausts the shared fetch deadline.
+                day_start = max(start_time, datetime.combine(day, time.min))
+                day_end = min(end_time, datetime.combine(day, time.max))
                 self._drain_around(
-                    group_id, anchor, start_time, end_time, collect, stats, fetch_deadline
+                    group_id, anchor, day_start, day_end, collect, stats, fetch_deadline
                 )
             day = day.fromordinal(day.toordinal() + 1)
 

@@ -21,6 +21,7 @@ from app.core.observability import log_event
 from app.data_sources.base import V2Message, WeChatDataSource
 from app.db.models import Group
 from app.pipeline.stage_result import StageResult
+from app.pipeline.weekly_messages import fetch_weekly_messages
 from app.providers.ai.base import ExternalCallResultUnknownError
 from app.ranking.engine import RankingEngine
 from app.ranking.engine_types import RankingResult
@@ -451,11 +452,20 @@ class GenerationStages:
         group = context.group
         try:
             with bounded_slot("wechat_fetch", self.settings.wechat_fetch_concurrency):
-                fetch = self.data_source.fetch_messages(
-                    group.wechat_group_id,
-                    context.window.period_start,
-                    context.window.period_end,
-                )
+                if context.window.report_kind == "weekly" and not context.refresh_messages:
+                    fetch = fetch_weekly_messages(
+                        store=self.store, group_name=context.group_name,
+                        group_id=group.wechat_group_id,
+                        start=context.window.period_start, end=context.window.period_end,
+                        data_source=self.data_source, load_snapshot=self._load_message_snapshot,
+                        timezone=self.settings.app_timezone,
+                    )
+                else:
+                    fetch = self.data_source.fetch_messages(
+                        group.wechat_group_id,
+                        context.window.period_start,
+                        context.window.period_end,
+                    )
         except Exception as exc:
             context.timings["fetch_ms"] = round((perf_counter() - started_at) * 1000)
             self.store.update(

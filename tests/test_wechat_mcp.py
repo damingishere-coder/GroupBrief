@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import socket
 import urllib.error
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pytest
 from fastapi import FastAPI
@@ -715,6 +715,50 @@ def test_fetch_messages_multiple_days_dedup():
     assert result.messages[0].source_message_id == "dup"
     # 窗口内每天都会请求锚点
     assert len(anchor_params) >= 2
+
+
+@pytest.mark.parametrize("partial_window", [False, True])
+def test_legacy_weekly_fetch_covers_window_without_repeated_week_scans(partial_window):
+    """Paginate real-shaped daily anchors, including midnight ties and an empty day."""
+    from zoneinfo import ZoneInfo
+
+    tz = ZoneInfo("Asia/Shanghai")
+    first_day = datetime(2026, 8, 10)
+    messages = []
+    for day_index in range(-1, 8):
+        if day_index == 3:
+            continue
+        day = first_day + timedelta(days=day_index)
+        # More than two pages per day; distinct messages can share a timestamp.
+        for index in range(240):
+            at = day + timedelta(seconds=(index // 2) * 726)
+            messages.append(_msg(f"{day_index}-{index}", at.replace(tzinfo=tz).timestamp()))
+    positions = {item["id"]: index for index, item in enumerate(messages)}
+
+    def anchor(params):
+        match = next((item for item in messages
+                      if _mcp_timestamp(item["createTime"]).date().isoformat() == params["date"]), None)
+        return {"anchorId": match["id"] if match else None}
+
+    def around(params):
+        index = positions[params["anchor_id"]]
+        return {"messages": messages[max(0, index - params["before"]):index + params["after"] + 1]}
+
+    fake = FakeMCPClient().on("wechat.chat.get_messages_range", raise_mcp("Unknown tool"))
+    fake.on("wechat.chat.get_message_anchor", anchor).on("wechat.chat.get_message_around", around)
+    start = first_day + (timedelta(hours=12) if partial_window else timedelta())
+    end = first_day + timedelta(days=7) - timedelta(microseconds=1)
+    if partial_window:
+        end -= timedelta(hours=12)
+    result = _provider(fake).fetch_messages("g@chatroom", start, end)
+
+    expected = [item["id"] for item in messages if start <= _mcp_timestamp(item["createTime"]) <= end]
+    assert result.status == ProviderStatus.OK
+    assert len(result.messages) == len(expected)
+    assert {item.source_message_id for item in result.messages} == set(expected)
+    assert [item.timestamp for item in result.messages] == sorted(item.timestamp for item in result.messages)
+    # Full-week rescans exceed 100 calls for this fixture; day-bounded scans use <= 38.
+    assert len(fake.calls) <= 38
 
 
 def test_fetch_messages_date_filtering_and_conversion():
