@@ -43,7 +43,10 @@ def install_schema(path):
 def source_version(con):
     report_version=con.execute('SELECT coalesce(max(id),0) FROM report_insights').fetchone()[0]
     groups=[tuple(r) for r in con.execute('SELECT id,deleted_at FROM groups ORDER BY id')]
-    return digest([data_version(con),report_version,groups])
+    memory_version=[]
+    if con.execute("SELECT 1 FROM sqlite_master WHERE name='memories'").fetchone():
+        memory_version=[tuple(r) for r in con.execute('SELECT id,version FROM memories ORDER BY id')]
+    return digest([data_version(con),report_version,groups,memory_version])
 
 
 def state(con):
@@ -196,6 +199,8 @@ def build_index(path,output,*,rebuild=False,fence=None,checkpoint=None):
     removed=set(known_legacy)-{d['ref'] for d in manifest['legacy']}
     for ref in removed:
         write(lambda con:con.execute(f'DELETE FROM {report_table} WHERE ref=?',(ref,)))
+    from app.knowledge.memory_search import update_index
+    update_index(path,fence=fence,checkpoint=checkpoint)
     watermark={'batches':manifest['batches'],'reports':manifest['reports'],
                'legacy':{d['ref']:d['source_hash'] for d in manifest['legacy']},'data_version':manifest['data_version']}
     if checkpoint:
@@ -212,6 +217,9 @@ def build_index(path,output,*,rebuild=False,fence=None,checkpoint=None):
 
 
 def search(path,output,query,*,object_type='message',sort='relevance',limit=20,cursor=None,**filters):
+    if object_type=='memory':
+        from app.knowledge.memory_search import search as memory_search
+        return memory_search(path,query,sort=sort,limit=limit,cursor=cursor,**filters)
     terms,match=query_terms(query)
     if object_type not in {'message','report'} or sort not in {'relevance','time'}:
         raise ValueError('不支持的搜索类型或排序')

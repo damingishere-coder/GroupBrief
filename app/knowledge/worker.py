@@ -27,6 +27,26 @@ def process_one(settings) -> bool:
     if not job:
         return False
     try:
+        if job['job_kind']=='memory':
+            from app.knowledge.ai_operations import HoldUnknown,WaitBudget
+            from app.knowledge.capture import PrimaryBusy
+            from app.knowledge.jobs import defer
+            from app.knowledge.memory_pipeline import run
+            from app.providers.ai.base import ExternalCallNotSubmittedError
+            try:
+                result=run(settings,job)
+                finish(settings.db_path,job,'PARTIAL' if result['rejected'] else 'SUCCEEDED',result)
+            except HoldUnknown as exc:
+                finish(settings.db_path,job,'HOLD_UNKNOWN',{'reason':str(exc)},'AI_RESULT_UNKNOWN')
+            except WaitBudget as exc:
+                finish(settings.db_path,job,'WAIT_BUDGET',{'reason':str(exc)},'WAIT_BUDGET')
+                from app.knowledge.db import transaction
+                tomorrow=(datetime.now(ZoneInfo(settings.app_timezone))+timedelta(days=1)).replace(hour=11,minute=30,second=0,microsecond=0).astimezone(ZoneInfo('UTC')).isoformat(timespec='microseconds')
+                with connect(settings.db_path,write=True) as con,transaction(con):
+                    con.execute("UPDATE knowledge_jobs SET next_retry_at=? WHERE id=? AND status='WAIT_BUDGET'",(tomorrow,job['id']))
+            except (PrimaryBusy,ExternalCallNotSubmittedError) as exc:
+                defer(settings.db_path,job,type(exc).__name__)
+            return True
         if job['job_kind']=='index':
             from app.knowledge.search import build_index
             result=build_index(settings.db_path,settings.output_dir,rebuild=json.loads(job['scope_json']).get('rebuild',False),
@@ -134,10 +154,14 @@ def main():
         if args.parent_pid and not parent_alive(args.parent_pid):
             return
         try:
+            refresh_runtime_settings(settings)
             if time.monotonic() - last_scan > 300:
                 scan_recent(settings)
                 from app.knowledge.capture import schedule_knowledge
                 schedule_knowledge(settings)
+                if getattr(settings,'knowledge_memory_enabled',False):
+                    from app.knowledge.memory_pipeline import schedule
+                    schedule(settings)
                 with connect(settings.db_path) as con:
                     search_ready=con.execute("SELECT 1 FROM sqlite_master WHERE name='search_state'").fetchone()
                 if search_ready:
@@ -150,6 +174,18 @@ def main():
         if args.once:
             return
         time.sleep(5)
+
+
+def refresh_runtime_settings(settings):
+    # Read the same persisted configuration as the owner without init_db(),
+    # health probes, schema changes, credential writes or a second scheduler.
+    from app.db.repository import _ENV_PRIORITY_FIELDS
+    with connect(settings.db_path) as con:
+        values={r['key']:r['value'] for r in con.execute('SELECT key,value FROM settings')}
+    for field,env_name in _ENV_PRIORITY_FIELDS.items():
+        if env_name in os.environ:
+            values.pop(field,None)
+    settings.apply_runtime_values(values)
 
 
 def parent_alive(pid: int) -> bool:

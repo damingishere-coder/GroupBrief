@@ -1,6 +1,6 @@
 import { get, post } from './api';
 export interface SearchHit {
-  type: 'message' | 'report'; id?: number; ref?: string; group_id: number | null;
+  type: 'message' | 'report' | 'memory'; id?: number; ref?: string; group_id: number | null;
   sender_name?: string; sent_at?: string; title?: string; period_start?: string;
   insight_id?: number; source_hash?: string; validation_state?: string;
   snippet: { text: string; match: boolean }[];
