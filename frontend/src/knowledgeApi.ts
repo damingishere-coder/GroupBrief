@@ -18,7 +18,7 @@ export interface KnowledgeStatus {
 }
 export interface KnowledgeJob {
   id: number; job_kind: string; status: string; error_code: string; pause_requested: number;
-  checkpoint: { next_item?: number }; result: { errors?: { locator: string; error: string }[] };
+  checkpoint: { next_item?: number }; result: { error?: string; reason?: string; rejected?: {candidate: number; reason: string}[]; errors?: { locator: string; error: string }[] };
 }
 export interface BackfillPreview {
   version: string; record_count: number; ai_calls: number;

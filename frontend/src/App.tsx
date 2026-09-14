@@ -14,6 +14,7 @@ const Tasks = lazy(() => import("./pages/v2/Tasks"));
 const Knowledge = lazy(() => import("./pages/v2/Knowledge"));
 const Search = lazy(() => import('./pages/v2/Search'));
 const Memories = lazy(() => import('./pages/v2/Memories'));
+const Storylines = lazy(() => import('./pages/v2/Storylines'));
 const Archive = lazy(() => import("./pages/v2/Archive"));
 const Settings = lazy(() => import("./pages/v2/Settings"));
 
@@ -77,6 +78,7 @@ export default function App() {
         </div>}
         {page === 'search' && <Search />}
         {page === 'memories' && <Memories />}
+        {page === 'storylines' && <Storylines />}
         {page === "messages" && (
           <div className="combined-workspace">
             <WorkspaceTabs active="messages" onNavigate={navigate} tabs={[{ key: "messages", label: "聊天记录" }, { key: "archive", label: "归档中心" }, { key: "search", label: "搜索" }, { key: "memories", label: "群聊记忆" }]} />

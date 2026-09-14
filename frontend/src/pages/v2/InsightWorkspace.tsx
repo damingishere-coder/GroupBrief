@@ -3,7 +3,7 @@ import { listGroups, type GroupV2 } from '../../api';
 import { insightApi, type InsightDetail, type InsightSummary, type MetricChange } from '../../insightApi';
 import { type MessageRecord } from '../../knowledgeApi';
 import EvidenceDrawer from '../../components/EvidenceDrawer';
-import { updateWorkspaceQuery, useWorkspaceQuery } from '../../navigation';
+import { navigateToHash, updateWorkspaceQuery, useWorkspaceQuery } from '../../navigation';
 import '../../knowledge.css';
 
 export function comparisonText(value: MetricChange | undefined) {
@@ -51,7 +51,7 @@ export default function InsightWorkspace() {
     catch (e) { setError(String(e)); } finally { setBusy(false); }
   }
   return <div className="knowledge-page insight-workspace">
-    <section><h2>Weekly Insight · 周度变化</h2><p>按消息发生日期计算完整自然周。当前阶段提供确定性统计，内容分析在后续阶段接入。</p>
+    <section><h2>Weekly Insight · 周度变化</h2><p>按消息发生日期计算自然周，话题与事件来自有来源的长期记忆。</p>
       <div className="insight-controls"><label>群聊 <select aria-label="洞察群聊" value={group} disabled={busy} onChange={e => updateWorkspaceQuery({ insightGroup: e.target.value || null, insight: null, message: null })}>
         <option value="">全部群</option>{groups.map(g => <option key={g.id} value={g.id}>{g.display_name || g.wechat_group_name}</option>)}</select></label>
       <label>周期内任一天 <input aria-label="洞察日期" type="date" value={day} onChange={e => setDay(e.target.value)} /></label>
@@ -75,6 +75,12 @@ export default function InsightWorkspace() {
       <p>周冠军：{report.metrics.champion?.name || '覆盖或身份不足，暂不确认'}</p>
       {!!report.metrics.inactive_previous_members.length && <p>上期活跃、本期未发言：{report.metrics.inactive_previous_members.map(m => m.name).join('、')}</p>}
       <details><summary>统计口径与覆盖缺口</summary><p>{report.metrics_version}</p><pre>{JSON.stringify(report.coverage, null, 2)}</pre></details>
+      <h3>讨论重点与值得记住的事情</h3>{!report.sections?.length&&<p>尚无可用的记忆分析，统计仍可独立查看。</p>}
+      {report.sections?.map(s=><article key={s.key}><h4>{s.title}</h4>{s.note&&<p>{s.note}</p>}{s.summary&&<p>{s.summary}</p>}{s.review_status==='review'&&<p>该记忆仍待核对</p>}
+        {s.items?.slice(0,15).map(t=><p key={t.memory_id}>{t.title} · {t.discussion_days} 个讨论日 · {t.participants} 位参与者 · {t.evidence_messages} 条证据 · {t.lifecycle==='newly_observed'?'首次观察到':t.lifecycle==='continuing'?'持续讨论':'再次活跃'}</p>)}
+        {s.claims?.map(c=><div key={c.key}><p>{c.text}</p>{c.message_ids.map(mid=><button key={mid} onClick={()=>updateWorkspaceQuery({message:String(mid)})}>查看断言来源 #{mid}</button>)}</div>)}
+        {s.memory_id&&<button onClick={()=>navigateToHash(`memories?memory=${s.memory_id}`,false)}>查看当前记忆</button>}{s.storyline_id&&<button onClick={()=>navigateToHash(`storylines?storyline=${s.storyline_id}`,false)}>查看故事线</button>}
+      </article>)}
       <h3>统计来源</h3>{sources?.items.map(m => <article key={m.id}><p>{m.sender_name}：{m.content}</p><button onClick={() => updateWorkspaceQuery({ message: String(m.id) })}>查看来源 #{m.id}</button></article>)}
       {(!sources || sources.next_offset != null) && <button disabled={busy} onClick={() => void loadSources()}>{sources ? '更多统计来源' : '查看统计来源'}</button>}
     </section>}

@@ -11,6 +11,54 @@ from app.knowledge.jobs import control
 router = APIRouter(prefix="/api/v2", tags=["knowledge"])
 
 
+@router.get('/storylines')
+def storylines(group_id: int | None=None,limit: int=Query(50,ge=1,le=100),settings: Settings=Depends(get_settings)):
+    from app.knowledge.storylines import list_storylines
+    return invoke(list_storylines,settings.db_path,group_id,limit)
+
+
+@router.get('/storylines/{storyline_id}')
+def storyline(storyline_id: int,settings: Settings=Depends(get_settings)):
+    from app.knowledge.storylines import detail
+    return invoke(detail,settings.db_path,storyline_id)
+
+
+class StorylinePreview(BaseModel):
+    model_config=ConfigDict(extra='forbid')
+    group_id: int=Field(gt=0)
+    entry_ids: list[int]=Field(min_length=1,max_length=100)
+    title: str=Field('',max_length=120)
+    storyline_id: int | None=Field(None,gt=0)
+
+
+class StorylineLink(StorylinePreview):
+    expected_version: str=Field(min_length=64,max_length=64)
+
+
+@router.post('/storylines/link-preview')
+def storyline_preview(body: StorylinePreview,settings: Settings=Depends(get_settings)):
+    from app.knowledge.storylines import link_preview
+    return invoke(link_preview,settings.db_path,**body.model_dump())
+
+
+@router.post('/storylines/link')
+def storyline_link(body: StorylineLink,settings: Settings=Depends(get_settings)):
+    from app.knowledge.storylines import link
+    return invoke(link,settings.db_path,**body.model_dump())
+
+
+class StorylineUnlink(BaseModel):
+    model_config=ConfigDict(extra='forbid')
+    entry_id: int=Field(gt=0)
+    expected_version: int=Field(gt=0)
+
+
+@router.post('/storylines/{storyline_id}/unlink')
+def storyline_unlink(storyline_id: int,body: StorylineUnlink,settings: Settings=Depends(get_settings)):
+    from app.knowledge.storylines import unlink
+    return invoke(unlink,settings.db_path,storyline_id,**body.model_dump())
+
+
 def invoke(fn, *args, **kwargs):
     try:
         return fn(*args, **kwargs)

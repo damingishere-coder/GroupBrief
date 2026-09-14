@@ -145,6 +145,8 @@ def build(path, group_id, kind, day, tz='Asia/Shanghai', fence=None):
         current_rows = [r for r in rows if r['sent_at']>=start]
         previous_rows = [r for r in rows if r['sent_at']<start]
         coverage_now, coverage_before = coverage(con,group_id,start,end), coverage(con,group_id,previous,start)
+        from app.knowledge.insight_content import collect
+        content=collect(con,group_id,start,end,previous,tz)
     current = compute(current_rows,start,end,policy,tz)
     before = compute(previous_rows,previous,start,policy,tz)
     comparable = coverage_now['complete'] and coverage_before['complete'] and coverage_now['source_scopes']==coverage_before['source_scopes']
@@ -174,12 +176,17 @@ def build(path, group_id, kind, day, tz='Asia/Shanghai', fence=None):
     manifest = {'metrics_version': METRICS_VERSION, 'policy': policy, 'timezone': tz,
                 'period': [start,end,previous], 'messages': [[r['id'],r['fact_sha256'],r['validation_state']] for r in rows],
                 'coverage': {'current': coverage_now,'previous': coverage_before}}
+    if content['version']:
+        manifest['content']={'version':content['version'],'entries':content['manifest'],'sections':content['sections']}
     input_hash = digest(manifest)
     with connect(path, write=True) as con, transaction(con):
         if fence:
             fence(con)
         if data_version(con) != version:
             raise Conflict('统计期间消息发生变化，请重新计算')
+        from app.knowledge.insight_content import version as content_version
+        if content_version(con,group_id)!=content['version']:
+            raise Conflict('记忆或故事线已变化，请重新计算')
         if not con.execute('SELECT 1 FROM groups WHERE id=? AND deleted_at IS NULL', (group_id,)).fetchone():
             raise Conflict('群已归档')
         old = con.execute('SELECT id FROM report_insights WHERE group_id=? AND kind=? AND period_start=? AND input_hash=?', (group_id,kind,start,input_hash)).fetchone()
@@ -190,7 +197,13 @@ def build(path, group_id, kind, day, tz='Asia/Shanghai', fence=None):
         cursor = con.execute('''INSERT INTO report_insights(group_id,kind,period_start,period_end,revision,is_current,
             metrics_version,input_hash,input_manifest_json,coverage_json,metrics_json,status,created_at)
             VALUES(?,?,?,?,?,1,?,?,?,?,?,?,?)''', (group_id,kind,start,end,revision,METRICS_VERSION,input_hash,canonical(manifest),canonical(manifest['coverage']),canonical(current),'READY' if coverage_now['complete'] else 'PARTIAL',now_iso()))
-        return {'id':cursor.lastrowid,'revision':revision,'reused':False}
+        report_id=cursor.lastrowid
+        if content['version']:
+            con.execute('UPDATE report_insights SET sections_json=? WHERE id=?',(canonical(content['sections']),report_id))
+            for ev in content['evidence']:
+                con.execute('''INSERT INTO report_evidence(report_id,group_id,section_key,claim_key,message_id,memory_entry_id)
+                    VALUES(?,?,?,?,?,?)''',(report_id,group_id,ev['section_key'],ev['claim_key'],ev['message_id'],ev['memory_entry_id']))
+        return {'id':report_id,'revision':revision,'reused':False}
 
 
 def list_reports(path,group_id=None,kind=None,include_history=False,limit=30):
@@ -218,7 +231,8 @@ def detail(path,report_id):
         manifest=result['input_manifest']
         manifest['message_count']=len(manifest['messages'])
         manifest['message_set_hash']=digest(manifest.pop('messages'))
-        result['evidence_refs']=[]
+        result['evidence_refs']=[dict(r) for r in con.execute('SELECT * FROM report_evidence WHERE report_id=? ORDER BY section_key,claim_key,message_id',(report_id,))]
+        manifest.pop('content',None)
         return result
 
 
