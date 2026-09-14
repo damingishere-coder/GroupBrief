@@ -8,7 +8,7 @@ import '../../knowledge.css';
 export default function Search() {
   const route = useWorkspaceQuery();
   const q = route.get('q') || '';
-  const type = route.get('type') === 'report' ? 'report' : 'message';
+  const type = route.get('type') === 'report' ? 'report' : route.get('type') === 'memory' ? 'memory' : 'message';
   const group = route.get('groupId') || '';
   const start = route.get('start') || '';
   const end = route.get('end') || '';
@@ -68,7 +68,7 @@ export default function Search() {
   }
   return <div className="knowledge-page search-workspace"><header><div><h1>搜索群聊</h1><p>找到过去的讨论，直接查看原消息。查询在本地执行，不调用 AI。</p></div></header>
     <section><form onSubmit={submit} className="insight-controls"><label>关键词 <input aria-label="搜索关键词" value={input} placeholder="Claude Code、手机、显示器…" onChange={e => setInput(e.target.value)} maxLength={256} /></label><button disabled={busy || !input.trim()}>搜索</button></form>
-      <div className="insight-controls search-filters"><label>搜索对象 <select aria-label="搜索对象" value={type} onChange={e => updateWorkspaceQuery({ type: e.target.value, sender: null })}><option value="message">原始消息</option><option value="report">群报文字</option></select></label>
+      <div className="insight-controls search-filters"><label>搜索对象 <select aria-label="搜索对象" value={type} onChange={e => updateWorkspaceQuery({ type: e.target.value, sender: null })}><option value="message">原始消息</option><option value="report">群报文字</option><option value="memory">长期记忆</option></select></label>
         <label>群聊 <select aria-label="搜索群聊筛选" value={group} onChange={e => updateWorkspaceQuery({ groupId: e.target.value || null })}><option value="">全部群</option>{groups.map(g => <option value={g.id} key={g.id}>{g.display_name || g.wechat_group_name}</option>)}</select></label>
         <label>开始日期 <input type="date" aria-label="搜索开始日期" value={start} onChange={e => updateWorkspaceQuery({ start: e.target.value || null })} /></label>
         <label>结束日期（不含） <input type="date" aria-label="搜索结束日期" value={end} onChange={e => updateWorkspaceQuery({ end: e.target.value || null })} /></label>
@@ -87,6 +87,7 @@ export default function Search() {
         <p>{hit.snippet.map((part, n) => part.match ? <mark key={n}>{part.text}</mark> : <span key={n}>{part.text}</span>)}</p>
         {hit.validation_state && hit.validation_state !== 'valid' && <p>来源状态：{hit.validation_state}</p>}
         {hit.type === 'message' ? <button onClick={() => updateWorkspaceQuery({ message: String(hit.id) })}>查看来源 #{hit.id}</button>
+          : hit.type === 'memory' ? <button onClick={() => navigateToHash(`memories?memory=${hit.id}`,false)}>查看记忆与证据</button>
           : hit.insight_id ? <button onClick={() => navigateToHash(`images?view=weekly&insight=${hit.insight_id}`, false)}>查看周期洞察</button>
           : <button onClick={() => updateWorkspaceQuery({ reportRef: hit.ref || null, reportHash: hit.source_hash || null })}>查看历史群报文字</button>}
       </article>)}{result.next_cursor && <button disabled={busy} onClick={() => void more()}>更多结果</button>}

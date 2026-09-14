@@ -13,6 +13,7 @@ const ChatRecords = lazy(() => import("./pages/v2/ChatRecords"));
 const Tasks = lazy(() => import("./pages/v2/Tasks"));
 const Knowledge = lazy(() => import("./pages/v2/Knowledge"));
 const Search = lazy(() => import('./pages/v2/Search'));
+const Memories = lazy(() => import('./pages/v2/Memories'));
 const Archive = lazy(() => import("./pages/v2/Archive"));
 const Settings = lazy(() => import("./pages/v2/Settings"));
 
@@ -21,7 +22,7 @@ function WorkspaceTabs({
   active,
   onNavigate,
 }: {
-  tabs: { key: "groups" | "tasks" | "knowledge" | "messages" | "archive"; label: string }[];
+  tabs: { key: "groups" | "tasks" | "knowledge" | "messages" | "archive" | "memories" | "search"; label: string }[];
   active: string;
   onNavigate: (key: string) => void;
 }) {
@@ -75,9 +76,10 @@ export default function App() {
           <Knowledge />
         </div>}
         {page === 'search' && <Search />}
+        {page === 'memories' && <Memories />}
         {page === "messages" && (
           <div className="combined-workspace">
-            <WorkspaceTabs active="messages" onNavigate={navigate} tabs={[{ key: "messages", label: "聊天记录" }, { key: "archive", label: "归档中心" }]} />
+            <WorkspaceTabs active="messages" onNavigate={navigate} tabs={[{ key: "messages", label: "聊天记录" }, { key: "archive", label: "归档中心" }, { key: "search", label: "搜索" }, { key: "memories", label: "群聊记忆" }]} />
             <ChatRecords />
           </div>
         )}

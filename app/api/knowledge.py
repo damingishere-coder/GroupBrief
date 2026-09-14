@@ -26,6 +26,111 @@ def invoke(fn, *args, **kwargs):
         raise HTTPException(422, detail=str(exc)) from exc
 
 
+@router.get('/memories')
+def memories(group_id: int | None=None,memory_type: str | None=None,status: str | None=None,
+             limit: int=Query(50,ge=1,le=100),offset: int=Query(0,ge=0),settings: Settings=Depends(get_settings)):
+    from app.knowledge.memory import list_memories
+    return invoke(list_memories,settings.db_path,group_id,memory_type,status,limit,offset)
+
+
+class MergePreview(BaseModel):
+    model_config=ConfigDict(extra='forbid')
+    source_id: int=Field(gt=0)
+    target_id: int=Field(gt=0)
+
+
+class MergeRequest(MergePreview):
+    expected_version: str=Field(min_length=64,max_length=64)
+
+
+@router.post('/memories/merge-preview')
+def memory_merge_preview(body: MergePreview,settings: Settings=Depends(get_settings)):
+    from app.knowledge.memory import merge_preview
+    return invoke(merge_preview,settings.db_path,**body.model_dump())
+
+
+@router.post('/memories/merge')
+def memory_merge(body: MergeRequest,settings: Settings=Depends(get_settings)):
+    from app.knowledge.memory import merge
+    return invoke(merge,settings.db_path,**body.model_dump())
+
+
+@router.get('/memories/{memory_id}')
+@router.get('/memories/{memory_id}/entries')
+def memory_detail(memory_id: int,offset: int=Query(0,ge=0),limit: int=Query(30,ge=1,le=100),settings: Settings=Depends(get_settings)):
+    from app.knowledge.memory import detail
+    return invoke(detail,settings.db_path,memory_id,offset,limit)
+
+
+class MemoryPatch(BaseModel):
+    model_config=ConfigDict(extra='forbid')
+    expected_version: int=Field(gt=0)
+    title: str | None=Field(None,min_length=1,max_length=120)
+    keywords: list[str] | None=Field(None,max_length=15)
+    status: Literal['active','review','archived'] | None=None
+
+
+@router.patch('/memories/{memory_id}')
+def memory_patch(memory_id: int,body: MemoryPatch,settings: Settings=Depends(get_settings)):
+    from app.knowledge.memory import patch
+    return invoke(patch,settings.db_path,memory_id,**body.model_dump())
+
+
+class UndoMerge(BaseModel):
+    model_config=ConfigDict(extra='forbid')
+    operation_id: int=Field(gt=0)
+    expected_version: int=Field(gt=0)
+
+
+@router.post('/memories/{memory_id}/undo-merge')
+def memory_undo(memory_id: int,body: UndoMerge,settings: Settings=Depends(get_settings)):
+    from app.knowledge.memory import undo_merge
+    return invoke(undo_merge,settings.db_path,memory_id,**body.model_dump())
+
+
+@router.get('/knowledge/memory/status')
+def memory_status(settings: Settings=Depends(get_settings)):
+    from app.knowledge.ai_operations import status
+    return invoke(status,settings)
+
+
+class MemoryBackfill(BaseModel):
+    model_config=ConfigDict(extra='forbid')
+    group_id: int | None=Field(None,gt=0)
+    start: str | None=None
+    end: str | None=None
+    mode: Literal['reuse','supplement']='reuse'
+
+
+class MemoryBackfillStart(MemoryBackfill):
+    expected_version: str=Field(min_length=64,max_length=64)
+
+
+@router.post('/knowledge/memory/backfill/preview')
+def memory_preview(body: MemoryBackfill,settings: Settings=Depends(get_settings)):
+    from app.knowledge.memory_pipeline import preview
+    return invoke(preview,settings,**body.model_dump())
+
+
+@router.post('/knowledge/memory/backfill',status_code=202)
+def memory_backfill(body: MemoryBackfillStart,settings: Settings=Depends(get_settings)):
+    from app.knowledge.memory_pipeline import start_backfill
+    return invoke(start_backfill,settings,**body.model_dump())
+
+
+class UnknownResolution(BaseModel):
+    model_config=ConfigDict(extra='forbid')
+    operation_id: int=Field(gt=0)
+    resolution: Literal['confirmed_not_submitted','abandon']
+    note: str=Field(min_length=5,max_length=2000)
+
+
+@router.post('/knowledge/jobs/{job_id}/resolve-unknown')
+def unknown_resolution(job_id: int,body: UnknownResolution,settings: Settings=Depends(get_settings)):
+    from app.knowledge.ai_operations import resolve_unknown
+    return invoke(resolve_unknown,settings.db_path,job_id,**body.model_dump())
+
+
 @router.get("/knowledge/status")
 def knowledge_status(settings: Settings = Depends(get_settings)):
     try:
@@ -146,15 +251,16 @@ def insight_messages(report_id: int, offset: int = Query(0,ge=0), limit: int = Q
 
 
 @router.get('/search')
-def search_messages(q: str = Query(min_length=1,max_length=256), object_type: Literal['message','report']='message',
+def search_messages(q: str = Query(min_length=1,max_length=256), object_type: Literal['message','report','memory']='message',
                     sort: Literal['relevance','time']='relevance',group_id: int | None=None,
-                    start: str | None=None,end: str | None=None,sender_id: str | None=None,message_type: str | None=None,
+                    start: str | None=None,end: str | None=None,sender_id: str | None=None,message_type: str | None=None,memory_type: str | None=None,
                     include_deleted: bool=False,include_orphans: bool=False,limit: int=Query(20,ge=1,le=100),cursor: str | None=None,
                     settings: Settings=Depends(get_settings)):
     from app.knowledge.search import search
+    extra={'memory_type':memory_type} if object_type=='memory' else {}
     return invoke(search,settings.db_path,settings.output_dir,q,object_type=object_type,sort=sort,limit=limit,cursor=cursor,
                   group_id=group_id,start=start,end=end,sender_id=sender_id,message_type=message_type,
-                  include_deleted=include_deleted,include_orphans=include_orphans)
+                  include_deleted=include_deleted,include_orphans=include_orphans,**extra)
 
 
 @router.get('/search/status')

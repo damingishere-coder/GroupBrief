@@ -26,6 +26,9 @@ SENSITIVE_KEYS = {
 }
 
 EDITABLE_KEYS = {
+    "knowledge_memory_call_budget",
+    "knowledge_memory_input_budget",
+    "knowledge_memory_output_budget",
     "wechat_data_dir",
     "wechat_export_dir",
     "wechat_cli_path",
@@ -128,6 +131,9 @@ def update_settings(payload: SettingsPayload, session: Session = Depends(repo.ge
             raise HTTPException(status_code=422, detail=f"设置值类型无效：{', '.join(rejected)}")
         changed = set(requested)
         try:
+            if changed & {'knowledge_memory_call_budget','knowledge_memory_input_budget','knowledge_memory_output_budget'}:
+                if not (0<=candidate.knowledge_memory_call_budget<=20 and 0<=candidate.knowledge_memory_input_budget<=200000 and 0<=candidate.knowledge_memory_output_budget<=40000):
+                    raise ValueError('记忆预算超出允许范围：每日调用 0—20，输入 0—200000，输出 0—40000')
             if changed & _SUMMARY_CONFIG_KEYS:
                 validate_summary_provider_config(candidate)
             if "wechat_sender_mode" in changed:

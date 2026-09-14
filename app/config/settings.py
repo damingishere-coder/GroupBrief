@@ -38,6 +38,8 @@ _ENVIRONMENT_ONLY_FIELDS = frozenset(
         "knowledge_group_ids",
         "knowledge_capture_enabled",
         "knowledge_source_scope",
+        "knowledge_memory_enabled",
+        "knowledge_memory_ai_enabled",
     }
 )
 
@@ -68,6 +70,11 @@ class Settings(BaseSettings):
     knowledge_group_ids: str = ""
     knowledge_capture_enabled: bool = False
     knowledge_source_scope: str = ""
+    knowledge_memory_enabled: bool = False
+    knowledge_memory_ai_enabled: bool = False
+    knowledge_memory_call_budget: int = 3
+    knowledge_memory_input_budget: int = 24000
+    knowledge_memory_output_budget: int = 4000
     knowledge_min_free_bytes: int = 1024 * 1024 * 1024
 
     # V1 兼容历史读取；正式 V2 使用下方 WeChatDataAnalysis MCP/导出配置。

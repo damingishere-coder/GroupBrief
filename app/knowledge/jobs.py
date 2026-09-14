@@ -29,6 +29,10 @@ def claim(path: Path, owner: str, *, lease_seconds: int = 120) -> dict | None:
     with connect(path, write=True) as con, transaction(con):
         # Phase 0 jobs have no external calls. AI jobs will have their own ledger
         # and are never recovered by this local-only lease rule.
+        if con.execute("SELECT 1 FROM sqlite_master WHERE name='ai_operations'").fetchone():
+            from app.knowledge.ai_operations import recover
+            recover(con)
+        con.execute("UPDATE knowledge_jobs SET status='PENDING' WHERE status='WAIT_BUDGET' AND next_retry_at!='' AND next_retry_at<=? AND pause_requested=0",(now,))
         con.execute("""UPDATE knowledge_jobs SET status=CASE WHEN pause_requested=1 THEN 'PAUSED' ELSE 'WAIT_RETRY' END,
             lease_token='',lease_owner='',lease_until='',updated_at=?
             WHERE status='RUNNING' AND lease_until<? AND job_kind IN ('import','scan','insight','capture','index')""", (now, now))
