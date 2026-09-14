@@ -63,6 +63,8 @@ export default function Knowledge() {
           {['PENDING', 'RUNNING', 'WAIT_RETRY', 'WAIT_BUDGET'].includes(j.status) && <button disabled={busy || !!j.pause_requested} onClick={() => void action(async () => { await knowledgeApi.control(j.id, 'pause'); setRefresh(n => n + 1); })}>暂停</button>}
           {['FAILED', 'PAUSED', 'PARTIAL', 'WAIT_RETRY', 'WAIT_BUDGET'].includes(j.status) && <button disabled={busy || !status.worker_enabled} onClick={() => void action(async () => { await knowledgeApi.control(j.id, 'retry'); setRefresh(n => n + 1); })}>重试</button>}
           {j.result.errors?.map((e, i) => <p key={i}>{e.locator}：{e.error}</p>)}
+          {(j.result.error||j.result.reason)&&<p>{j.result.error||j.result.reason}</p>}
+          {j.result.rejected?.map(r=><p key={r.candidate}>候选 {r.candidate+1}：{r.reason}</p>)}
         </article>)}
       </section>
       <section><h2>统一消息</h2>{messages && !messages.items.length && <p>尚无已导入消息</p>}

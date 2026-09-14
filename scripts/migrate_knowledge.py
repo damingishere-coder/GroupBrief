@@ -13,6 +13,7 @@ from app.knowledge.db import CHECKSUM, MIGRATION_ID, connect, digest, install_sc
 from app.knowledge.insights import CHECKSUM as INSIGHT_CHECKSUM, MIGRATION_ID as INSIGHT_ID, install_schema as install_insights
 from app.knowledge.search import CHECKSUM as SEARCH_CHECKSUM, MIGRATION_ID as SEARCH_ID, install_schema as install_search
 from app.knowledge.memory import CHECKSUM as MEMORY_CHECKSUM, MIGRATION_ID as MEMORY_ID, install_schema as install_memory
+from app.knowledge.storylines import CHECKSUM as STORY_CHECKSUM, MIGRATION_ID as STORY_ID, install_schema as install_storylines
 
 
 def migrate(source: Path, output: Path | None = None) -> dict:
@@ -26,7 +27,7 @@ def migrate(source: Path, output: Path | None = None) -> dict:
             raise ValueError('核心 Schema 尚未升级')
         if con.execute('PRAGMA integrity_check').fetchone()[0] != 'ok' or con.execute('PRAGMA foreign_key_check').fetchall():
             raise ValueError('源库完整性检查失败')
-        extensions = {MIGRATION_ID: CHECKSUM, INSIGHT_ID: INSIGHT_CHECKSUM, SEARCH_ID: SEARCH_CHECKSUM, MEMORY_ID: MEMORY_CHECKSUM}
+        extensions = {MIGRATION_ID: CHECKSUM, INSIGHT_ID: INSIGHT_CHECKSUM, SEARCH_ID: SEARCH_CHECKSUM, MEMORY_ID: MEMORY_CHECKSUM, STORY_ID: STORY_CHECKSUM}
         result = {"migration": MIGRATION_ID, "checksum": CHECKSUM, "extensions": extensions,
                   "core_counts": core, "core_hashes": fingerprints, "dry_run": output is None}
         if output is None:
@@ -44,6 +45,7 @@ def migrate(source: Path, output: Path | None = None) -> dict:
             install_insights(output)
             install_search(output)
             install_memory(output)
+            install_storylines(output)
             with connect(output) as after:
                 for table, count in core.items():
                     if after.execute(f'SELECT count(*) FROM "{table}"').fetchone()[0] != count:

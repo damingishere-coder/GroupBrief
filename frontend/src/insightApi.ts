@@ -13,6 +13,7 @@ export interface MemberInsight {
 export interface CoverageStatus { complete: boolean; gaps: { start: string; end: string }[]; invalid_messages: number; source_scopes: string[] }
 export interface MetricChange { current: number; previous: number; delta: number | null; percent: number | null; state: string }
 export interface InsightDetail extends InsightSummary {
+  sections?: InsightSection[];
   metrics_version: string; coverage: { current: CoverageStatus; previous: CoverageStatus };
   metrics: { message_count: number; speaker_count: number; uncertain_identity_messages: number; count_policy: string;
     active_people_min: number; active_people_max: number; members: MemberInsight[];
@@ -20,6 +21,11 @@ export interface InsightDetail extends InsightSummary {
     daily_counts: { date: string; count: number | null; complete: boolean }[];
     inactive_previous_members: MemberInsight[];
   };
+}
+export interface InsightSection {
+  key: string; kind: string; title: string; summary?: string; note?: string; memory_id?: number; memory_entry_id?: number; storyline_id?: number; review_status?: string;
+  claims?: {key: string; text: string; message_ids: number[]}[];
+  items?: {memory_id: number; title: string; discussion_days: number; participants: number; evidence_messages: number; entry_count: number; lifecycle: string}[];
 }
 export const insightApi = {
   list: (group?: string, history = false) => get<{ items: InsightSummary[] }>(`/v2/insights?kind=weekly&include_history=${history}${group ? `&group_id=${encodeURIComponent(group)}` : ''}`),

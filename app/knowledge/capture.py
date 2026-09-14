@@ -151,6 +151,8 @@ def schedule_knowledge(settings, now=None):
             return
         groups=[dict(g) for g in con.execute('SELECT id,wechat_group_id FROM groups WHERE enabled=1 AND deleted_at IS NULL') if g['id'] in allowed]
         version=data_version(con)
+        from app.knowledge.insight_content import version as content_version
+        content_versions={g['id']:content_version(con,g['id']) for g in groups}
     for group in groups:
         if settings.knowledge_capture_enabled and settings.knowledge_source_scope and now.time()>=time(9,15):
             for offset in range(1,8):
@@ -165,4 +167,5 @@ def schedule_knowledge(settings, now=None):
                         'day':day.isoformat(),'source_scope':settings.knowledge_source_scope,'check_date':now.date().isoformat()},group_id=group['id'],priority=3)
         if now.time()>=time(10):
             day=(now.date()-timedelta(days=now.weekday()+1)).isoformat()
-            enqueue(settings.db_path,'insight',{'group_id':group['id'],'kind':'weekly','day':day,'data_version':version},group_id=group['id'],priority=5)
+            enqueue(settings.db_path,'insight',{'group_id':group['id'],'kind':'weekly','day':day,'data_version':version,
+                    'content_version':content_versions[group['id']]},group_id=group['id'],priority=5)

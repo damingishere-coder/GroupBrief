@@ -12,6 +12,7 @@ export type PageKey =
   | "knowledge"
   | "search"
   | "memories"
+  | "storylines"
   | "archive"
   | "settings"
   | "history"
@@ -30,12 +31,12 @@ export const NAVIGATION: NavigationItem[] = [
   { key: "images", label: "日报作品", icon: ImageSquare, activePages: ["ranking", "images"] },
   { key: "groups", label: "群聊管理", icon: ChatsCircle },
   { key: "tasks", label: "运行任务", icon: ListChecks, activePages: ["tasks", "knowledge"] },
-  { key: "messages", label: "消息归档", icon: ChatDots, activePages: ["messages", "archive", "search", "memories"] },
+  { key: "messages", label: "消息归档", icon: ChatDots, activePages: ["messages", "archive", "search", "memories", "storylines"] },
   { key: "settings", label: "设置", icon: GearSix },
 ];
 
 const PAGE_KEYS = new Set<PageKey>([
-  "dashboard", "groups", "tasks", "knowledge", "messages", "archive", "ranking", "images", "settings", "search", "memories",
+  "dashboard", "groups", "tasks", "knowledge", "messages", "archive", "ranking", "images", "settings", "search", "memories", "storylines",
 ]);
 
 export interface AppRoute {
@@ -102,7 +103,7 @@ window.addEventListener("hashchange", () => {
 function editorIdentity(hash: string) {
   const [path, query] = hash.split("?");
   const params = new URLSearchParams(query);
-  return `${path}:${params.get("date") || ""}:${params.get("group") || ""}:${params.get("view") || ""}:${params.get("message") || ""}:${params.get('insight') || ''}:${params.get('insightGroup') || ''}:${params.get('memory') || ''}:${params.get('groupId') || ''}`;
+  return `${path}:${params.get("date") || ""}:${params.get("group") || ""}:${params.get("view") || ""}:${params.get("message") || ""}:${params.get('insight') || ''}:${params.get('insightGroup') || ''}:${params.get('memory') || ''}:${params.get('groupId') || ''}:${params.get('storyline') || ''}`;
 }
 function allowNavigation(next: string) {
   return editorIdentity(next) === editorIdentity(acceptedHash) || !leaveGuard || leaveGuard();
