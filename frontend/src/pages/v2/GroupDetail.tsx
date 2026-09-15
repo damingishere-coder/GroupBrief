@@ -20,6 +20,7 @@ import {
   createGroup,
   discoverGroups,
   listGroups,
+  getNewGroupDefaults,
   getProviderCatalog,
   listImagePromptTemplates,
   listRankingTemplates,
@@ -88,7 +89,7 @@ function toForm(group: GroupV2): GroupPayload {
     enabled: group.enabled,
     provider_preference: group.provider_preference || "",
     schedule_rule: group.schedule_rule || "daily_previous_day",
-    send_time: "08:30",
+    send_time: group.send_time || "08:30",
     summary_provider: group.summary_provider || "",
     prompt_provider: group.prompt_provider || "",
     summary_model: group.summary_model || "",
@@ -130,7 +131,7 @@ export default function GroupDetail({ groupId, invalidGroupId }: GroupDetailProp
   const { msg, toast } = useToast();
   const [form, setForm] = useState<GroupPayload>({ ...EMPTY_FORM });
   const [originalForm, setOriginalForm] = useState<GroupPayload>({ ...EMPTY_FORM });
-  const [loading, setLoading] = useState(Boolean(groupId));
+  const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
   const [saving, setSaving] = useState(false);
   const [executing, setExecuting] = useState(false);
@@ -153,6 +154,7 @@ export default function GroupDetail({ groupId, invalidGroupId }: GroupDetailProp
   useEffect(() => {
     let active = true;
     setForm({ ...EMPTY_FORM });
+    setOriginalForm({ ...EMPTY_FORM });
     setErrors({});
     setExecution(null);
     setLoadError("");
@@ -177,7 +179,15 @@ export default function GroupDetail({ groupId, invalidGroupId }: GroupDetailProp
         .catch((error: unknown) => active && setLoadError(String(error)))
         .finally(() => active && setLoading(false));
     } else {
-      setLoading(false);
+      setLoading(true);
+      getNewGroupDefaults()
+        .then((defaults) => {
+          if (!active) return;
+          setForm(defaults);
+          setOriginalForm(defaults);
+        })
+        .catch((error: unknown) => active && setLoadError(`加载新增群默认配置失败：${String(error)}`))
+        .finally(() => active && setLoading(false));
     }
 
     const loadTemplates = async () => {
@@ -265,7 +275,7 @@ export default function GroupDetail({ groupId, invalidGroupId }: GroupDetailProp
       wechat_group_id: form.wechat_group_id.trim(),
       wechat_group_name: form.wechat_group_name?.trim() || form.display_name.trim(),
       send_target: form.send_target.trim(),
-      send_time: "08:30",
+      send_time: form.send_time,
     };
     const request = groupId ? updateGroup(groupId, payload) : createGroup(payload);
     request
@@ -337,7 +347,7 @@ export default function GroupDetail({ groupId, invalidGroupId }: GroupDetailProp
     <div className="group-detail-page">
       <PageHeader
         title={title}
-        description={groupId ? `群 ID ${groupId} · 修改后保存即可用于下一次任务。` : "绑定真实微信群后，再配置统计、模板与发送设置。"}
+        description={groupId ? `群 ID ${groupId} · 修改后保存即可用于下一次任务。` : "默认沿用现有启用群的常用配置，绑定新群后即可保存，也可按需调整。"}
         actions={
           <>
             <StatusBadge tone={form.enabled ? "success" : "neutral"}>{form.enabled ? "已启用" : "已停用"}</StatusBadge>
@@ -409,18 +419,18 @@ export default function GroupDetail({ groupId, invalidGroupId }: GroupDetailProp
       </section>
 
       <section className="group-detail-card">
-        <div className="group-detail-section-heading"><div><h2>统计与规则</h2><p>默认每天生成前一自然日群报；也可为单个群显式选择工作日汇总。</p></div></div>
+        <div className="group-detail-section-heading"><div><h2>统计与规则</h2><p>新增群沿用现有群的统计周期，也可按需单独调整。</p></div></div>
         <div className="group-detail-form-grid">
           <Field id="schedule-rule" label="统计周期规则">
             <select id="schedule-rule" value={form.schedule_rule} onChange={(event) => setField("schedule_rule", event.target.value)}>
-              <option value="daily_previous_day">每天统计前一天（默认）</option>
+              <option value="daily_previous_day">每天统计前一天</option>
               <option value="weekday_default">仅工作日（周一=周五至周日）</option>
               <option value="workdays_daily_monday_weekly">周一周报 Top15；周二至周五日报；周末停跑</option>
             </select>
           </Field>
           <Field id="send-batch-time" label="发送批次">
             <div id="send-batch-time">
-              <strong>每天 08:30</strong>
+              <strong>全局 {form.send_time}</strong>
               <span className="group-detail-field-help">所有启用群按稳定群 ID 顺序串行发送，群聊不能单独修改时间。</span>
             </div>
           </Field>
@@ -460,7 +470,7 @@ export default function GroupDetail({ groupId, invalidGroupId }: GroupDetailProp
           </Field>
           <label className="group-detail-switch" htmlFor="wechat-send-enabled">
             <input id="wechat-send-enabled" type="checkbox" checked={Boolean(form.wechat_send_enabled)} onChange={(event) => setField("wechat_send_enabled", event.target.checked)} />
-            <span><strong>允许微信自动发送</strong><small>默认关闭；仅在目标验证和文件传输助手验收完成后启用</small></span>
+            <span><strong>允许微信自动发送</strong><small>新增时沿用现有群配置；开启后，生成成功的群报会按全局发送时间自动发到本群</small></span>
           </label>
           <div className="group-detail-field">
             <label>发送目标安全校验</label>

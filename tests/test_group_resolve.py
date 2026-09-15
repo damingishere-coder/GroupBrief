@@ -212,6 +212,105 @@ def test_group_list_exposes_effective_target_and_mode(client):
     assert rows[manual_id]["effective_send_target"] == "人工目标"
 
 
+def _seed_workflow_groups(engine):
+    with Session(engine) as session:
+        # 最早的特殊配置和最新的旧默认值都不应覆盖多数群的工作流。
+        repo.save_group(session, Group(display_name="特例群", wechat_group_id="exception"))
+        for index in range(3):
+            repo.save_group(session, Group(
+                display_name=f"常用群{index}", wechat_group_id=f"common-{index}",
+                wechat_group_name=f"当前名称{index}", send_target="仅限原群的目标",
+                schedule_rule="workdays_daily_monday_weekly",
+                summary_provider="codex", prompt_provider="codex",
+                summary_model="gpt-6-astra", prompt_model="gpt-6-astra",
+                strict_image_fact_check=True, sender_name_policy="wechat_data_analysis",
+                wechat_send_enabled=True, image_theme="pink", image_theme_remaining_runs=1,
+                image_prompt_override="原群专属提示词",
+            ))
+        for index in range(4):
+            repo.save_group(session, Group(
+                display_name=f"停用群{index}", wechat_group_id=f"disabled-{index}", enabled=False,
+            ))
+
+
+def test_new_group_inherits_common_workflow_without_group_identity(client):
+    test_client, engine = client
+    _seed_workflow_groups(engine)
+    defaults = test_client.get("/api/groups/defaults").json()
+    assert defaults["schedule_rule"] == "workdays_daily_monday_weekly"
+    assert defaults["wechat_send_enabled"] is True
+    assert defaults["strict_image_fact_check"] is True
+    assert defaults["sender_name_policy"] == "wechat_data_analysis"
+    assert defaults["summary_provider"] == defaults["prompt_provider"] == "codex"
+    assert defaults["summary_model"] == defaults["prompt_model"] == "gpt-6-astra"
+    assert defaults["display_name"] == defaults["wechat_group_id"] == defaults["send_target"] == ""
+    assert defaults["image_prompt_override"] == ""
+    assert defaults["image_theme"] == "ai_free"
+
+    response = test_client.post("/api/groups", json={
+        "display_name": "新群", "wechat_group_id": "new@chatroom", "wechat_group_name": "新群当前名",
+    })
+    assert response.status_code == 200, response.text
+    with Session(engine) as session:
+        saved = session.get(Group, response.json()["id"])
+        assert saved.wechat_send_enabled is True
+        assert saved.schedule_rule == "workdays_daily_monday_weekly"
+        assert saved.strict_image_fact_check is True
+        assert saved.sender_name_policy == "wechat_data_analysis"
+        assert saved.send_target == saved.image_prompt_override == ""
+        assert saved.wechat_group_id == "new@chatroom"
+        assert saved.wechat_group_name == "新群当前名"
+        assert saved.image_theme_remaining_runs == 0
+
+
+def test_new_group_explicit_values_override_inherited_workflow(client):
+    test_client, engine = client
+    _seed_workflow_groups(engine)
+    response = test_client.post("/api/groups", json={
+        "display_name": "只生成群", "wechat_group_id": "generation-only@chatroom",
+        "wechat_send_enabled": False, "schedule_rule": "daily_previous_day", "image_enabled": False,
+    })
+    assert response.status_code == 200, response.text
+    with Session(engine) as session:
+        saved = session.get(Group, response.json()["id"])
+        assert saved.wechat_send_enabled is False
+        assert saved.image_enabled is False
+        assert saved.schedule_rule == "daily_previous_day"
+        assert saved.strict_image_fact_check is True
+
+
+def test_new_group_defaults_use_global_time_and_reload_current_groups(client):
+    from app.config.settings import Settings, get_settings
+
+    test_client, engine = client
+    test_client.app.dependency_overrides[get_settings] = lambda: Settings(_env_file=None, schedule_send_time="09:15")
+    empty_defaults = test_client.get("/api/groups/defaults").json()
+    assert empty_defaults["wechat_send_enabled"] is False
+    assert empty_defaults["send_time"] == "09:15"
+    _seed_workflow_groups(engine)
+    defaults = test_client.get("/api/groups/defaults").json()
+    assert defaults["wechat_send_enabled"] is True
+    assert defaults["send_time"] == "09:15"
+
+
+def test_from_name_inherits_same_workflow_as_create_form(client, monkeypatch):
+    test_client, engine = client
+    _seed_workflow_groups(engine)
+    monkeypatch.setattr(HistoryService, "resolve_group_names", lambda self, name: [
+        GroupMatch("new-bound@chatroom", "新绑定群", 10, "stub_export", "exact"),
+    ])
+    response = test_client.post("/api/groups/from-name", json={"name": "新绑定群"})
+    assert response.status_code == 200, response.text
+    with Session(engine) as session:
+        saved = session.get(Group, response.json()["id"])
+        assert saved.wechat_send_enabled is True
+        assert saved.schedule_rule == "workdays_daily_monday_weekly"
+        assert saved.strict_image_fact_check is True
+        assert saved.wechat_group_id == "new-bound@chatroom"
+        assert saved.wechat_group_name == "新绑定群"
+        assert saved.send_target == ""
+
+
 def test_sync_wechat_names_endpoint_updates_by_stable_id_without_sending(client, monkeypatch):
     test_client, engine = client
     with Session(engine) as session:
