@@ -32,6 +32,7 @@ from app.services.group_name_sync import (
     send_target_mode,
 )
 from app.services.group_provider_config import validate_group_provider_values
+from app.services.group_defaults import inherited_group_workflow
 
 router = APIRouter(prefix="/api/groups", tags=["groups"])
 
@@ -263,13 +264,25 @@ def list_groups(
     ]
 
 
+@router.get("/defaults")
+def new_group_defaults(
+    session: Session = Depends(repo.get_session),
+    settings: Settings = Depends(get_settings),
+):
+    values = GroupCreate(display_name="").model_dump()
+    values.update(inherited_group_workflow(repo.list_groups(session, only_enabled=True)))
+    return _apply_global_send_time(values, settings, explicitly_provided=False)
+
+
 @router.post("")
 def create_group(
     payload: GroupCreate,
     session: Session = Depends(repo.get_session),
     settings: Settings = Depends(get_settings),
 ):
-    raw_values = payload.model_dump()
+    raw_values = new_group_defaults(session, settings)
+    # 显式关闭发送或修改其他字段必须优先于继承值。
+    raw_values.update(payload.model_dump(exclude_unset=True))
     values = _apply_global_send_time(
         raw_values,
         settings,
@@ -507,7 +520,9 @@ def resolve_groups(name: str = Query("")):
 
 @router.post("/from-name")
 def bind_group_from_name(
-    payload: FromNameRequest, session: Session = Depends(repo.get_session)
+    payload: FromNameRequest,
+    session: Session = Depends(repo.get_session),
+    settings: Settings = Depends(get_settings),
 ):
     """按群名解析并绑定真实群。单精确匹配自动绑定；歧义需显式 group_id。"""
     name = payload.name.strip()
@@ -562,13 +577,16 @@ def bind_group_from_name(
             }
         return {"id": existing.id, "bound": True, "already_existed": True}
 
-    group = Group(
-        display_name=selected_name,
-        wechat_group_id=selected.group_id,
-        wechat_group_name=selected_name,
+    result = create_group(
+        GroupCreate(
+            display_name=selected_name,
+            wechat_group_id=selected.group_id,
+            wechat_group_name=selected_name,
+        ),
+        session,
+        settings,
     )
-    group = repo.save_group(session, group)
-    return {"id": group.id, "bound": True, "already_existed": False}
+    return {"id": result["id"], "bound": True, "already_existed": False}
 
 
 @router.post("/{group_id}/test-read")

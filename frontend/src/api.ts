@@ -539,6 +539,7 @@ export const testReadGroup = (groupId: number) =>
   post<TestReadResult>(`/groups/${groupId}/test-read`);
 
 export const listGroups = () => get<GroupV2[]>("/groups");
+export const getNewGroupDefaults = () => get<GroupPayload>("/groups/defaults");
 export const getProviderCatalog = () => get<ProviderCatalogResponse>("/system/providers");
 export const syncWechatGroupNames = () => post<GroupNameSyncResult>("/groups/sync-wechat-names");
 export const createGroup = (body: GroupPayload) => post<{ id: number; restored?: boolean }>("/groups", body);

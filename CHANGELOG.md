@@ -4,6 +4,8 @@ GroupBrief 使用 [Semantic Versioning](https://semver.org/) 记录公开版本�
 
 ## [Unreleased]
 
+- 新增群统一沿用现有启用群最常用的完整工作流配置，修复新增表单与按群名绑定仍使用旧默认值、自动发送意外关闭的问题；保留显式设置和新群独立发送目标。
+
 - Phase 5：同一群报作品体系加入 Monthly Insight，按原始消息计算自然月统计、日均值、跨月自然周交集趋势与本地关键词。
 - 月报复用可追溯 MemoryEntry 与长期故事线，不拼接周报；消息或分析不完整时禁止推断话题消失，内容更新保留历史 revision。
 
