@@ -419,18 +419,18 @@ export default function GroupDetail({ groupId, invalidGroupId }: GroupDetailProp
       </section>
 
       <section className="group-detail-card">
-        <div className="group-detail-section-heading"><div><h2>统计与规则</h2><p>默认每天生成前一自然日群报；也可为单个群显式选择工作日汇总。</p></div></div>
+        <div className="group-detail-section-heading"><div><h2>统计与规则</h2><p>新增群沿用现有群的统计周期，也可按需单独调整。</p></div></div>
         <div className="group-detail-form-grid">
           <Field id="schedule-rule" label="统计周期规则">
             <select id="schedule-rule" value={form.schedule_rule} onChange={(event) => setField("schedule_rule", event.target.value)}>
-              <option value="daily_previous_day">每天统计前一天（默认）</option>
+              <option value="daily_previous_day">每天统计前一天</option>
               <option value="weekday_default">仅工作日（周一=周五至周日）</option>
               <option value="workdays_daily_monday_weekly">周一周报 Top15；周二至周五日报；周末停跑</option>
             </select>
           </Field>
           <Field id="send-batch-time" label="发送批次">
             <div id="send-batch-time">
-              <strong>每天 08:30</strong>
+              <strong>全局 {form.send_time}</strong>
               <span className="group-detail-field-help">所有启用群按稳定群 ID 顺序串行发送，群聊不能单独修改时间。</span>
             </div>
           </Field>

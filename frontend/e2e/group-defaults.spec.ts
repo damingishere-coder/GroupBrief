@@ -31,6 +31,7 @@ test("新增群展示继承配置并保留用户显式关闭发送", async ({ pa
   await page.goto("/#/groups/new");
   await expect(page.getByRole("heading", { name: "新增群聊", exact: true })).toBeVisible();
   await expect(page.getByLabel("统计周期规则")).toHaveValue("workdays_daily_monday_weekly");
+  await expect(page.locator("#send-batch-time")).toContainText("09:15");
   await expect(page.getByLabel("允许微信自动发送")).toBeChecked();
   await expect(page.getByLabel("严格核对图片事实")).toBeChecked();
   await expect(page.getByLabel("排行榜名称来源")).toHaveValue("wechat_data_analysis");
