@@ -25,6 +25,7 @@ from typing import Callable, Iterator
 
 from app.config.settings import Settings, get_settings
 from app.ai.concurrency import bounded_slot, normalized_limit
+from app.ai.image_readability import IMAGE_READABILITY_RULES
 from app.core.logging import get_logger
 from app.image.image_task import ImageTaskResult, detect_image_format, verify_image
 
@@ -935,7 +936,7 @@ class CodexImageGenerator:
     @staticmethod
     def _attempt_prompt(prompt_text: str, job_id: str) -> str:
         return (
-            "$imagegen " + prompt_text + "\n\n"
+            f"$imagegen {prompt_text}\n\n{IMAGE_READABILITY_RULES}\n\n"
             f"本次生图任务 ID 是 {job_id}。"
             "只为本次任务调用一次 ImageGen，并只生成、选择一张最终图片。"
             "优先使用 1024×1536 像素的竖版 2:3 画布；"
@@ -1512,6 +1513,7 @@ class CodexImageGenerator:
         output_path: Path,
     ) -> dict:
         from PIL import Image
+        from app.image.normalization import opaque_report_image
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
         temp_path = output_path.with_name(f".{output_path.name}.{uuid.uuid4().hex}.tmp")
@@ -1523,7 +1525,7 @@ class CodexImageGenerator:
                 width, height = image.size
                 if width <= 0 or height <= 0:
                     raise ValueError(f"图片尺寸无效：{width}x{height}")
-                image.convert("RGB").save(temp_path, format="PNG")
+                opaque_report_image(image).save(temp_path, format="PNG")
             ok, detail = verify_image(temp_path)
             if not ok:
                 raise ValueError(detail)

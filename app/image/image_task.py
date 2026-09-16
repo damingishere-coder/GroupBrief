@@ -113,6 +113,11 @@ def verify_image_contract(prompt_file: Path, image_path: Path) -> tuple[bool, st
     ok, detail = verify_image(image_path)
     if not ok:
         return ok, detail
+    from app.image.readability import verify_report_readability
+
+    readable, readability_detail = verify_report_readability(prompt_file, image_path)
+    if not readable:
+        return False, readability_detail
     from app.image.fact_verification import (
         review_image_facts,
         strict_fact_verification_enabled,
