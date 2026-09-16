@@ -7,7 +7,7 @@ from io import BytesIO
 from types import SimpleNamespace
 
 import pytest
-from PIL import Image
+from PIL import Image, ImageChops
 
 from app.image import regeneration
 from app.image.image_task import ImageTaskResult
@@ -28,6 +28,13 @@ def _png_bytes(
 OLD_PNG = _png_bytes((20, 40, 60, 255))
 NEW_PNG = _png_bytes((80, 100, 120, 255))
 FLEXIBLE_SIZE_PNG = _png_bytes((100, 120, 140, 255), (864, 1821))
+
+
+def _assert_opaque_pixels(path, expected):
+    with Image.open(path) as actual, Image.open(BytesIO(expected)) as original:
+        assert actual.mode == "RGB"
+        assert actual.size == original.size
+        assert ImageChops.difference(actual, original.convert("RGB")).getbbox() is None
 
 
 class SuccessGenerator:
@@ -81,7 +88,7 @@ def test_success_atomically_replaces_image_backs_up_old_and_holds_send(tmp_path)
 
     run = run_regeneration_now(settings, group, run_date, SuccessGenerator())
 
-    assert store.image_path(group, run_date).read_bytes() == NEW_PNG
+    _assert_opaque_pixels(store.image_path(group, run_date), NEW_PNG)
     assert store.previous_image_path(group, run_date).read_bytes() == OLD_PNG
     assert run["status"] == "SENT"
     assert run["image_regen_status"] == "ready_for_review"
@@ -92,6 +99,25 @@ def test_success_atomically_replaces_image_backs_up_old_and_holds_send(tmp_path)
     assert run["image_fallback_reason"] == ""
     assert run["image_variant"] == "normal"
     assert run["image_force_local_fallback"] is False
+
+
+def test_regeneration_composites_transparency_and_receipts_final_hash(tmp_path):
+    settings, store, group, run_date = _run(tmp_path)
+
+    class TransparentGenerator:
+        def generate(self, prompt_path, output_path):
+            output_path.write_bytes(_png_bytes((0, 0, 0, 0)))
+            return ImageTaskResult(True, image_path=output_path)
+
+    run = run_regeneration_now(settings, group, run_date, TransparentGenerator())
+    target = store.image_path(group, run_date)
+    with Image.open(target) as image:
+        assert image.mode == "RGB"
+        assert image.getpixel((0, 0)) == (255, 255, 255)
+    assert run["image_sha256"] == hashlib.sha256(target.read_bytes()).hexdigest().upper()
+    assert run["image_regen_job"]["receipt"]["sha256"] == run["image_sha256"]
+    assert store.previous_image_path(group, run_date).read_bytes() == OLD_PNG
+    assert run["send_hold"] is True
 
 
 def test_success_clears_image_content_verification_failure(tmp_path):
@@ -167,7 +193,7 @@ def test_strict_fact_review_retries_once_then_promotes(tmp_path, monkeypatch):
     run = run_regeneration_now(settings, group, run_date, generator)
 
     assert generator.calls == 2
-    assert store.image_path(group, run_date).read_bytes() == NEW_PNG
+    _assert_opaque_pixels(store.image_path(group, run_date), NEW_PNG)
     assert run["image_regen_status"] == "ready_for_review"
     assert run["image_regen_job"]["receipt"]["success"] is True
 
@@ -335,7 +361,7 @@ def test_non_default_size_candidate_requires_exact_claim_and_keeps_send_hold(tmp
         job_id=job_id,
         candidate_id=digest.lower(),
     )
-    assert store.image_path(group, run_date).read_bytes() == FLEXIBLE_SIZE_PNG
+    _assert_opaque_pixels(store.image_path(group, run_date), FLEXIBLE_SIZE_PNG)
     assert store.previous_image_path(group, run_date).read_bytes() == OLD_PNG
     with Image.open(store.image_path(group, run_date)) as image:
         image.load()

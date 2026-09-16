@@ -227,18 +227,16 @@ def _promote_image(
 ) -> dict[str, Any]:
     generator_meta = generator_detail if isinstance(generator_detail, dict) else {}
     prompt_path = store.prompt_path(group_name, run_date)
-    ok, contract_detail = verify_image_contract(prompt_path, source)
-    if not ok:
-        raise ValueError(contract_detail)
     target = store.image_path(group_name, run_date)
     previous = store.previous_image_path(group_name, run_date)
     staging = store.regenerating_image_path(group_name, run_date)
     source = source.resolve()
     staging = staging.resolve()
-    if source != staging:
-        if staging.exists():
-            staging.unlink()
-        shutil.copy2(source, staging)
+    # 人工认领候选也必须与自动生图使用同一透明层合成规则。
+    CodexImageGenerator._promote_valid_image(source, staging)
+    ok, contract_detail = verify_image_contract(prompt_path, staging)
+    if not ok:
+        raise ValueError(contract_detail)
     if target.is_file() and target.stat().st_size > 0:
         shutil.copy2(target, previous)
     os.replace(staging, target)

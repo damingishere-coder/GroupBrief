@@ -8,6 +8,7 @@ import re
 from typing import Any, Iterable
 
 from app.ai.layouts import LayoutPlan, SHOT_LABELS
+from app.ai.image_readability import IMAGE_READABILITY_RULES
 
 
 POSTER_COPY_VERSION = "fixed-chat-comic-v2"
@@ -570,6 +571,7 @@ def _overall_visual(style_text: str, *, explicit_style: bool) -> str:
         (
             "生成一张适合微信手机端阅读的竖版漫画群报，优先采用 1024×1536、2:3 画布；其他完整可读的竖版尺寸也可以采用，不要为了匹配尺寸裁切或拉伸。",
             style_line,
+            IMAGE_READABILITY_RULES,
             "整张图像一页热闹的群聊漫画：顶部是群名称、完整统计时间、主标题和副标题，中间由多个大小错落的话题漫画格组成，底部展示当天总结和统计数据。",
             "每个话题都要画成一个真实的“群友讨论现场”。严格按对应版面已经列出的真实参与者出镜，不重复人物、不补无关群友；有多位真实参与者时通常展示 2～4 位，只有 1 位时就只画该人物。人物旁边直接标注对应的真实群昵称。",
             "不同群友使用不同动作、表情和站位，以真实聊天气泡、人物反应、道具、动作线和视觉笑点表现讨论过程。所有剧情、人物关系和聊天内容均来自当天真实群聊，不额外编造新的聊天事实。",
