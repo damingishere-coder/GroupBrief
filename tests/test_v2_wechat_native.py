@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+import sys
+from types import SimpleNamespace
 
 from PIL import Image, ImageDraw
 
@@ -647,6 +649,104 @@ def test_target_search_falls_back_to_unique_uia_group_item(tmp_path, monkeypatch
     assert ok is True
     assert "精确查找并验证" in detail
     assert clicks[1] == (160.0, 200.0)
+
+
+@pytest.mark.parametrize(
+    "titles,expected",
+    [
+        (["UIED.CN🌍探索未来AIGC⑮"], True),
+        (["UIED.CN🌍探索未来AIGC⑯"], False),
+        (["UIED.CN🌍探索未来AIGC"], False),
+        (["UIED.CN探索未来AIGC15"], False),
+        (["UIED.CN🌍探索未来AIGC⑮", "UIED.CN🌍探索未来AIGC⑮"], False),
+        ([], False),
+    ],
+)
+def test_live_uied_ocr_failure_requires_unique_exact_uia_header(tmp_path, monkeypatch, titles, expected):
+    driver = WindowsWechatDriver(_settings(tmp_path))
+    target = "UIED.CN🌍探索未来AIGC⑮"
+    clicks = []
+    monkeypatch.setattr(driver, "health_check", lambda: (True, "ok"))
+    monkeypatch.setattr(driver, "_imports", lambda: None)
+    monkeypatch.setattr(driver, "_desktop_unlocked", lambda: True)
+    monkeypatch.setattr(driver, "_wechat_windows", lambda: [123])
+    monkeypatch.setattr(driver, "_activate", lambda hwnd: True)
+    monkeypatch.setattr(driver, "_hotkey", lambda *args: None)
+    monkeypatch.setattr(driver, "_set_clipboard_text", lambda text: None)
+    monkeypatch.setattr(driver, "_window_rect", lambda hwnd: (0, 0, 1000, 800))
+    # Actual Windows OCR output: both the search item and title lost AIGC⑮.
+    monkeypatch.setattr(driver, "_ocr_screen", lambda box: [
+        OcrLine("UIED ℃ N 探 索 未 来 C@（497）", 10, 10, 375, 27)
+    ])
+    monkeypatch.setattr(driver, "_find_uia_group_search_match", lambda *args: (
+        OcrLine(target, 80, 150, 160, 20), ""
+    ))
+    monkeypatch.setattr(driver, "_click", lambda x, y: clicks.append((x, y)))
+    monkeypatch.setattr(driver, "_read_uia_chat_titles", lambda box: titles)
+    monkeypatch.setattr("app.sender.wechat_native.time.sleep", lambda seconds: None)
+
+    ok, detail = driver.open_and_verify(target)
+
+    assert ok is expected
+    assert len(clicks) == 2  # A real group result must be selected before title fallback.
+    assert ("UIA 聊天标题" if expected else "已停止发送") in detail
+
+
+def test_uia_header_reads_only_visible_title_control_inside_current_window(tmp_path, monkeypatch):
+    driver = WindowsWechatDriver(_settings(tmp_path))
+    driver._window = 123
+    title_id = (
+        "content_view.top_content_view.title_h_view.left_v_view."
+        "left_content_v_view.left_ui_.big_title_line_h_view.current_chat_name_label"
+    )
+
+    def control(text, aid=title_id, visible=True, rect=(450, 20, 850, 60)):
+        return SimpleNamespace(
+            element_info=SimpleNamespace(
+                automation_id=aid,
+                rectangle=SimpleNamespace(left=rect[0], top=rect[1], right=rect[2], bottom=rect[3]),
+            ),
+            is_visible=lambda: visible,
+            window_text=lambda: text,
+        )
+
+    controls = [
+        control("UIED.CN🌍探索未来AIGC⑮"),
+        control("hidden", visible=False),
+        control("outside", rect=(450, 300, 850, 340)),
+        control("empty bounds", rect=(450, 20, 450, 60)),
+        control("search result", aid="search_item_UIED.CN🌍探索未来AIGC⑮"),
+        control("composer", aid="chat_input_field"),
+        control("message", aid="chat_message_list.qt_scrollarea_viewport.chat_bubble_item_view"),
+    ]
+
+    def descendants(*, control_type):
+        assert control_type == "Text"
+        return controls
+
+    def window(*, handle):
+        assert handle == 123
+        return SimpleNamespace(descendants=descendants)
+
+    monkeypatch.setitem(sys.modules, "pywinauto", SimpleNamespace(
+        Desktop=lambda **kwargs: SimpleNamespace(window=window)
+    ))
+    assert driver._read_uia_chat_titles((430, 0, 1000, 128)) == ["UIED.CN🌍探索未来AIGC⑮"]
+    controls.append(control("UIED.CN🌍探索未来AIGC⑮"))
+    assert len(driver._read_uia_chat_titles((430, 0, 1000, 128))) == 2
+    driver._window = None
+    assert driver._read_uia_chat_titles((430, 0, 1000, 128)) == []
+
+
+def test_uia_header_failure_is_closed(tmp_path, monkeypatch):
+    driver = WindowsWechatDriver(_settings(tmp_path))
+    driver._window = 123
+
+    def unavailable(**kwargs):
+        raise RuntimeError("UIA unavailable")
+
+    monkeypatch.setitem(sys.modules, "pywinauto", SimpleNamespace(Desktop=unavailable))
+    assert driver._read_uia_chat_titles((430, 0, 1000, 128)) == []
 
 
 def test_submission_verification_requires_composer_to_return_near_empty():
