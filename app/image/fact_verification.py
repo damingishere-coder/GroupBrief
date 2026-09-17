@@ -194,6 +194,12 @@ def _load_evidence(prompt_file: Path) -> tuple[list[str], str, int]:
             if text:
                 evidence_lines.append(text)
                 numeric_evidence_lines.append(text)
+                if field == "sender_name":
+                    # 中英文长昵称常在姓名牌中按空格分行。为独立行保留同一
+                    # 姓名的真实片段，使现有 OCR 容错不被整条长昵称稀释。
+                    evidence_lines.extend(
+                        part for part in text.split() if len(_compact_text(part)) >= 4
+                    )
     ranking_path = prompt_file.with_name("ranking.json")
     try:
         ranking = json.loads(ranking_path.read_text(encoding="utf-8"))

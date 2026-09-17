@@ -93,6 +93,20 @@ def test_bare_number_does_not_authorize_a_fullwidth_percentage(tmp_path):
     assert review.unknown_numeric == ("61%",)
 
 
+def test_split_mixed_language_nickname_tolerates_local_ocr_error(tmp_path):
+    prompt, image = _evidence(tmp_path)
+    prompt.with_name("messages.json").write_text(
+        json.dumps([{"sender_name": "拦路雨偏似雪花 worker.cheung你冻吗？", "content": "在生"}], ensure_ascii=False),
+        encoding="utf-8",
+    )
+    review = review_image_facts(prompt, image, ocr_text="拦 路 雨 傀 似 雪 花\nworker.cheung你冻吗？")
+    assert review.ok
+    rejected = review_image_facts(prompt, image, ocr_text="明天连续下雨\n温度超过39℃")
+    assert not rejected.ok
+    assert "明天连续下雨" in rejected.unknown_text
+    assert "39℃" in rejected.unknown_numeric
+
+
 def test_allows_ocr_fragments_of_known_numbers_and_ignores_name_garble(tmp_path):
     prompt, image = _evidence(tmp_path)
 
