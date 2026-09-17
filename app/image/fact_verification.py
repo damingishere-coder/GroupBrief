@@ -84,7 +84,7 @@ def _canonical_number(value: str) -> str:
     normalized = re.sub(
         r"\s+",
         "",
-        value.replace("，", ".").replace(",", "."),
+        value.replace("，", ".").replace(",", ".").replace("％", "%"),
     ).casefold()
     normalized = normalized.replace("万元", "w").replace("万", "w")
     normalized = normalized.replace("块", "元")
