@@ -25,7 +25,7 @@ from typing import Callable, Iterator
 
 from app.config.settings import Settings, get_settings
 from app.ai.concurrency import bounded_slot, normalized_limit
-from app.ai.image_readability import IMAGE_READABILITY_RULES
+from app.ai.image_readability import apply_image_visual_rules
 from app.core.logging import get_logger
 from app.image.image_task import ImageTaskResult, detect_image_format, verify_image
 
@@ -936,7 +936,7 @@ class CodexImageGenerator:
     @staticmethod
     def _attempt_prompt(prompt_text: str, job_id: str) -> str:
         return (
-            f"$imagegen {prompt_text}\n\n{IMAGE_READABILITY_RULES}\n\n"
+            f"$imagegen {apply_image_visual_rules(prompt_text)}\n\n"
             f"本次生图任务 ID 是 {job_id}。"
             "只为本次任务调用一次 ImageGen，并只生成、选择一张最终图片。"
             "优先使用 1024×1536 像素的竖版 2:3 画布；"

@@ -84,6 +84,10 @@ def test_success_atomically_replaces_image_backs_up_old_and_holds_send(tmp_path)
         image_fallback_reason="PROMPT_FAILED",
         image_variant="pillow",
         image_force_local_fallback=True,
+        send_state="sent",
+        text_submitted_at="2026-08-21 08:59:30",
+        image_submitted_at="2026-08-21 08:59:40",
+        delivery_evidence={"result": "sent", "image_sha256": hashlib.sha256(OLD_PNG).hexdigest()},
     )
 
     run = run_regeneration_now(settings, group, run_date, SuccessGenerator())
@@ -95,6 +99,10 @@ def test_success_atomically_replaces_image_backs_up_old_and_holds_send(tmp_path)
     assert run["send_hold"] is True
     assert run["needs_manual_send"] is True
     assert run["sent_at"] == "2026-08-21 09:00:00"
+    assert run["send_state"] == "sent"
+    assert run["text_submitted_at"] == "2026-08-21 08:59:30"
+    assert run["image_submitted_at"] == "2026-08-21 08:59:40"
+    assert run["delivery_evidence"] == {"result": "sent", "image_sha256": hashlib.sha256(OLD_PNG).hexdigest()}
     assert run["image_fallback_level"] == 0
     assert run["image_fallback_reason"] == ""
     assert run["image_variant"] == "normal"
