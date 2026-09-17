@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 from PIL import Image
+import pytest
 
 from app.ai.strict_prompt_contract import append_strict_image_fact_contract
 from app.image.fact_verification import (
@@ -68,6 +69,28 @@ def test_allows_numbers_and_text_present_in_evidence(tmp_path):
     assert review.ok
     assert review.unknown_numeric == ()
     assert review.unknown_text == ()
+
+
+@pytest.mark.parametrize("source,ocr", [("%", "％"), ("％", "%")])
+def test_percent_width_is_equivalent_without_allowing_new_values(tmp_path, source, ocr):
+    prompt, image = _evidence(tmp_path)
+    prompt.with_name("messages.json").write_text(
+        json.dumps([{"content": f"上午消耗1{source}，当前83{source}，消耗150{source}，剩余50{source}。"}], ensure_ascii=False),
+        encoding="utf-8",
+    )
+    review = review_image_facts(prompt, image, ocr_text=f"1{ocr}\n83{ocr}\n150{ocr}\n50{ocr}")
+    assert review.ok
+    assert review.unknown_numeric == ()
+    rejected = review_image_facts(prompt, image, ocr_text=f"97{ocr}")
+    assert not rejected.ok
+    assert rejected.unknown_numeric == ("97%",)
+
+
+def test_bare_number_does_not_authorize_a_fullwidth_percentage(tmp_path):
+    prompt, image = _evidence(tmp_path)
+    review = review_image_facts(prompt, image, ocr_text="61％")
+    assert not review.ok
+    assert review.unknown_numeric == ("61%",)
 
 
 def test_allows_ocr_fragments_of_known_numbers_and_ignores_name_garble(tmp_path):
