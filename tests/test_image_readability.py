@@ -5,7 +5,11 @@ import json
 import pytest
 from PIL import Image, ImageDraw
 
-from app.ai.image_readability import IMAGE_READABILITY_RULES
+from app.ai.image_readability import (
+    IMAGE_READABILITY_RULES,
+    LEGACY_IMAGE_READABILITY_RULES,
+    apply_image_visual_rules,
+)
 from app.ai.poster_copy import _overall_visual
 from app.image.codex_generator import CodexImageGenerator
 from app.image.image_task import verify_image_contract
@@ -68,6 +72,40 @@ def test_non_report_image_keeps_generic_validation(tmp_path):
 def test_fresh_and_historical_generation_share_readability_rules():
     assert IMAGE_READABILITY_RULES in _overall_visual("", explicit_style=False)
     assert IMAGE_READABILITY_RULES in CodexImageGenerator._attempt_prompt("历史 Prompt", "test-job-123")
+
+
+@pytest.mark.parametrize("newline", ["\n", "\r\n"])
+def test_visual_rule_upgrade_preserves_copy_and_is_idempotent(newline):
+    before = "【副标题】\n既有副标题\n\n"
+    after = "【漫画分镜】\n原始分镜\n\n【版面1】\n群友说：装饰只能放在文字区外。\n\n【底部总结】\n原始总结"
+    visual = "【整体视觉】\n手动风格保持不变\n\n" + LEGACY_IMAGE_READABILITY_RULES + "\n\n"
+    prompt = (before + visual + LEGACY_IMAGE_READABILITY_RULES + "\n\n" + after).replace("\n", newline)
+    upgraded = apply_image_visual_rules(prompt)
+    assert upgraded.startswith(before.replace("\n", newline))
+    assert upgraded.endswith(after.replace("\n", newline))
+    assert "手动风格保持不变" in upgraded
+    assert LEGACY_IMAGE_READABILITY_RULES not in upgraded
+    assert upgraded.count(IMAGE_READABILITY_RULES) == 1
+    assert apply_image_visual_rules(upgraded) == upgraded
+    wrapped = CodexImageGenerator._attempt_prompt(upgraded, "test-job-123")
+    assert wrapped.count(IMAGE_READABILITY_RULES) == 1
+    assert LEGACY_IMAGE_READABILITY_RULES not in wrapped
+
+
+def test_legacy_unstructured_prompt_and_embedded_quote_are_preserved():
+    content = "历史图片说明\n群友引用：“" + LEGACY_IMAGE_READABILITY_RULES + "”"
+    upgraded = apply_image_visual_rules(content + "\n\n" + LEGACY_IMAGE_READABILITY_RULES)
+    assert upgraded == content + "\n\n" + IMAGE_READABILITY_RULES
+    assert apply_image_visual_rules(upgraded) == upgraded
+
+
+def test_fresh_visual_rules_are_not_appended_twice_by_generator():
+    prompt = "【整体视觉】\n" + _overall_visual("", explicit_style=False) + "\n\n【底部总结】\n原文"
+    wrapped = CodexImageGenerator._attempt_prompt(prompt, "test-job-123")
+    assert wrapped.count(IMAGE_READABILITY_RULES) == 1
+    assert "平整干净的浅色背景" not in wrapped
+    assert "由 ImageGen 原生生成" in wrapped
+    assert "保留所有给定文字原文" in wrapped
 
 
 @pytest.mark.parametrize("mode", ["RGBA", "LA", "P"])
