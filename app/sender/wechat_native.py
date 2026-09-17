@@ -1,7 +1,7 @@
 """微信 4.1.x Windows 原生发送器。
 
 微信 4.1 使用自绘界面，标准 UI Automation 只暴露部分控件。本模块组合：
-键盘搜索 + Windows OCR 精确校验 + 唯一 UIA 搜索项兜底 + 剪贴板粘贴，
+键盘搜索 + Windows OCR 校验 + 唯一 UIA 搜索项与标题精确兜底 + 剪贴板粘贴，
 并在任何歧义或校验失败时停止。
 
 生产入口默认使用 :class:`WindowsWechatDriver`；测试可注入 fake driver，绝不操作桌面。
@@ -574,6 +574,17 @@ class WindowsWechatDriver:
             if any(_selected_header_matches(line.text, target) for line in header_lines):
                 return True, f"已精确查找并验证目标：{target}"
             time.sleep(self.delay)
+        # 混合英文、Emoji 和带圈数字可能被 OCR 大幅误读。仅接受当前主窗口
+        # 标题区域内唯一的真实群名控件；不读取搜索项、消息正文或输入框名称。
+        titles = self._read_uia_chat_titles(header_box)
+        if len(titles) == 1 and titles[0] == target:
+            return True, f"已精确查找并通过 UIA 聊天标题验证目标：{target}"
+        logger.warning(
+            "WeChat chat title verification failed: target=%r ocr=%r uia_titles=%r",
+            target,
+            [line.text for line in header_lines],
+            titles,
+        )
         return False, "聊天标题 OCR 校验失败，已停止发送"
 
     def paste_text(self, text: str) -> NativeActionResult:
@@ -957,6 +968,36 @@ class WindowsWechatDriver:
         import win32gui
 
         return win32gui.GetWindowRect(hwnd)
+
+    def _read_uia_chat_titles(self, header_box: tuple[int, int, int, int]) -> list[str]:
+        """读取当前微信主窗口中唯一可定位的群名标签，不做模糊或符号归一化。"""
+        if not self._window:
+            return []
+        title_id = (
+            "content_view.top_content_view.title_h_view.left_v_view."
+            "left_content_v_view.left_ui_.big_title_line_h_view.current_chat_name_label"
+        )
+        try:
+            from pywinauto import Desktop
+
+            window = Desktop(backend="uia").window(handle=self._window)
+            left, top, right, bottom = header_box
+            titles: list[str] = []
+            for control in window.descendants(control_type="Text"):
+                info = control.element_info
+                if str(getattr(info, "automation_id", "") or "") != title_id:
+                    continue
+                rect = info.rectangle
+                if not control.is_visible() or not (
+                    left <= rect.left < rect.right <= right
+                    and top <= rect.top < rect.bottom <= bottom
+                ):
+                    continue
+                titles.append(str(control.window_text() or ""))
+            return titles
+        except Exception as exc:
+            logger.warning("WeChat UIA chat title fallback unavailable: %s", exc)
+            return []
 
     def _find_uia_group_search_match(
         self,
