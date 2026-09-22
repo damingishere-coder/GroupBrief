@@ -83,6 +83,10 @@ class DeepSeekV4FlashProvider(PromptGeneratorProvider):
         self.settings = settings
         configured = (settings.ai_model or self.model).strip()
         self.model = self.model if configured in {"", "deepseek-chat"} else configured
+        self.usage_records: list[dict] = []
+
+    def reset_usage(self) -> None:
+        self.usage_records = []
 
     def health_check(self) -> tuple[bool, str]:
         if not self.settings.ai_api_key:
@@ -290,6 +294,13 @@ class DeepSeekV4FlashProvider(PromptGeneratorProvider):
                 logger.info(
                     "DeepSeek 调用成功（attempt=%d request_id=%s）", attempt, request_id
                 )
+                self.usage_records.append({
+                    "provider": self.name, "model": self.model,
+                    "reasoning_effort": "disabled",
+                    "response_sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+                    "finish_reason": data["choices"][0].get("finish_reason"),
+                    "usage": data.get("usage") if isinstance(data.get("usage"), dict) else None,
+                })
                 return content
 
             # 429/503 明确表示限流或暂不可用，可以受控重试；其他 5xx 不能

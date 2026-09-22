@@ -744,7 +744,9 @@ class GenerationStages:
                 context.group_name, context.run_date,
                 weekly_champion={**seed, "status": "building", "evidence": []},
             )
-            result = build_champion(seed, getattr(self.prompt_builder, "_analysis_chat", None))
+            result = build_champion(seed, getattr(self.prompt_builder, "_prompt_chat", None))
+            provider = getattr(self.prompt_builder, "_prompt_provider", None)
+            result["usage"] = list(getattr(provider, "usage_records", []))
         self.store.update(context.group_name, context.run_date, weekly_champion=result)
         return result
 

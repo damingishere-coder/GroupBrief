@@ -1,11 +1,11 @@
-"""V2 ImagePromptBuilder（Codex GPT 主用、DeepSeek 备用）实现。
+"""V2 ImagePromptBuilder（分析与文案分别路由）实现。
 
 输入：标准化聊天内容 + 群名 + 统计周期 + 消息数 + 发言人数 + 生图 Prompt 模板
 输出：image_prompt.txt（可直接交给 Codex `$imagegen` / GPT Image 2）
 
 策略：
 - 复用 V1/V2 共用的 Codex GPT / DeepSeek 主备调用（重试/超时）；
-- 主模型固定使用 settings.codex_summary_model（默认 gpt-6-astra）；
+- Codex 文案模型使用 settings.codex_summary_model（默认 gpt-5.6-luna）；
 - 模板（templates/image_prompt/）控制最终 Prompt 的输出结构，可编辑；
 - 超长聊天采用「分块 → 逐块提取事件(JSON) → 合并去重 → 按模板生成」，
   避免简单暴力截断丢失重要内容；
@@ -521,6 +521,16 @@ class DeepSeekImagePromptBuilder:
                 raise ValueError("最终生图 Prompt 未通过固定漫画合同：" + "；".join(last_violations[:8]))
 
             meta["api_call_count"] = analysis_calls + layout_calls + final_calls
+            meta["summary_reasoning_effort"] = (
+                self.summary_settings.codex_reasoning_effort
+                if self.summary_settings.summary_provider_primary in {"codex", "codex_gpt", "gpt"}
+                else "disabled"
+            )
+            meta["prompt_reasoning_effort"] = (
+                self.settings.codex_reasoning_effort
+                if self.settings.summary_provider_primary in {"codex", "codex_gpt", "gpt"}
+                else "disabled"
+            )
             summary_actual = (
                 self._provider_actual(
                     self._summary_provider,
@@ -592,6 +602,14 @@ class DeepSeekImagePromptBuilder:
                 model=api_model,
                 meta=meta,
             )
+        finally:
+            # Include received-call usage even if later validation fails.
+            if meta is not None:
+                meta["summary_usage"] = list(getattr(self._summary_provider, "usage_records", []))
+                meta["prompt_usage"] = (
+                    list(getattr(self._prompt_provider, "usage_records", []))
+                    if self._prompt_provider is not self._summary_provider else []
+                )
 
     # ---------- 内部 ----------
 

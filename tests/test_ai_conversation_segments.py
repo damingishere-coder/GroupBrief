@@ -123,6 +123,6 @@ def test_deepseek_retries_429_and_503_with_thinking_disabled(monkeypatch, first_
     provider = DeepSeekV4FlashProvider(Settings(_env_file=None, ai_api_key="fake", ai_max_retries=3))
     assert provider._chat([{"role": "user", "content": "test"}], response_format="json_object") == "ok"
     assert len(calls) == 2
-    assert calls[-1]["model"] == "deepseek-v4-flash"
+    assert calls[-1]["model"] == "deepseek-flash"
     assert calls[-1]["thinking"] == {"type": "disabled"}
     assert calls[-1]["response_format"] == {"type": "json_object"}

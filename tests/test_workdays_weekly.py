@@ -39,7 +39,7 @@ class Prompt:
         self.inputs = []
         self.champion_calls = 0
 
-    def _analysis_chat(self, system, text, **kwargs):
+    def _prompt_chat(self, system, text, **kwargs):
         self.champion_calls += 1
         rows = json.loads(text)
         return json.dumps({"message_id": rows[0]["message_id"], "topic": "漫画分镜"}, ensure_ascii=False)

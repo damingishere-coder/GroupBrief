@@ -42,6 +42,8 @@ EDITABLE_KEYS = {
     "summary_provider_primary",
     "summary_provider_fallback",
     "codex_summary_model",
+    "codex_reasoning_effort",
+    "codex_image_model",
     "codex_summary_timeout_seconds",
     "codex_summary_max_retries",
     "codex_summary_request_concurrency",
@@ -84,7 +86,7 @@ EDITABLE_KEYS = {
 
 ALL_KEYS = EDITABLE_KEYS | SENSITIVE_KEYS
 
-_SUMMARY_CONFIG_KEYS = {"summary_provider_primary", "summary_provider_fallback"}
+_SUMMARY_CONFIG_KEYS = {"summary_provider_primary", "summary_provider_fallback", "codex_reasoning_effort"}
 _EMAIL_CONFIG_KEYS = {
     "email_enabled",
     "email_recipient",
