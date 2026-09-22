@@ -110,23 +110,24 @@ class Settings(BaseSettings):
     # 留空时自动探测 WeChatDataAnalysis 的解密数据库。
     wechat_contact_db_path: str = ""
 
-    # 群聊总结主备路由：Codex GPT 主用，DeepSeek 备用。
+    # 群级可分别选择 DeepSeek 分析与 Codex 文案；不自动切换 Provider。
     summary_provider_primary: str = "codex"
-    summary_provider_fallback: str = "deepseek"
-    codex_summary_model: str = "gpt-6-astra"
+    summary_provider_fallback: str = "none"
+    codex_summary_model: str = "gpt-5.6-luna"
+    codex_reasoning_effort: Literal["low", "medium", "high", "xhigh", "max"] = "max"
     # 结构化群聊整理在高峰期可能超过 4 分钟；600 秒仍有明确上限，
     # 同时避免把正常的长响应误判成不可自动恢复的结果未知。
     codex_summary_timeout_seconds: int = 600
     codex_summary_max_retries: int = 2
     codex_summary_request_concurrency: int = 2
 
-    # DeepSeek 备用
+    # DeepSeek 聊天分析
     # 旧设置兼容字段；真实路由只使用 summary_provider_primary/fallback。
     # 不再通过设置 API 暴露，保留一版以兼容旧 .env/数据库。
     ai_provider: str = "deepseek"
     ai_base_url: str = "https://api.deepseek.com"
     ai_api_key: str = ""
-    ai_model: str = "deepseek-v4-flash"
+    ai_model: str = "deepseek-flash"
     ai_timeout_seconds: int = 60
     ai_max_retries: int = 3
     # 兼容旧配置：不再参与实际分段，保留一版以避免旧 .env 启动失败。
@@ -144,6 +145,7 @@ class Settings(BaseSettings):
     # Codex 用户目录；认证与 generated_images 必须来自同一目录。
     codex_home: str = ""
     codex_timeout_seconds: int = 1200
+    codex_image_model: str = "gpt-5.6-luna"
     codex_generated_images_dir: str = ""  # 留空时默认 ~/.codex/generated_images
     # Codex/ImageGen 任务在可靠结构化回执下允许受控并发；默认两路。
     image_generation_concurrency: int = 2

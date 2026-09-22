@@ -23,8 +23,8 @@ def normalize_history_provider(value: object) -> str:
 
 
 def provider_catalog(settings: Settings) -> dict:
-    codex_model = str(settings.codex_summary_model or "gpt-6-astra").strip()
-    deepseek_model = str(settings.ai_model or "deepseek-v4-flash").strip()
+    codex_model = str(settings.codex_summary_model or "gpt-5.6-luna").strip()
+    deepseek_model = str(settings.ai_model or "deepseek-flash").strip()
     codex_binary = shutil.which(settings.codex_path or "codex")
     return {
         "history": [
@@ -46,14 +46,14 @@ def provider_catalog(settings: Settings) -> dict:
                 "provider": "codex",
                 "label": "Codex GPT",
                 "available": bool(codex_binary),
-                "models": [codex_model],
+                "models": list(dict.fromkeys([codex_model, "gpt-5.6-luna", "gpt-6-astra"])),
                 "capabilities": ["summary", "prompt"],
             },
             {
                 "provider": "deepseek",
                 "label": "DeepSeek",
                 "available": bool(settings.ai_api_key),
-                "models": [deepseek_model],
+                "models": list(dict.fromkeys([deepseek_model, "deepseek-flash", "deepseek-v4-flash"])),
                 "capabilities": ["summary", "prompt"],
             },
         ],
@@ -76,10 +76,10 @@ def resolve_group_ai_settings(
     provider = configured_provider
     if not provider and configured_model:
         # 旧数据库只有 model 字段：按当前受控白名单推导 Provider，不混用未知值。
-        if configured_model == str(settings.codex_summary_model or "gpt-6-astra").strip():
-            provider = "codex"
-        elif configured_model == str(settings.ai_model or "deepseek-v4-flash").strip():
-            provider = "deepseek"
+        for entry in provider_catalog(settings)["ai"]:
+            if configured_model in entry["models"]:
+                provider = entry["provider"]
+                break
     provider = provider or str(settings.summary_provider_primary or "").strip().lower()
     if provider in {"codex_gpt", "gpt"}:
         provider = "codex"
@@ -87,9 +87,9 @@ def resolve_group_ai_settings(
         raise ValueError(f"不支持的 {capability} Provider：{configured_provider or provider}")
 
     default_model = (
-        str(settings.codex_summary_model or "gpt-6-astra").strip()
+        str(settings.codex_summary_model or "gpt-5.6-luna").strip()
         if provider == "codex"
-        else str(settings.ai_model or "deepseek-v4-flash").strip()
+        else str(settings.ai_model or "deepseek-flash").strip()
     )
     model = configured_model or default_model
     allowed = {

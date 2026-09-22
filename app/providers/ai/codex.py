@@ -41,6 +41,8 @@ def validate_summary_provider_config(settings: Settings) -> tuple[str, str]:
         raise ValueError(f"不支持的群聊总结主 Provider：{settings.summary_provider_primary}")
     if fallback not in _SUMMARY_FALLBACK_NAMES:
         raise ValueError(f"不支持的群聊总结备用 Provider：{settings.summary_provider_fallback}")
+    if settings.codex_reasoning_effort not in {"low", "medium", "high", "xhigh", "max"}:
+        raise ValueError("不支持的 Codex 思考强度")
     return primary, fallback
 
 
@@ -61,7 +63,7 @@ class CodexGPTProvider(DeepSeekV4FlashProvider):
     """复用既有总结编排，以 Codex GPT 执行底层文本调用。"""
 
     name = "codex_gpt"
-    model = "gpt-6-astra"
+    model = "gpt-5.6-luna"
 
     def __init__(self, settings: Settings):
         # 不调用父类初始化：父类会把 ai_model（DeepSeek 备用模型）写入
@@ -85,11 +87,13 @@ class CodexGPTProvider(DeepSeekV4FlashProvider):
         self.last_provider_used = ""
         self.last_fallback_reason = ""
         self.providers_used: list[str] = []
+        self.usage_records: list[dict] = []
 
     def reset_usage(self) -> None:
         self.last_provider_used = ""
         self.last_fallback_reason = ""
         self.providers_used = []
+        self.usage_records = []
 
     def _resolve_binary(self) -> str:
         if self._resolved_binary:
@@ -209,11 +213,12 @@ class CodexGPTProvider(DeepSeekV4FlashProvider):
                 "--ignore-user-config",
                 "--ignore-rules",
                 "--config",
-                'model_reasoning_effort="medium"',
+                f'model_reasoning_effort="{self.settings.codex_reasoning_effort}"',
                 "--sandbox",
                 "read-only",
                 "--skip-git-repo-check",
                 "--ephemeral",
+                "--json",
                 "--model",
                 self.model,
                 "--output-last-message",
@@ -249,6 +254,17 @@ class CodexGPTProvider(DeepSeekV4FlashProvider):
                     f"Codex CLI 未能启动（request_id={request_id}）：{str(exc)[:160]}"
                 ) from exc
 
+            for line in (proc.stdout or "").splitlines():
+                try:
+                    event = json.loads(line)
+                except (ValueError, TypeError):
+                    continue
+                if isinstance(event, dict) and event.get("type") == "turn.completed":
+                    self.usage_records.append({
+                        "provider": self.name, "model": self.model,
+                        "reasoning_effort": self.settings.codex_reasoning_effort,
+                        "usage": event.get("usage") if isinstance(event.get("usage"), dict) else None,
+                    })
             if proc.returncode != 0:
                 # CLI 已经启动，不能证明 Provider 没有接收请求；禁止内部重试和备用调用。
                 raise ExternalCallResultUnknownError(

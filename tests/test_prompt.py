@@ -106,7 +106,7 @@ def test_default_summary_provider_is_codex_gpt():
     settings = Settings(_env_file=None, summary_provider_primary="codex", ai_api_key="")
     provider = PromptService(settings)._get_provider()
     assert provider.name == "codex_gpt"
-    assert provider.model == "gpt-6-astra"
+    assert provider.model == "gpt-5.6-luna"
 
 
 def test_v1_model_failure_does_not_degrade_to_template_in_real_runtime():

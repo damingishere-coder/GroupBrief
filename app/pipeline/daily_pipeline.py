@@ -105,7 +105,6 @@ class DailyPipeline:
             summary_settings=self.settings,
         )
         self._data_source_cache: dict[str, WeChatDataSource] = {}
-        self._prompt_builder_cache: dict[tuple[str, ...], GroupSummaryImagePromptBuilder] = {}
         self.image_generator = image_generator or CodexImageGenerator(self.settings)
         self.sender = sender or create_wechat_sender(settings=self.settings, dry_run=dry_run)
         self.store = store or RunStore(self.settings.output_dir)
@@ -553,22 +552,12 @@ class DailyPipeline:
     ) -> GroupSummaryImagePromptBuilder:
         if self._prompt_builder_injected:
             return self.prompt_builder
-        key = (
-            summary_settings.summary_provider_primary,
-            summary_settings.summary_provider_fallback,
-            summary_settings.codex_summary_model,
-            summary_settings.ai_model,
-            prompt_settings.summary_provider_primary,
-            prompt_settings.summary_provider_fallback,
-            prompt_settings.codex_summary_model,
-            prompt_settings.ai_model,
+        # Providers carry per-run usage and actual-model metadata. Sharing one
+        # builder between concurrent groups would mix/reset those records.
+        return GroupSummaryImagePromptBuilder(
+            prompt_settings,
+            summary_settings=summary_settings,
         )
-        if key not in self._prompt_builder_cache:
-            self._prompt_builder_cache[key] = GroupSummaryImagePromptBuilder(
-                prompt_settings,
-                summary_settings=summary_settings,
-            )
-        return self._prompt_builder_cache[key]
 
     def _make_image_job(self, group: Group, run_date: str, force: bool) -> ImageJob:
         """保留原注入点；图片任务构造由图片阶段负责。"""

@@ -75,7 +75,7 @@ def test_codex_success_uses_stdin_read_only_and_does_not_call_fallback(monkeypat
     assert "--ephemeral" in captured["command"]
     assert "--ignore-user-config" in captured["command"]
     assert "--ignore-rules" in captured["command"]
-    assert 'model_reasoning_effort="medium"' in captured["command"]
+    assert 'model_reasoning_effort="max"' in captured["command"]
     assert captured["timeout"] == 30
 
 

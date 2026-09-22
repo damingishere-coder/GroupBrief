@@ -278,10 +278,12 @@ class CodexImageGenerator:
         settings: Settings | None = None,
         codex_path: str | None = None,
         generated_images_dir: str | None = None,
+        max_attempts: int = _MAX_ATTEMPTS,
     ):
         self.settings = settings or get_settings()
         self.codex_path = codex_path or self.settings.codex_path or "codex"
         self.timeout = int(self.settings.codex_timeout_seconds)
+        self.max_attempts = max(1, min(_MAX_ATTEMPTS, int(max_attempts)))
 
         configured_home = (
             self.settings.codex_home
@@ -379,7 +381,7 @@ class CodexImageGenerator:
             return ImageTaskResult(False, error=detail, detail={"stage": "health"})
         try:
             with _imagegen_mutex(
-                (self.timeout * _MAX_ATTEMPTS) + 60,
+                (self.timeout * self.max_attempts) + 60,
                 normalized_limit(self.settings.image_generation_concurrency, 2, maximum=6),
             ):
                 return self._generate_locked(
@@ -652,7 +654,7 @@ class CodexImageGenerator:
         last_reason = ""
         last_diagnostics: list[dict] = []
 
-        for attempt_number in range(next_attempt, _MAX_ATTEMPTS + 1):
+        for attempt_number in range(next_attempt, self.max_attempts + 1):
             attempt = self._new_attempt(
                 task_dir,
                 attempt_number,
@@ -667,7 +669,7 @@ class CodexImageGenerator:
             logger.info(
                 "调用 Codex $imagegen：attempt=%d/%d id=%s",
                 attempt_number,
-                _MAX_ATTEMPTS,
+                self.max_attempts,
                 attempt["attempt_id"],
             )
             outcome = "completed"
@@ -790,7 +792,7 @@ class CodexImageGenerator:
                         },
                     )
                 attempt.update(
-                    state="retrying" if attempt_number < _MAX_ATTEMPTS else "exhausted",
+                    state="retrying" if attempt_number < self.max_attempts else "exhausted",
                     finished_at=datetime_now_iso(),
                     outcome="invalid_output",
                     exit_code=exit_code,
@@ -860,7 +862,7 @@ class CodexImageGenerator:
                 )
 
             attempt.update(
-                state="retrying" if attempt_number < _MAX_ATTEMPTS else "exhausted",
+                state="retrying" if attempt_number < self.max_attempts else "exhausted",
                 finished_at=datetime_now_iso(),
                 outcome=outcome,
                 exit_code=exit_code,
@@ -870,7 +872,7 @@ class CodexImageGenerator:
             )
             self._write_attempt_manifest(manifest_path, attempt)
             self._cleanup_attempt_files(attempt)
-            if attempt_number < _MAX_ATTEMPTS:
+            if attempt_number < self.max_attempts:
                 logger.warning(
                     "Codex 生图第 %d 次尝试未获得唯一图片，将进行最后一次重试：%s",
                     attempt_number,
@@ -888,7 +890,7 @@ class CodexImageGenerator:
             detail={
                 "stage": "ambiguous" if len(last_diagnostics) > 1 else "save",
                 "outcome_unknown": False,
-                "attempt_count": min(max(len(history), 1), _MAX_ATTEMPTS),
+                "attempt_count": min(max(len(history), 1), self.max_attempts),
                 "recovery_status": "retry_exhausted",
                 "candidate_diagnostics": last_diagnostics,
                 "attempts": history,
@@ -912,6 +914,10 @@ class CodexImageGenerator:
         return [
             self._resolve_binary() or self.codex_path,
             "exec",
+            "--model",
+            self.settings.codex_image_model,
+            "--config",
+            f'model_reasoning_effort="{self.settings.codex_reasoning_effort}"',
             "-C",
             ".",
             "--sandbox",
@@ -965,6 +971,8 @@ class CodexImageGenerator:
         job_dir.mkdir(parents=True, exist_ok=True)
         return {
             "version": 3,
+            "executor_model": self.settings.codex_image_model,
+            "reasoning_effort": self.settings.codex_reasoning_effort,
             "state": "running",
             "job_id": job_id,
             "revision": max(1, int(revision)),
@@ -1016,10 +1024,14 @@ class CodexImageGenerator:
         event_type = str(event.get("type") or "")
         if event_type not in {"thread.started", "turn.completed", "turn.failed", "error"}:
             return
-        summary: dict[str, str] = {
+        summary: dict = {
             "type": event_type,
             "observed_at": datetime_now_iso(),
         }
+        if event_type == "turn.completed":
+            summary["model"] = self.settings.codex_image_model
+            summary["reasoning_effort"] = self.settings.codex_reasoning_effort
+            summary["usage"] = event.get("usage") if isinstance(event.get("usage"), dict) else None
         if event_type == "thread.started":
             thread_id = str(event.get("thread_id") or "").strip()
             if not _THREAD_ID_RE.fullmatch(thread_id):
