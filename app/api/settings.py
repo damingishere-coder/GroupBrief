@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import re
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlmodel import Session
@@ -80,6 +82,7 @@ EDITABLE_KEYS = {
     "email_use_ssl",
     "email_send_partial_report",
     "schedule_generate_time",
+    "schedule_send_time",
     "schedule_email_time",
     "schedule_startup_catchup_enabled",
 }
@@ -112,6 +115,8 @@ def get_settings(session: Session = Depends(repo.get_session)):
             data[key] = "******" if value else ""
         else:
             data[key] = value
+    data["schedule_send_time"] = get_runtime_settings().schedule_send_time
+    data["schedule_send_skip_dates"] = get_runtime_settings().schedule_send_skip_dates
     return data
 
 
@@ -133,6 +138,10 @@ def update_settings(payload: SettingsPayload, session: Session = Depends(repo.ge
             raise HTTPException(status_code=422, detail=f"设置值类型无效：{', '.join(rejected)}")
         changed = set(requested)
         try:
+            if "schedule_send_time" in changed and not re.fullmatch(
+                r"(?:[01]\d|2[0-3]):[0-5]\d", candidate.schedule_send_time
+            ):
+                raise ValueError("发送时间必须是有效的 HH:MM（00:00—23:59）")
             if changed & {'knowledge_memory_call_budget','knowledge_memory_input_budget','knowledge_memory_output_budget'}:
                 if not (0<=candidate.knowledge_memory_call_budget<=20 and 0<=candidate.knowledge_memory_input_budget<=200000 and 0<=candidate.knowledge_memory_output_budget<=40000):
                     raise ValueError('记忆预算超出允许范围：每日调用 0—20，输入 0—200000，输出 0—40000')
@@ -151,4 +160,8 @@ def update_settings(payload: SettingsPayload, session: Session = Depends(repo.ge
         for key, value in requested.items():
             repo.set_setting_value(session, key, value)
         runtime_settings.apply_runtime_values(requested)
+        if "schedule_send_time" in requested:
+            from app.scheduler.manager import reschedule_send_batch
+
+            reschedule_send_batch(runtime_settings)
     return {"ok": True}

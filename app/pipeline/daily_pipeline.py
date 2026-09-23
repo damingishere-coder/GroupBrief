@@ -617,6 +617,9 @@ class DailyPipeline:
         if now.tzinfo is not None:
             now = now.astimezone(ZoneInfo(self.settings.app_timezone))
         normalized_dates = sorted({validate_run_date(value) for value in run_dates})
+        normalized_dates = [value for value in normalized_dates if not self.settings.is_send_skipped(value)]
+        if not normalized_dates:
+            return []
         results: list[dict] = []
         groups = self._load_groups()
         due_group_ids: list[int] = []
@@ -1512,6 +1515,8 @@ class DailyPipeline:
                     "error": "run_date 必须是有效的 YYYY-MM-DD 日期",
                 }
             run_date = parsed_run_date.isoformat()
+        if self.settings.is_send_skipped(run_date):
+            return {"status": "failed", "error_type": "USER_SKIPPED_SEND_DATE", "error": "该日期已按用户要求暂停发送"}
         self._last_name_sync_report = self._sync_group_names_safe([group_id])
         group = self._get_group(group_id)
         if not group:

@@ -31,6 +31,7 @@ import {
 } from "@phosphor-icons/react";
 import { shanghaiDateInputValue } from "../../date";
 import { runtimeRefreshDelay } from "./dashboardRuntime";
+import SendScheduleButton from "./SendScheduleButton";
 
 const STATUS_META: Record<
   string,
@@ -275,6 +276,7 @@ export default function Dashboard() {
         description="让群聊里的灵感与热闹，成为值得收藏的日报。"
         actions={
           <>
+            <SendScheduleButton onSaved={refresh} />
             <label className="studio-date">
               <span>运行日期</span>
               <input
