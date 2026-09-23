@@ -107,7 +107,8 @@ function TaskActions({
           微信发送未启用
         </Button>
       )}
-      {card.send_hold && card.image_delivery_eligible !== false && (
+      {card.send_hold_reason === "USER_SKIPPED_SEND_DATE" && <span>该日已暂停发送</span>}
+      {card.send_hold && card.send_hold_reason !== "USER_SKIPPED_SEND_DATE" && card.image_delivery_eligible !== false && (
         <Button
           tone="secondary"
           className="ui-button-compact"

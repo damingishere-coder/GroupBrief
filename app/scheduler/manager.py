@@ -174,7 +174,7 @@ def _schedule_on_demand_jobs(
         )
         scheduled.append(job_id)
 
-    if today not in selected_dates:
+    if today not in selected_dates or settings.is_send_skipped(today):
         return scheduled
 
     send_clock = _parse_send_time(settings.schedule_send_time)
@@ -268,7 +268,7 @@ def run_scheduled_daily_v2_job(
 
 
 def run_scheduled_send_batch(run_date: str | None = None) -> dict:
-    """08:30 核心批次和按需补偿共用的串行发送入口。"""
+    """定时批次和按需补偿共用的串行发送入口。"""
     settings = get_settings()
     now = _normalize_now(settings)
     target_date = run_date or now.date().isoformat()
@@ -460,6 +460,21 @@ def stop_scheduler() -> None:
         _scheduler.shutdown(wait=False)
         _scheduler = None
         logger.info("调度已停止")
+
+
+def reschedule_send_batch(settings: Settings) -> None:
+    """更新下一次定时触发；保存设置本身不会触发发送或补发。"""
+    scheduler = get_scheduler()
+    if scheduler is None:
+        return
+    send_time = _parse_send_time(settings.schedule_send_time)
+    scheduler.reschedule_job(
+        "daily_wechat_send_batch",
+        trigger=CronTrigger(
+            hour=send_time.hour, minute=send_time.minute, second=0,
+            timezone=ZoneInfo(settings.app_timezone),
+        ),
+    )
 
 
 def get_scheduler() -> BackgroundScheduler | None:

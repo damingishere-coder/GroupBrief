@@ -58,6 +58,8 @@ def dashboard(
     for group in groups:
         name = group.display_name or group.wechat_group_name
         run = store.load_run(name, selected_run_date)
+        if settings.is_send_skipped(selected_run_date) and not run.get("sent_at"):
+            run = {**run, "send_hold": True, "send_hold_reason": "USER_SKIPPED_SEND_DATE"}
         runtime_run = dict(run)
         runtime_run.setdefault("group_id", str(group.id or ""))
         runtime_run.setdefault("group_name", name)

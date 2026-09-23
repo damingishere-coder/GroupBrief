@@ -72,6 +72,7 @@ const LABELS: Record<string, string> = {
   email_use_ssl: "SMTP 使用 SSL（V1 兼容）",
   email_send_partial_report: "允许部分群邮件（V1 兼容）",
   schedule_generate_time: "每日生成时间",
+  schedule_send_time: "每日微信发送时间（北京时间）",
   schedule_email_time: "邮件时间（V1 兼容）",
 };
 
@@ -110,9 +111,9 @@ const SETTING_GROUPS = [
   {
     id: "legacy",
     title: "邮件与每日调度",
-    description: "每日 00:15 生成前一日群报，08:30 按稳定群 ID 串行发送；邮件字段保留兼容。",
+    description: "在指定时间按群串行发送，修改发送时间后立即更新后续调度，无需重启。邮件字段保留兼容。",
     icon: Clock,
-    keys: ["email_enabled", "email_recipient", "email_from", "email_smtp_host", "email_smtp_port", "email_smtp_user", "email_smtp_password", "email_use_ssl", "email_send_partial_report", "schedule_generate_time", "schedule_email_time"],
+    keys: ["schedule_send_time", "schedule_generate_time", "email_enabled", "email_recipient", "email_from", "email_smtp_host", "email_smtp_port", "email_smtp_user", "email_smtp_password", "email_use_ssl", "email_send_partial_report", "schedule_email_time"],
   },
 ] as const;
 
@@ -154,7 +155,7 @@ function SettingField({
 }) {
   const sensitive = SENSITIVE_KEYS.has(name);
   const boolean = BOOLEAN_KEYS.has(name) || value === "true" || value === "false";
-  const inputType = sensitive ? "password" : NUMBER_KEYS.has(name) ? "number" : "text";
+  const inputType = sensitive ? "password" : name === "schedule_send_time" ? "time" : NUMBER_KEYS.has(name) ? "number" : "text";
   return (
     <div className={`settings-field ${boolean ? "is-switch" : ""}`}>
       {boolean ? (

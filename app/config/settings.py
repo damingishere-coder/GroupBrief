@@ -14,7 +14,7 @@ _ENVIRONMENT_ONLY_FIELDS = frozenset(
         "allow_test_providers",
         "legacy_v1_write_mode",
         "scheduler_owner",
-        "schedule_send_time",
+        "schedule_send_skip_dates",
         "reliability_watchdog_enabled",
         "reliability_lookback_days",
         "reliability_watchdog_interval_minutes",
@@ -191,6 +191,8 @@ class Settings(BaseSettings):
     schedule_generate_time: str = "00:15"
     # 日报微信发送采用唯一全局批次时间；群级 send_time 仅保留数据库兼容。
     schedule_send_time: str = "08:30"
+    # 运维按运行日期暂停发送；保留日期可防止次日恢复补发。
+    schedule_send_skip_dates: str = ""
     schedule_email_time: str = "after_generate"
     schedule_startup_catchup_enabled: bool = True
     # 无人值守恢复只在进程启动时检查一次，不再注册固定频率 Watchdog。
@@ -211,6 +213,9 @@ class Settings(BaseSettings):
     output_root_override: str = ""
 
     # 路径
+    def is_send_skipped(self, run_date: str) -> bool:
+        return run_date in {value.strip() for value in self.schedule_send_skip_dates.split(",")}
+
     @property
     def data_dir(self) -> Path:
         return PROJECT_ROOT / "data"
