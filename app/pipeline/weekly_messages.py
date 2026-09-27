@@ -8,7 +8,7 @@ from app.data_sources.base import DataSourceStatus, FetchResult
 
 
 def fetch_weekly_messages(*, store, group_name, group_id, start, end,
-                          data_source, load_snapshot, timezone):
+                          data_source, load_snapshot, timezone, per_day=False, reuse_snapshots=True):
     tz = ZoneInfo(timezone)
 
     def local(stamp):
@@ -26,7 +26,7 @@ def fetch_weekly_messages(*, store, group_name, group_id, start, end,
         run_date = (day + timedelta(days=1)).isoformat()
         path = store.messages_path(group_name, run_date)
         reused = False
-        if path.is_file():
+        if reuse_snapshots and path.is_file():
             try:
                 run = store.load_run(group_name, run_date)
                 if run.get("report_kind") != "daily" or run.get("wechat_group_id") != group_id:
@@ -48,7 +48,7 @@ def fetch_weekly_messages(*, store, group_name, group_id, start, end,
             except (OSError, UnicodeError, ValueError, KeyError, TypeError) as exc:
                 rejected.append({"date": day.isoformat(), "reason": str(exc)[:160]})
         if not reused:
-            if missing and missing[-1][1] + timedelta(seconds=1) == day_start:
+            if not per_day and missing and missing[-1][1] + timedelta(seconds=1) == day_start:
                 missing[-1] = (missing[-1][0], day_end)
             else:
                 missing.append((day_start, day_end))
@@ -66,6 +66,8 @@ def fetch_weekly_messages(*, store, group_name, group_id, start, end,
                                           "status": result.status.value, "message_count": len(result.messages), "metrics": meta})
         if result.status not in (DataSourceStatus.OK, DataSourceStatus.EMPTY_RESULT):
             return FetchResult([], result.status, result.detail, result.error_type, metrics)
+        if meta.get("complete") is False or meta.get("partial") or meta.get("truncated") or result.error_type:
+            return FetchResult([], DataSourceStatus.READ_FAILED, "日期读取不完整，禁止生成部分群报", "MESSAGE_FETCH_FAILED", metrics)
         if result.status == DataSourceStatus.OK and not result.messages:
             return FetchResult([], DataSourceStatus.READ_FAILED, "缺失日期读取返回不一致的空结果", "MESSAGE_FETCH_FAILED", metrics)
         if any(m.group_id != group_id or not gap_start <= local(m.timestamp) <= gap_end for m in result.messages):

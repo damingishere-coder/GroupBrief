@@ -362,6 +362,12 @@ def _run_locked(settings: Settings, run_date: date, *, skip_email: bool, now: da
     load_groups = getattr(pipeline, "_load_groups", None)
     if callable(load_groups):
         current_groups = load_groups()
+        from app.scheduler.period import PeriodResolver, CHINA_WORKDAYS_RULE
+        errors = [PeriodResolver().resolve(run_date, schedule_rule=group.schedule_rule, group_id=group.id).calendar_error
+                  for group in current_groups if getattr(group, "schedule_rule", "") == CHINA_WORKDAYS_RULE]
+        if any(errors):
+            return {"status": "blocked", "run_date": run_date_text, "error_type": "CALENDAR_UNAVAILABLE",
+                    "detail": "; ".join(sorted(set(filter(None, errors)))), "email_status": "skipped_schedule"}
         for group in current_groups:
             run_store = RunStore(settings.output_dir)
             group_name = group.display_name or group.wechat_group_name

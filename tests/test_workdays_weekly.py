@@ -15,6 +15,7 @@ from app.db.models import Group
 from app.pipeline.daily_pipeline import DailyPipeline
 from app.scheduler.period import PeriodResolver, WORKDAYS_WEEKLY_RULE, automatic_run_allowed, restore_period, next_run_at
 from app.v2.run_store import RunStore
+from app.scheduler.period import CHINA_WORKDAYS_RULE
 
 
 def message(index, name="冠军", day=0, kind="text", content="这周研究漫画分镜"):
@@ -336,3 +337,52 @@ def test_cutover_preview_backup_and_scope(tmp_path):
         assert connection.execute("SELECT COUNT(*) FROM groups WHERE schedule_rule=?", (WORKDAYS_WEEKLY_RULE,)).fetchone()[0] == 6
         assert connection.execute("SELECT schedule_rule FROM groups WHERE id=99").fetchone()[0] == "daily_previous_day"
     assert configure(db, apply=True)["applied"] is False
+
+
+@pytest.mark.parametrize("day", ["2026-09-27", "2026-10-01", "2026-10-07"])
+def test_china_holiday_blocks_before_any_external_work(make_pipeline, day):
+    env = make_pipeline()
+    env.group.schedule_rule = CHINA_WORKDAYS_RULE
+    result = env.pipeline.generate_all(day, automatic_now=datetime.fromisoformat(day + "T10:00:00"))
+    assert result[0]["status"] == "no_groups"
+    assert env.pipeline.send_due(now=datetime.fromisoformat(day + "T10:00:00")) == []
+    assert env.source.calls == env.prompt.inputs == env.generator.calls == env.sender.calls == env.sync_calls == []
+
+
+def test_china_multi_day_complete_generation_send_and_restart(make_pipeline):
+    messages = [message(i, day=i) for i in range(3)]
+    for i, item in enumerate(messages):
+        item.timestamp = datetime(2026, 10, 10 + i // 2, 10, i)
+    env = make_pipeline(messages + [messages[0]])
+    env.group.schedule_rule = CHINA_WORKDAYS_RULE
+    env.pipeline.settings.schedule_send_time = "10:00"
+    result = env.pipeline.generate_all("2026-10-12", automatic_now=datetime(2026, 10, 12, 0, 15))
+    assert result[0]["status"] == "ready_to_send"
+    run = env.pipeline.store.load_run(env.group.display_name, "2026-10-12")
+    assert run["report_kind"] == "multi_day" and run["top_limit"] == 10
+    assert run["calendar_version"] and run["message_count"] == 3
+    assert len(env.source.calls) == 2 and all(start.date() == end.date() for start, end in env.source.calls)
+    assert env.prompt.champion_calls == 0
+    assert env.prompt.inputs[-1].period_start == "2026-10-10 00:00:00"
+    assert env.pipeline.send_due(now=datetime(2026, 10, 12, 9, 59)) == []
+    assert env.pipeline.send_due(now=datetime(2026, 10, 12, 10))[0]["status"] == "sent"
+    env.pipeline.generate_all("2026-10-12", automatic_now=datetime(2026, 10, 12, 10, 1))
+    env.pipeline.send_due(now=datetime(2026, 10, 12, 10, 1))
+    assert len(env.source.calls) == 2 and len(env.sender.calls) == 2
+
+
+def test_china_missing_day_prevents_ai_and_send(make_pipeline):
+    env = make_pipeline()
+    env.group.schedule_rule = CHINA_WORKDAYS_RULE
+    def fail_day(group_id, start, end):
+        env.source.calls.append((start, end))
+        if start.day == 11:
+            return FetchResult([], DataSourceStatus.READ_FAILED, "incomplete day", "MESSAGE_FETCH_FAILED")
+        item = message(1)
+        item.timestamp = start + timedelta(hours=1)
+        return FetchResult([item], DataSourceStatus.OK)
+    env.source.fetch_messages = fail_day
+    result = env.pipeline.generate_all("2026-10-12", automatic_now=datetime(2026, 10, 12))
+    assert result[0]["status"] == "failed"
+    assert len(env.source.calls) == 2
+    assert env.prompt.inputs == env.generator.calls == env.sender.calls == []

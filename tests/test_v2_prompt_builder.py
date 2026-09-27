@@ -263,6 +263,15 @@ def _builder(provider: FakeSummaryProvider | None = None, tmp_path=None):
     )
 
 
+def test_multi_day_prompt_has_exact_date_title_and_no_weekly_champion():
+    output = _builder().build(_input(report_kind="multi_day", period_start="2026-08-15 00:00:00", period_end="2026-08-17 23:59:59"))
+    assert output.success, output.error
+    assert "多日群报" in output.prompt
+    title = output.prompt.split("【主标题】", 1)[1].split("【副标题】", 1)[0]
+    assert "2026-08-15—2026-08-17" in title
+    assert "本周冠军" not in output.prompt
+
+
 def test_build_renders_only_fixed_sections_and_real_multi_person_dialogue():
     output = _builder().build(_input())
 

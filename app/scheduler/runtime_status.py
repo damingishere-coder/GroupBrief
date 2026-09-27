@@ -543,6 +543,19 @@ def build_daily_status(
             schedule_rules,
         ),
     }
+    if schedule_rules and not started_count and not corrupt:
+        from app.scheduler.period import PeriodResolver
+        windows = [PeriodResolver().resolve(datetime.fromisoformat(run_date).date(), schedule_rule=rule) for rule in schedule_rules]
+        errors = sorted({window.calendar_error for window in windows if window.calendar_error})
+        if errors:
+            overall = "blocked"
+            scheduler["calendar_error"] = "; ".join(errors)
+        elif not any(window.should_run for window in windows):
+            overall = "resting"
+        elif (scheduler.get("scheduled_at") and not scheduler.get("generation_hold") and not scheduler_started
+              and datetime.fromisoformat(scheduler["scheduled_at"]) > datetime.now(ZoneInfo(app_timezone))):
+            # An explicitly prepared future manifest is a plan, not missing work.
+            overall = "not_started"
     payload = {
         "schema_version": 2,
         "run_date": run_date,

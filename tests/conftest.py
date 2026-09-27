@@ -23,6 +23,7 @@ _TEST_DB_PATH = _TEST_ROOT / "groupbrief-test.db"
 os.environ["DATABASE_URL"] = f"sqlite:///{_TEST_DB_PATH.as_posix()}"
 os.environ["OUTPUT_ROOT_OVERRIDE"] = str(_TEST_ROOT / "output")
 os.environ["GROUPBRIEF_NO_SCHEDULER"] = "1"
+os.environ["GROUPBRIEF_CALENDAR_DIR"] = str(_TEST_ROOT / "work_calendar")
 # 测试不读取真实微信联系人库（避免本机 APPDATA 下的 contact.db 影响断言）
 os.environ["GROUPBRIEF_NO_CONTACT_DB"] = "1"
 # 屏蔽 .env / 用户环境中的真实外部配置，防止测试触发真实 MCP / AI / 邮件调用

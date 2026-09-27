@@ -477,7 +477,9 @@ class DeepSeekImagePromptBuilder:
                 try:
                     raw_copy = self._prompt_chat(
                         (POSTER_EDITOR_SYSTEM.replace("日报", "周报").replace("当天", "本周")
-                         if data.report_kind == "weekly" else POSTER_EDITOR_SYSTEM),
+                         if data.report_kind == "weekly" else
+                         POSTER_EDITOR_SYSTEM.replace("日报", "多日群报").replace("当天", "统计期间")
+                         if data.report_kind == "multi_day" else POSTER_EDITOR_SYSTEM),
                         prompt,
                         response_format="json_object",
                         temperature=0.35,

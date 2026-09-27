@@ -426,6 +426,7 @@ export default function GroupDetail({ groupId, invalidGroupId }: GroupDetailProp
               <option value="daily_previous_day">每天统计前一天</option>
               <option value="weekday_default">仅工作日（周一=周五至周日）</option>
               <option value="workdays_daily_monday_weekly">周一周报 Top15；周二至周五日报；周末停跑</option>
+              <option value="china_workdays">中国工作日 Top10；休息后合并统计；调休上班照常</option>
             </select>
           </Field>
           <Field id="send-batch-time" label="发送批次">

@@ -200,6 +200,7 @@ class DailyPipeline:
                 run_date=base_window.run_date,
                 timezone=self.settings.app_timezone,
                 schedule_rule=str(group.schedule_rule or "daily_previous_day"),
+                group_id=group.id,
             )
             snapshot = scheduling_snapshot(group)
             window = restore_period(window, snapshot)
@@ -1190,6 +1191,7 @@ class DailyPipeline:
         window = restore_period(self.period_resolver.resolve(
             run_date=parse_date(run_date), timezone=self.settings.app_timezone,
             schedule_rule=group.schedule_rule,
+            group_id=group.id,
         ), current)
         if not window.should_run:
             return {"status": "skipped", "detail": "该日期按群规则不生成"}
@@ -1339,6 +1341,7 @@ class DailyPipeline:
             run_date=parsed_run_date,
             timezone=self.settings.app_timezone,
             schedule_rule=group.schedule_rule,
+            group_id=group.id,
         )
         window = restore_period(window, current)
         result = self._generate_one(

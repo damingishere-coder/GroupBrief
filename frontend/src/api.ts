@@ -194,6 +194,7 @@ export interface RuntimeGroup {
 }
 
 export type RuntimeOverallStatus =
+  | "resting"
   | "not_started"
   | "running"
   | "retry_pending"
@@ -241,6 +242,10 @@ export interface RuntimeLogsResponse {
 }
 
 export interface Dashboard {
+  calendar_error?: string;
+  calendar_version?: string;
+  schedule_override_id?: string;
+  calendar?: {year: number; source?: string; checked_at?: string; error?: string} | null;
   today: string;
   should_run: boolean;
   period_start: string;

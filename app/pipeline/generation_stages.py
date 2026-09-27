@@ -329,6 +329,8 @@ class GenerationStages:
             "period_end": context.period_end,
             "schedule_rule": context.window.rule,
             "report_kind": context.window.report_kind,
+            "calendar_version": context.window.calendar_version,
+            "schedule_override_id": context.window.schedule_override_id,
             "top_limit": context.window.top_limit,
             "send_time": self.settings.schedule_send_time,
             "strict_image_fact_check": bool(
@@ -452,13 +454,14 @@ class GenerationStages:
         group = context.group
         try:
             with bounded_slot("wechat_fetch", self.settings.wechat_fetch_concurrency):
-                if context.window.report_kind == "weekly" and not context.refresh_messages:
+                if context.window.report_kind == "multi_day" or (context.window.report_kind == "weekly" and not context.refresh_messages):
                     fetch = fetch_weekly_messages(
                         store=self.store, group_name=context.group_name,
                         group_id=group.wechat_group_id,
                         start=context.window.period_start, end=context.window.period_end,
                         data_source=self.data_source, load_snapshot=self._load_message_snapshot,
                         timezone=self.settings.app_timezone,
+                        **({"per_day": True, "reuse_snapshots": not context.refresh_messages} if context.window.report_kind == "multi_day" else {}),
                     )
                 else:
                     fetch = self.data_source.fetch_messages(
@@ -513,7 +516,7 @@ class GenerationStages:
             )
 
         messages = list(fetch.messages)
-        if context.window.report_kind == "weekly":
+        if context.window.report_kind in {"weekly", "multi_day"}:
             unique = {}
             for index, message in enumerate(messages):
                 stamp = message.timestamp
