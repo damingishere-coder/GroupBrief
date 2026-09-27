@@ -199,7 +199,17 @@ def readiness(
             daily_state = json.loads(state_path.read_text(encoding="utf-8"))
         except (OSError, UnicodeError, json.JSONDecodeError):
             daily_state = {}
-        if now <= generate_at + grace:
+        from app.scheduler.period import PeriodResolver
+        windows = [PeriodResolver().resolve(now.date(), settings.app_timezone, group.schedule_rule, group_id=group.id)
+                   for group in enabled_groups]
+        calendar_errors = sorted({window.calendar_error for window in windows if window.calendar_error})
+        if calendar_errors:
+            daily_ok, daily_status = False, "CALENDAR_UNAVAILABLE"
+            daily_detail = "; ".join(calendar_errors)
+        elif windows and not any(window.should_run for window in windows):
+            daily_ok, daily_status = True, "REST_DAY"
+            daily_detail = "休息日不生成群报，下一工作日按计划运行"
+        elif now <= generate_at + grace:
             daily_ok = True
             daily_status = "NOT_DUE" if now < generate_at else "GRACE_PERIOD"
             daily_detail = f"检查宽限截止 {generate_at + grace}"

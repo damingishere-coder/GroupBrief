@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime
+import pytest
 from logging.handlers import RotatingFileHandler
 from types import SimpleNamespace
 
@@ -314,3 +316,25 @@ def test_v2_startup_endpoint_returns_saved_snapshot_without_rerun():
         ],
         "error": "",
     }
+
+
+@pytest.mark.parametrize("moment,rules,expected", [
+    ("2026-09-27T14:00:00", ["china_workdays"], "REST_DAY"),
+    ("2026-09-28T14:00:00", ["china_workdays"], "NOT_DUE"),
+    ("2026-09-27T14:00:00", ["china_workdays", "daily_previous_day"], "NOT_DUE"),
+    ("2035-02-05T14:00:00", ["china_workdays"], "CALENDAR_UNAVAILABLE"),
+])
+def test_readiness_daily_result_respects_calendar(tmp_path, monkeypatch, moment, rules, expected):
+    class FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls.fromisoformat(moment).replace(tzinfo=tz)
+    monkeypatch.setattr(system, "datetime", FrozenDateTime)
+    monkeypatch.setattr(system.repo, "list_groups", lambda *args, **kwargs: [
+        SimpleNamespace(id=i+1, schedule_rule=rule, wechat_send_enabled=False) for i, rule in enumerate(rules)
+    ])
+    client, _ = _readiness_client(tmp_path)
+    with client:
+        payload = client.get("/api/system/ready").json()["daily_result"]
+    assert payload["status"] == expected
+    assert payload["ok"] == (expected != "CALENDAR_UNAVAILABLE")
