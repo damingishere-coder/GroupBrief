@@ -150,3 +150,17 @@ def test_dashboard_rest_day_and_upcoming_exception(calendar, tmp_path, monkeypat
     assert upcoming["period_start"] == "2026-09-25 00:00:00"
     assert upcoming["cards"][0]["schedule_override_id"] == "exception"
     assert upcoming["report_kind"] == "multi_day"
+
+
+def test_future_manifest_waits_until_scheduled_time(calendar, tmp_path):
+    from app.scheduler.daily_v2_job import DailyScheduleState
+    from app.scheduler.runtime_status import build_daily_status
+    from app.scheduler.task_manifest import manifest_fields
+    from app.v2.run_store import RunStore
+    # Fixed far-future weekday under the legacy daily rule avoids wall-clock dependence.
+    group = Group(id=23, display_name="测试", wechat_group_name="测试", wechat_group_id="test@chatroom")
+    expected = build_expected_groups([group], date(2099, 9, 28), timezone="Asia/Shanghai")
+    DailyScheduleState(tmp_path).update("2099-09-28", **manifest_fields(expected))
+    status = build_daily_status(RunStore(tmp_path), "2099-09-28", schedule_rules=["daily_previous_day"])
+    assert status["overall_status"] == "not_started"
+    assert status["summary"]["missing_expected_group_ids"] == ["23"]

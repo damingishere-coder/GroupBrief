@@ -552,6 +552,10 @@ def build_daily_status(
             scheduler["calendar_error"] = "; ".join(errors)
         elif not any(window.should_run for window in windows):
             overall = "resting"
+        elif (scheduler.get("scheduled_at") and not scheduler.get("generation_hold") and not scheduler_started
+              and datetime.fromisoformat(scheduler["scheduled_at"]) > datetime.now(ZoneInfo(app_timezone))):
+            # An explicitly prepared future manifest is a plan, not missing work.
+            overall = "not_started"
     payload = {
         "schema_version": 2,
         "run_date": run_date,
