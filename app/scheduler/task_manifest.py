@@ -9,10 +9,11 @@ from datetime import date, datetime
 from typing import Iterable
 
 from app.db.models import Group
-from app.scheduler.period import PeriodResolver, WORKDAYS_WEEKLY_RULE
+from app.scheduler.period import PeriodResolver, WORKDAYS_WEEKLY_RULE, CHINA_WORKDAYS_RULE
+from app.scheduler.china_calendar import CalendarUnavailableError
 
 MANIFEST_VERSION = 1
-SUPPORTED_SCHEDULE_RULES = frozenset({"weekday_default", "daily_previous_day", WORKDAYS_WEEKLY_RULE})
+SUPPORTED_SCHEDULE_RULES = frozenset({"weekday_default", "daily_previous_day", "daily", WORKDAYS_WEEKLY_RULE, CHINA_WORKDAYS_RULE})
 
 
 def build_expected_groups(
@@ -31,7 +32,9 @@ def build_expected_groups(
         rule = str(group.schedule_rule or "daily_previous_day")
         if rule not in SUPPORTED_SCHEDULE_RULES:
             raise ValueError(f"不支持的群级统计周期规则：{rule}")
-        window = resolver.resolve(run_date, timezone, schedule_rule=rule)
+        window = resolver.resolve(run_date, timezone, schedule_rule=rule, **({"group_id": group.id} if rule == CHINA_WORKDAYS_RULE else {}))
+        if window.calendar_error:
+            raise CalendarUnavailableError(window.calendar_error)
         if not window.should_run:
             continue
         expected.append(
@@ -43,6 +46,8 @@ def build_expected_groups(
                 "schedule_rule": rule,
                 "report_kind": window.report_kind,
                 "top_limit": window.top_limit,
+                "calendar_version": window.calendar_version,
+                "schedule_override_id": window.schedule_override_id,
                 "history_provider_preference": str(group.provider_preference or ""),
                 "summary_provider": str(getattr(group, "summary_provider", "") or ""),
                 "summary_model": str(group.summary_model or ""),

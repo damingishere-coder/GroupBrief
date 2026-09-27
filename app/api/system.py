@@ -370,7 +370,7 @@ def status(session: Session = Depends(repo.get_session), settings: Settings = De
     window = get_report_window(now.date(), settings.app_timezone)
     groups = repo.list_groups(session, only_enabled=True)
     rules = [group.schedule_rule for group in groups] or ["daily_previous_day"]
-    periods = [PeriodResolver().resolve(now.date(), settings.app_timezone, rule) for rule in rules]
+    periods = [PeriodResolver().resolve(now.date(), settings.app_timezone, group.schedule_rule, group_id=group.id) for group in groups] or [PeriodResolver().resolve(now.date())]
     def next_daily_at(value: str, fallback: str) -> str:
         try:
             hour, minute = (int(x) for x in str(value).split(":"))
@@ -395,6 +395,8 @@ def status(session: Session = Depends(repo.get_session), settings: Settings = De
         "range_start": periods[0].period_start.isoformat() if periods[0].should_run else "",
         "range_end": periods[0].period_end.isoformat() if periods[0].should_run else "",
         "should_run_today": any(period.should_run for period in periods),
+        "calendar_error": "; ".join(sorted({period.calendar_error for period in periods if period.calendar_error})),
+        "calendar_version": periods[0].calendar_version,
         "report_kind": periods[0].report_kind if len(set(rules)) == 1 else "mixed",
         "is_weekend_summary": window.is_weekend_summary,
         "next_generate_at": next_generate_at,

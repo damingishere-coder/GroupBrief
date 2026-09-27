@@ -26,7 +26,7 @@ from app.services.group_name_sync import effective_send_target
 from app.services.group_provider_config import resolve_group_ai_settings
 from app.v2.run_store import RunStore
 from app.weekly.store import WeeklyStore
-from app.scheduler.period import WORKDAYS_WEEKLY_RULE
+from app.scheduler.period import WORKDAYS_WEEKLY_RULE, CHINA_WORKDAYS_RULE
 
 
 def previous_natural_week(reference: date) -> tuple[date, date]:
@@ -95,7 +95,7 @@ class WeeklyInsightsService:
         repo.init_db(self.settings)
         with Session(repo.engine) as session:
             groups = repo.list_groups(session, only_enabled=True)
-        groups = [group for group in groups if group.schedule_rule != WORKDAYS_WEEKLY_RULE]
+        groups = [group for group in groups if group.schedule_rule not in {WORKDAYS_WEEKLY_RULE, CHINA_WORKDAYS_RULE}]
         if group_ids is not None:
             wanted = {int(value) for value in group_ids}
             groups = [group for group in groups if group.id in wanted]

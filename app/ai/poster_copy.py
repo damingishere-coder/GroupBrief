@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import json
 import re
 from typing import Any, Iterable
@@ -635,6 +635,11 @@ def render_poster_prompt(
     if report_kind == "weekly":
         overall_visual = overall_visual.replace("当天", "本周")
         template_text = template_text.replace("日报", "周报").replace("当天", "本周")
+    elif report_kind == "multi_day":
+        overall_visual = overall_visual.replace("当天", "统计期间")
+        template_text = template_text.replace("日报", "多日群报").replace("当天", "统计期间")
+        start, _, end = period_line.partition(" ~ ")
+        copy = replace(copy, title=f"{start[:10]}—{end[:10]}｜{copy.title}")
     if template_text:
         from app.ai.prompt_templates import render_image_prompt_template
 
@@ -661,7 +666,7 @@ def render_poster_prompt(
         ).strip()
     else:
         parts = [
-            "【任务】\n\n生成一张竖版微信群周报漫画信息图。" if report_kind == "weekly" else "【任务】\n\n生成一张竖版微信群日报漫画信息图。",
+            "【任务】\n\n生成一张竖版微信群" + {"weekly": "周报", "multi_day": "多日群报"}.get(report_kind, "日报") + "漫画信息图。",
             f"【群名称】\n\n{group_name}",
             f"【统计时间】\n\n{period_line}",
             f"【数据】\n\n{message_line}\n{speaker_line}",

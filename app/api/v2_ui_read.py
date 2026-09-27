@@ -21,7 +21,9 @@ from app.api.v2_ui_common import (
 from app.config.settings import Settings, get_settings
 from app.db import repository as repo
 from app.image.delivery_guard import image_delivery_eligible, image_fallback_level
-from app.scheduler.period import PeriodResolver, WORKDAYS_WEEKLY_RULE
+from app.scheduler.period import PeriodResolver, restore_period, CHINA_WORKDAYS_RULE
+from app.scheduler.china_calendar import ChinaCalendar
+from app.scheduler.daily_v2_job import DailyScheduleState
 from app.scheduler.runtime_status import build_daily_status
 from app.services.runtime_logs import read_runtime_logs
 from app.v2.constants import FILE_IMAGE
@@ -49,8 +51,10 @@ def dashboard(
     )
     store = _store(settings)
     groups = repo.list_groups(session, only_enabled=True)
-    if groups and all(group.schedule_rule == WORKDAYS_WEEKLY_RULE for group in groups):
-        window = PeriodResolver().resolve(selected_date, settings.app_timezone, WORKDAYS_WEEKLY_RULE)
+    if groups:
+        window = PeriodResolver().resolve(selected_date, settings.app_timezone, groups[0].schedule_rule, group_id=groups[0].id)
+    manifest = DailyScheduleState(settings.output_dir).load(selected_run_date).get("expected_groups", [])
+    planned = {str(row.get("group_id")): row for row in manifest if isinstance(row, dict)}
 
     cards: list[dict] = []
     runtime_runs: list[dict] = []
@@ -58,6 +62,10 @@ def dashboard(
     for group in groups:
         name = group.display_name or group.wechat_group_name
         run = store.load_run(name, selected_run_date)
+        group_window = PeriodResolver().resolve(selected_date, settings.app_timezone, group.schedule_rule, group_id=group.id)
+        group_window = restore_period(group_window, run if run.get("period_start") else planned.get(str(group.id), {}))
+        if group == groups[0]:
+            window = group_window
         if settings.is_send_skipped(selected_run_date) and not run.get("sent_at"):
             run = {**run, "send_hold": True, "send_hold_reason": "USER_SKIPPED_SEND_DATE"}
         runtime_run = dict(run)
@@ -65,6 +73,8 @@ def dashboard(
         runtime_run.setdefault("group_name", name)
         runtime_runs.append(runtime_run)
         status = run.get("status", "PENDING")
+        if status == "PENDING" and not group_window.should_run and not group_window.calendar_error:
+            status = "RESTING"
         fallback_level = image_fallback_level(run)
         image_variant = str(run.get("image_variant") or "normal")
         image_can_deliver = image_delivery_eligible(run)
@@ -124,10 +134,13 @@ def dashboard(
                 "ranking_count_policy": ranking_count_policy,
                 "image_prompt_template": group.image_prompt_template,
                 "status": status,
-                "period_start": run.get("period_start", ""),
-                "period_end": run.get("period_end", ""),
-                "report_kind": run.get("report_kind", "daily" if run.get("period_start") else window.report_kind),
-                "top_limit": run.get("top_limit", 10 if run.get("period_start") else window.top_limit),
+                "period_start": run.get("period_start") or (group_window.period_start_str() if group_window.should_run else ""),
+                "period_end": run.get("period_end") or (group_window.period_end_str() if group_window.should_run else ""),
+                "calendar_error": group_window.calendar_error,
+                "calendar_version": group_window.calendar_version,
+                "schedule_override_id": group_window.schedule_override_id,
+                "report_kind": run.get("report_kind", "daily" if run.get("period_start") else group_window.report_kind),
+                "top_limit": run.get("top_limit", 10 if run.get("period_start") else group_window.top_limit),
                 "message_count": run.get("message_count", 0),
                 "speaker_count": run.get("speaker_count", 0),
                 "image_url": image_url,
@@ -168,7 +181,7 @@ def dashboard(
             counts["generated"] += 1
         elif status == "FAILED":
             counts["failed"] += 1
-        else:
+        elif status != "RESTING":
             counts["pending"] += 1
 
     next_send = ""
@@ -202,6 +215,10 @@ def dashboard(
         "today": selected_run_date,
         "run_date": selected_run_date,
         "should_run": window.should_run,
+        "calendar_error": window.calendar_error,
+        "calendar_version": window.calendar_version,
+        "schedule_override_id": window.schedule_override_id,
+        "calendar": ChinaCalendar().status(selected_date.year) if any(group.schedule_rule == CHINA_WORKDAYS_RULE for group in groups) else None,
         "report_kind": window.report_kind,
         "period_start": window.period_start_str(),
         "period_end": window.period_end_str(),

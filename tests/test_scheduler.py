@@ -35,7 +35,8 @@ def test_scheduler_jobs_configured():
     assert "daily_v2_generate_email" in ids
     assert "daily_wechat_send_batch" in ids
     assert "reliability_watchdog" not in ids
-    assert len(jobs) == 2
+    assert "china_calendar_refresh" in ids
+    assert len([job for job in jobs if not job.id.startswith("china_calendar_")]) == 2
     assert "generate_daily" not in ids
     assert "send_daily_email" not in ids
     for job in jobs:
@@ -49,7 +50,7 @@ def test_scheduler_jobs_configured():
             fields = {field.name: str(field) for field in job.trigger.fields}
             assert fields["hour"] == "8"
             assert fields["minute"] == "30"
-        assert job.trigger.__class__.__name__ == "CronTrigger"
+        assert job.trigger.__class__.__name__ == ("DateTrigger" if job.id == "china_calendar_startup" else "CronTrigger")
     assert start_scheduler(settings) is scheduler
     stop_scheduler()
     assert get_scheduler() is None

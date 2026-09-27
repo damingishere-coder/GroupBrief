@@ -358,6 +358,16 @@ def _schedule_startup_recovery(
     return True
 
 
+def refresh_work_calendar() -> dict:
+    from app.scheduler.china_calendar import refresh_calendars
+    from app.scheduler.period import CHINA_WORKDAYS_RULE
+    with Session(repo.engine) as session:
+        groups = repo.list_groups(session, only_enabled=True)
+    if not any(group.schedule_rule == CHINA_WORKDAYS_RULE for group in groups):
+        return {"status": "not_required"}
+    return refresh_calendars(today=datetime.now(ZoneInfo(get_settings().app_timezone)).date())
+
+
 def start_scheduler(settings: Settings) -> BackgroundScheduler:
     global _scheduler
     if _scheduler is not None:
@@ -367,6 +377,14 @@ def start_scheduler(settings: Settings) -> BackgroundScheduler:
     generate_time = _parse_generate_time(settings.schedule_generate_time)
     send_time = _parse_send_time(settings.schedule_send_time)
     scheduler = BackgroundScheduler(timezone=tz)
+    scheduler.add_job(
+        refresh_work_calendar,
+        trigger=CronTrigger(hour=0, minute=5, timezone=tz),
+        id="china_calendar_refresh", name="ChinaCalendarRefresh",
+        coalesce=True, max_instances=1, misfire_grace_time=1800,
+    )
+    _add_one_shot(scheduler, job_id="china_calendar_startup", name="ChinaCalendarStartup",
+                 func=refresh_work_calendar, run_at=datetime.now(tz) + timedelta(seconds=1))
     scheduler.add_job(
         run_scheduled_daily_v2_job,
         trigger=CronTrigger(

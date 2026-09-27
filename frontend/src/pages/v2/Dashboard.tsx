@@ -38,6 +38,7 @@ const STATUS_META: Record<
   { label: string; tone: "success" | "warning" | "danger" | "info" | "neutral" }
 > = {
   PENDING: { label: "待生成", tone: "warning" },
+  RESTING: { label: "休息日", tone: "neutral" },
   DATA_READY: { label: "数据就绪", tone: "warning" },
   RANKING_READY: { label: "排行完成", tone: "warning" },
   PROMPT_READY: { label: "Prompt 完成", tone: "info" },
@@ -222,6 +223,7 @@ export default function Dashboard() {
   const data = dashboard.data;
   const counts = data.counts;
   const dailyStatusMeta = {
+    resting: { label: "休息，下一工作日运行", tone: "neutral" as const },
     not_started: { label: "今日未开始", tone: "neutral" as const },
     running: { label: "今日运行中", tone: "info" as const },
     retry_pending: { label: "等待自动重试", tone: "warning" as const },
@@ -309,8 +311,11 @@ export default function Dashboard() {
             <p>
               消息统计周期 {data.period_start?.slice(0, 10)} —{" "}
               {data.period_end?.slice(0, 10)}
-              {!data.should_run ? " · 当日无计划生成" : ""}
+              {data.calendar_error ? ` · 日历不可用：${data.calendar_error}` : !data.should_run ? " · 休息，下一工作日运行" : ""}
+              {data.schedule_override_id ? " · 本次临时安排" : ""}
             </p>
+            {!data.should_run && data.runtime?.scheduler?.next_generate_at && <p>下次生成：{data.runtime.scheduler.next_generate_at.replace("T", " ").slice(0, 16)}；下次发送：{data.runtime.scheduler.next_send_at?.replace("T", " ").slice(0, 16)}</p>}
+            {data.calendar && <p>{data.calendar.year} 年中国工作日日历 · {data.calendar.source || "日历不可用"}{data.calendar.checked_at ? ` · 已检查 ${new Date(data.calendar.checked_at).toLocaleString("zh-CN", {timeZone: "Asia/Shanghai"})}` : " · 本地预置"}</p>}
             <button
               onClick={() => {
                 setFilter("attention");

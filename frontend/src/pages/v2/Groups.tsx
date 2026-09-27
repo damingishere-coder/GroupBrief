@@ -38,6 +38,7 @@ type GroupFilter = "all" | "enabled" | "disabled";
 type ToggleField = "enabled" | "image_enabled";
 const SCHEDULE_LABELS: Record<string, string> = {
   workdays_daily_monday_weekly: "周一周报 / 工作日日报",
+  china_workdays: "中国工作日 · 休息后合并统计",
   daily_previous_day: "每天统计前一天",
   weekday_default: "工作日（周一汇总周末）",
 };

@@ -39,7 +39,7 @@ def test_save_reschedules_and_survives_restart(monkeypatch):
         job = scheduler.get_job("daily_wechat_send_batch")
         assert job.next_run_time > now
         assert job.next_run_time.strftime("%H:%M") == selected
-        assert len(scheduler.get_jobs()) == 2
+        assert len([job for job in scheduler.get_jobs() if not job.id.startswith("china_calendar_")]) == 2
         restored = Settings(_env_file=None)
         repo.apply_db_settings(restored)
         assert restored.schedule_send_time == selected
