@@ -16,6 +16,8 @@ from app.db.models import Group
 @pytest.fixture
 def calendar(tmp_path, monkeypatch):
     monkeypatch.setattr("app.scheduler.china_calendar.CACHE", tmp_path)
+    atomic_json(tmp_path / "2027.json", {"year": 2027, "papers": ["https://www.gov.cn/test-fixture"],
+                "days": [{"name": "元旦", "date": "2027-01-01", "isOffDay": True}]})
     return ChinaCalendar(tmp_path)
 
 
@@ -82,6 +84,22 @@ def test_unknown_calendar_never_uses_weekday_fallback(tmp_path):
     resolver = PeriodResolver(ChinaCalendar(tmp_path, tmp_path))
     window = resolver.resolve(date(2035, 2, 5), schedule_rule=CHINA_WORKDAYS_RULE)
     assert not window.should_run and "2035" in window.calendar_error
+
+
+def test_december_requires_following_year_notice(calendar):
+    (calendar.cache_dir / "2027.json").unlink()
+    window = PeriodResolver(calendar).resolve(date(2026, 12, 26), schedule_rule=CHINA_WORKDAYS_RULE)
+    assert not window.should_run and "2027" in window.calendar_error
+
+
+def test_adjacent_year_conflict_is_blocked(calendar):
+    current = json.loads((BUNDLED / "2026.json").read_text(encoding="utf-8"))
+    current["days"].append({"date": "2026-12-26", "name": "元旦", "isOffDay": True})
+    atomic_json(calendar.cache_dir / "2026.json", current)
+    atomic_json(calendar.cache_dir / "2027.json", {"year": 2027, "papers": ["https://www.gov.cn/test-fixture"],
+                "days": [{"date": "2026-12-26", "name": "元旦", "isOffDay": False}]})
+    window = PeriodResolver(calendar).resolve(date(2026, 12, 26), schedule_rule=CHINA_WORKDAYS_RULE)
+    assert not window.should_run and "冲突" in window.calendar_error
 
 
 def test_long_holiday_next_run(calendar):

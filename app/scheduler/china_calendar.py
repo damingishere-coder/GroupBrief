@@ -86,7 +86,7 @@ class ChinaCalendar:
     def is_workday(self, day: date) -> bool:
         current = self._load(day.year)
         # A following-year notice may assign December makeup workdays.
-        following = self._load(day.year + 1, required=False) if day.month == 12 else None
+        following = self._load(day.year + 1) if day.month == 12 else None
         entries = [item["isOffDay"] for payload in (current, following) if payload
                    for item in payload["days"] if item["date"] == day.isoformat()]
         if len(set(entries)) > 1:
