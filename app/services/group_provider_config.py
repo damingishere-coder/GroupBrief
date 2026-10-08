@@ -6,6 +6,7 @@ import shutil
 
 from app.config.settings import Settings
 from app.db.models import Group
+from app.scheduler.period import CHINA_WORKDAYS_RULE
 from app.ranking.policies import (
     normalize_ranking_policy,
     normalize_sender_name_policy,
@@ -138,6 +139,7 @@ def validate_group_provider_values(
         "weekday_default",
         "daily_previous_day",
         "workdays_daily_monday_weekly",
+        CHINA_WORKDAYS_RULE,
     }:
         raise ValueError(f"不支持的统计周期规则：{schedule_rule}")
     if "ranking_count_policy" in normalized:

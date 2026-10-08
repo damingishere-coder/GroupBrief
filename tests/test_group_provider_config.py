@@ -39,10 +39,17 @@ def test_group_ai_config_inherits_global_and_rejects_unknown_model():
         resolve_group_ai_settings(settings, group, capability="prompt")
 
 
-def test_group_configuration_accepts_only_supported_schedule_rules():
+@pytest.mark.parametrize("rule", [
+    "daily_previous_day", "weekday_default", "workdays_daily_monday_weekly", "china_workdays",
+])
+def test_group_configuration_accepts_supported_schedule_rules(rule):
     settings = Settings(_env_file=None)
     assert validate_group_provider_values(
-        {"schedule_rule": "daily_previous_day"}, settings
-    )["schedule_rule"] == "daily_previous_day"
+        {"schedule_rule": rule}, settings
+    )["schedule_rule"] == rule
+
+
+def test_group_configuration_rejects_unknown_schedule_rules():
+    settings = Settings(_env_file=None)
     with pytest.raises(ValueError, match="统计周期"):
         validate_group_provider_values({"schedule_rule": "cron:*"}, settings)

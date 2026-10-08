@@ -285,12 +285,31 @@ def test_new_group_defaults_use_global_time_and_reload_current_groups(client):
     test_client, engine = client
     test_client.app.dependency_overrides[get_settings] = lambda: Settings(_env_file=None, schedule_send_time="09:15")
     empty_defaults = test_client.get("/api/groups/defaults").json()
+    assert empty_defaults["schedule_rule"] == "china_workdays"
     assert empty_defaults["wechat_send_enabled"] is False
     assert empty_defaults["send_time"] == "09:15"
     _seed_workflow_groups(engine)
     defaults = test_client.get("/api/groups/defaults").json()
     assert defaults["wechat_send_enabled"] is True
     assert defaults["send_time"] == "09:15"
+
+
+def test_china_workday_rule_can_create_and_update_groups(client):
+    test_client, engine = client
+    response = test_client.post("/api/groups", json={
+        "display_name": "中国工作日群", "wechat_group_id": "china-workday@chatroom",
+        "schedule_rule": "china_workdays",
+    })
+    assert response.status_code == 200, response.text
+    group_id = response.json()["id"]
+    response = test_client.put(f"/api/groups/{group_id}", json={
+        "schedule_rule": "china_workdays", "image_enabled": False,
+    })
+    assert response.status_code == 200, response.text
+    with Session(engine) as session:
+        saved = session.get(Group, group_id)
+        assert saved.schedule_rule == "china_workdays"
+        assert saved.image_enabled is False
 
 
 def test_from_name_inherits_same_workflow_as_create_form(client, monkeypatch):

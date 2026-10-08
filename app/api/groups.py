@@ -25,6 +25,7 @@ from app.config.settings import Settings, get_settings
 from app.core.path_security import PathBoundaryError, validate_path_label
 from app.db import repository as repo
 from app.db.models import Group
+from app.scheduler.period import CHINA_WORKDAYS_RULE
 from app.data_sources.wechat_data_analysis import WeChatDataAnalysisSource
 from app.services.group_name_sync import (
     GroupNameSyncService,
@@ -44,7 +45,7 @@ class GroupCreate(BaseModel):
     enabled: bool = True
     provider_preference: str = ""
     # V2 扩展
-    schedule_rule: str = "daily_previous_day"
+    schedule_rule: str = CHINA_WORKDAYS_RULE
     send_time: str = "08:30"
     summary_provider: str = ""
     prompt_provider: str = ""
