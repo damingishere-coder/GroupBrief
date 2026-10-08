@@ -349,26 +349,28 @@ def test_china_holiday_blocks_before_any_external_work(make_pipeline, day):
     assert env.source.calls == env.prompt.inputs == env.generator.calls == env.sender.calls == env.sync_calls == []
 
 
-def test_china_multi_day_complete_generation_send_and_restart(make_pipeline):
+def test_china_previous_workday_generation_excludes_sunday_and_sends_once(make_pipeline):
     messages = [message(i, day=i) for i in range(3)]
     for i, item in enumerate(messages):
         item.timestamp = datetime(2026, 10, 10 + i // 2, 10, i)
-    env = make_pipeline(messages + [messages[0]])
+    env = make_pipeline(messages)
     env.group.schedule_rule = CHINA_WORKDAYS_RULE
     env.pipeline.settings.schedule_send_time = "10:00"
     result = env.pipeline.generate_all("2026-10-12", automatic_now=datetime(2026, 10, 12, 0, 15))
     assert result[0]["status"] == "ready_to_send"
     run = env.pipeline.store.load_run(env.group.display_name, "2026-10-12")
-    assert run["report_kind"] == "multi_day" and run["top_limit"] == 10
-    assert run["calendar_version"] and run["message_count"] == 3
-    assert len(env.source.calls) == 2 and all(start.date() == end.date() for start, end in env.source.calls)
+    assert run["report_kind"] == "daily" and run["top_limit"] == 10
+    assert run["calendar_version"] and run["message_count"] == 2
+    assert len(env.source.calls) == 1
+    assert env.source.calls[0] == (datetime(2026, 10, 10), datetime(2026, 10, 10, 23, 59, 59))
     assert env.prompt.champion_calls == 0
     assert env.prompt.inputs[-1].period_start == "2026-10-10 00:00:00"
+    assert env.prompt.inputs[-1].period_end == "2026-10-10 23:59:59"
     assert env.pipeline.send_due(now=datetime(2026, 10, 12, 9, 59)) == []
     assert env.pipeline.send_due(now=datetime(2026, 10, 12, 10))[0]["status"] == "sent"
     env.pipeline.generate_all("2026-10-12", automatic_now=datetime(2026, 10, 12, 10, 1))
     env.pipeline.send_due(now=datetime(2026, 10, 12, 10, 1))
-    assert len(env.source.calls) == 2 and len(env.sender.calls) == 2
+    assert len(env.source.calls) == 1 and len(env.sender.calls) == 2
 
 
 def test_china_missing_day_prevents_ai_and_send(make_pipeline):
@@ -376,7 +378,7 @@ def test_china_missing_day_prevents_ai_and_send(make_pipeline):
     env.group.schedule_rule = CHINA_WORKDAYS_RULE
     def fail_day(group_id, start, end):
         env.source.calls.append((start, end))
-        if start.day == 11:
+        if start.day == 10:
             return FetchResult([], DataSourceStatus.READ_FAILED, "incomplete day", "MESSAGE_FETCH_FAILED")
         item = message(1)
         item.timestamp = start + timedelta(hours=1)
@@ -384,5 +386,21 @@ def test_china_missing_day_prevents_ai_and_send(make_pipeline):
     env.source.fetch_messages = fail_day
     result = env.pipeline.generate_all("2026-10-12", automatic_now=datetime(2026, 10, 12))
     assert result[0]["status"] == "failed"
-    assert len(env.source.calls) == 2
+    assert len(env.source.calls) == 1
     assert env.prompt.inputs == env.generator.calls == env.sender.calls == []
+
+
+def test_china_old_holiday_merge_blocks_before_external_work_and_keeps_history(make_pipeline):
+    env = make_pipeline()
+    env.group.schedule_rule = CHINA_WORKDAYS_RULE
+    store = env.pipeline.store
+    store.update(env.group.display_name, "2026-10-08", status="READY_TO_SEND",
+                 group_id=str(env.group.id), wechat_send_enabled=True, schedule_rule=CHINA_WORKDAYS_RULE,
+                 period_start="2026-09-30T00:00:00", period_end="2026-10-07T23:59:59",
+                 report_kind="multi_day", top_limit=10, calendar_version="previous-version")
+    before = store.run_path(env.group.display_name, "2026-10-08").read_bytes()
+    result = env.pipeline.generate_all("2026-10-08", automatic_now=datetime(2026, 10, 8, 1))
+    assert result[0]["status"] == "no_groups"
+    assert env.pipeline.send_due(now=datetime(2026, 10, 8, 10)) == []
+    assert env.source.calls == env.prompt.inputs == env.generator.calls == env.sender.calls == env.sync_calls == []
+    assert store.run_path(env.group.display_name, "2026-10-08").read_bytes() == before
