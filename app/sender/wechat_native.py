@@ -975,7 +975,7 @@ class WindowsWechatDriver:
                 control
                 for control in window.descendants(control_type="Edit")
                 if control.is_visible()
-                and str(control.window_text() or "").strip() in {"搜索", "Search"}
+                and str(getattr(control.element_info, "name", "") or "").strip() in {"搜索", "Search"}
                 and str(getattr(control.element_info, "automation_id", "") or "") != "chat_input_field"
             ]
             if len(searches) != 1:

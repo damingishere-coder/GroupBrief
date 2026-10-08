@@ -569,9 +569,9 @@ def _search_control(*, aid="", visible=True, readonly=False, accepts=True):
 
     value.SetValue = set_value
     control = SimpleNamespace(
-        element_info=SimpleNamespace(automation_id=aid),
+        element_info=SimpleNamespace(automation_id=aid, name="搜索"),
         is_visible=lambda: visible,
-        window_text=lambda: "搜索",
+        window_text=lambda: value.CurrentValue,
         iface_value=value,
     )
     return control, writes
