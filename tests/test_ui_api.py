@@ -113,6 +113,7 @@ def test_group_image_theme_roundtrip_and_validation():
             "/api/groups",
             json={
                 "display_name": display_name,
+                "schedule_rule": "china_workdays",
                 "image_theme": "custom",
                 "image_theme_custom": "  手账拼贴  ",
             },
@@ -121,7 +122,7 @@ def test_group_image_theme_roundtrip_and_validation():
         group_id = created.json()["id"]
         try:
             listed = next(item for item in client.get("/api/groups").json() if item["id"] == group_id)
-            assert listed["schedule_rule"] == "daily_previous_day"
+            assert listed["schedule_rule"] == "china_workdays"
             assert listed["image_theme"] == "custom"
             assert listed["image_theme_custom"] == "手账拼贴"
 
