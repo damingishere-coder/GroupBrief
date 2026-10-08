@@ -66,7 +66,8 @@ class PeriodResolver:
                 if should_run:
                     start = calendar.previous_workday(today)
                     override = calendar.override(today, group_id)
-                    end = today - timedelta(days=1)
+                    # 休息日只影响执行间隔，不合并进下一份群报。
+                    end = start
                     if override:
                         start, end = date.fromisoformat(override["period_start"]), date.fromisoformat(override["period_end"])
                         override_id = override["id"]
@@ -154,17 +155,16 @@ def automatic_run_allowed(rule: str, run_date: date, now: datetime, snapshot: di
                 end = datetime.fromisoformat(snapshot["period_end"])
                 days = (end.date() - start.date()).days + 1
                 if (not snapshot.get("calendar_version") or not 1 <= days <= 366
-                        or start.time() != time.min or end.time() != _END_OF_DAY or end.date() != run_date - timedelta(days=1)
+                        or start.time() != time.min or end.time() != _END_OF_DAY
                         or snapshot.get("report_kind") != ("multi_day" if days > 1 else "daily")
                         or int(snapshot.get("top_limit", 10)) != 10):
                     return False
                 if snapshot.get("schedule_override_id", "") != expected.schedule_override_id:
                     return False
-                # Freeze existing windows across calendar updates; for the same version
-                # reject mismatched or stale task manifests before any external call.
-                if snapshot["calendar_version"] == expected.calendar_version or expected.schedule_override_id:
-                    return (start == expected.period_start and end == expected.period_end
-                            and snapshot.get("report_kind") == expected.report_kind)
+                # 历史范围保留，但旧的假期合并任务不能绕过当前单日统计规则。
+                # 日历更新也不能把不符合当前安排的任务自动发出去。
+                return (start == expected.period_start and end == expected.period_end
+                        and snapshot.get("report_kind") == expected.report_kind)
             return True
         except (TypeError, ValueError, KeyError):
             return False

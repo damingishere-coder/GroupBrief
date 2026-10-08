@@ -22,15 +22,15 @@ def calendar(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("run,start,end", [
-    ("2026-09-28", "2026-09-24", "2026-09-27"),
+    ("2026-09-28", "2026-09-24", "2026-09-24"),
     ("2026-09-29", "2026-09-28", "2026-09-28"),
-    ("2026-10-08", "2026-09-30", "2026-10-07"),
+    ("2026-10-08", "2026-09-30", "2026-09-30"),
     ("2026-10-10", "2026-10-09", "2026-10-09"),
-    ("2026-10-12", "2026-10-10", "2026-10-11"),
+    ("2026-10-12", "2026-10-10", "2026-10-10"),
     ("2026-09-21", "2026-09-20", "2026-09-20"),
-    ("2026-09-14", "2026-09-11", "2026-09-13"),
-    ("2026-02-24", "2026-02-14", "2026-02-23"),
-    ("2026-01-04", "2025-12-31", "2026-01-03"),
+    ("2026-09-14", "2026-09-11", "2026-09-11"),
+    ("2026-02-24", "2026-02-14", "2026-02-14"),
+    ("2026-01-04", "2025-12-31", "2025-12-31"),
 ])
 def test_official_windows(calendar, run, start, end):
     window = PeriodResolver(calendar).resolve(date.fromisoformat(run), schedule_rule=CHINA_WORKDAYS_RULE)
@@ -42,18 +42,24 @@ def test_official_windows(calendar, run, start, end):
     assert window.calendar_version
 
 
-def test_contiguous_periods_through_full_year(calendar):
+def test_only_workday_messages_are_covered_once_through_full_year(calendar):
     resolver = PeriodResolver(calendar)
-    last_end = None
+    expected_previous = date(2025, 12, 31)
+    covered = []
     for offset in range(365):
         day = date(2026, 1, 1) + timedelta(days=offset)
         window = resolver.resolve(day, schedule_rule=CHINA_WORKDAYS_RULE)
         assert not window.calendar_error
         if not window.should_run:
+            assert not calendar.is_workday(day)
             continue
-        if last_end:
-            assert window.period_start.date() == last_end + timedelta(days=1)
-        last_end = window.period_end.date()
+        assert calendar.is_workday(day)
+        assert window.covered_dates == [expected_previous]
+        assert window.period_start.date() == window.period_end.date() == expected_previous
+        assert window.report_kind == "daily" and calendar.is_workday(expected_previous)
+        covered.append(expected_previous)
+        expected_previous = day
+    assert len(covered) == len(set(covered))
 
 
 @pytest.mark.parametrize("day", ["2026-09-25", "2026-09-26", "2026-09-27", "2026-10-01", "2026-10-07", "2026-10-11"])
@@ -133,6 +139,28 @@ def test_conflicting_next_year_december_entry(calendar):
 def test_old_snapshot_does_not_bypass_new_rule(calendar):
     assert not automatic_run_allowed(CHINA_WORKDAYS_RULE, date(2026, 9, 28), datetime(2026, 9, 28, 10),
                                      {"period_start": "2026-09-21T00:00:00", "schedule_rule": "workdays_daily_monday_weekly"})
+
+
+@pytest.mark.parametrize("calendar_version", ["current", "older-calendar-version"])
+def test_old_holiday_merge_is_preserved_but_cannot_auto_continue(calendar, calendar_version):
+    group = Group(id=23, display_name="测试", wechat_group_name="测试", wechat_group_id="test@chatroom", schedule_rule=CHINA_WORKDAYS_RULE)
+    snapshot = build_expected_groups([group], date(2026, 10, 8), timezone="Asia/Shanghai")[0]
+    assert automatic_run_allowed(CHINA_WORKDAYS_RULE, date(2026, 10, 8), datetime(2026, 10, 8, 10), snapshot)
+    old = {**snapshot, "period_end": "2026-10-07T23:59:59", "report_kind": "multi_day"}
+    if calendar_version != "current":
+        old["calendar_version"] = calendar_version
+    window = PeriodResolver(calendar).resolve(date(2026, 10, 8), schedule_rule=CHINA_WORKDAYS_RULE)
+    restored = restore_period(window, old)
+    assert restored.period_end.date() == date(2026, 10, 7)
+    assert restored.report_kind == "multi_day"
+    assert not automatic_run_allowed(CHINA_WORKDAYS_RULE, date(2026, 10, 8), datetime(2026, 10, 8, 10), old)
+
+
+def test_previous_workday_snapshot_survives_unrelated_calendar_refresh(calendar):
+    group = Group(id=23, display_name="测试", wechat_group_name="测试", wechat_group_id="test@chatroom", schedule_rule=CHINA_WORKDAYS_RULE)
+    snapshot = build_expected_groups([group], date(2026, 10, 12), timezone="Asia/Shanghai")[0]
+    snapshot["calendar_version"] = "older-calendar-version"
+    assert automatic_run_allowed(CHINA_WORKDAYS_RULE, date(2026, 10, 12), datetime(2026, 10, 12, 10), snapshot)
 
 
 def test_dashboard_rest_day_and_upcoming_exception(calendar, tmp_path, monkeypatch):
