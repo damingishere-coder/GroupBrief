@@ -524,17 +524,11 @@ class WindowsWechatDriver:
         if width < 600 or height < 420:
             return False, "微信窗口尺寸异常，请恢复主窗口后重试"
 
-        # 微信 4.1.x 不再保证 Ctrl+F 会聚焦全局搜索。直接点击左上角搜索框，
-        # 坐标限制在其稳定区域内，兼容不同窗口宽度与 DPI。
-        search_x = left + min(max(width * 0.21, 180.0), 360.0)
-        search_y = top + min(max(height * 0.062, 40.0), 90.0)
-        self._click(search_x, search_y)
-        time.sleep(self.delay)
-        # 上一次验证异常退出时搜索框可能保留旧内容；每次都覆盖输入，避免
-        # 重试把目标名称重复拼接后造成误判或点错会话。
-        self._hotkey("ctrl", "a")
-        self._set_clipboard_text(target)
-        self._hotkey("ctrl", "v")
+        # 多屏和窗口尺寸变化会让比例坐标点到聊天输入区。只向唯一的
+        # 全局搜索控件写入查询，不能用 Ctrl+A/粘贴覆盖用户聊天草稿。
+        search_ok, search_detail = self._set_search_query(target)
+        if not search_ok:
+            return False, f"{search_detail}，已停止发送"
         time.sleep(self.delay * 1.5)
 
         chat_left, chat_right = _main_chat_horizontal_bounds(left, right)
@@ -968,6 +962,34 @@ class WindowsWechatDriver:
         import win32gui
 
         return win32gui.GetWindowRect(hwnd)
+
+    def _set_search_query(self, target: str) -> tuple[bool, str]:
+        """只设置当前主窗口中唯一可见的全局搜索框，保留聊天草稿。"""
+        if not self._window:
+            return False, "微信窗口尚未验证"
+        try:
+            from pywinauto import Desktop
+
+            window = Desktop(backend="uia").window(handle=self._window)
+            searches = [
+                control
+                for control in window.descendants(control_type="Edit")
+                if control.is_visible()
+                and str(control.window_text() or "").strip() in {"搜索", "Search"}
+                and str(getattr(control.element_info, "automation_id", "") or "") != "chat_input_field"
+            ]
+            if len(searches) != 1:
+                return False, f"可验证的全局搜索框数量不是 1（当前 {len(searches)}）"
+            value = searches[0].iface_value
+            if value.CurrentIsReadOnly:
+                return False, "微信全局搜索框不可写"
+            value.SetValue(target)
+            if str(value.CurrentValue or "") != target:
+                return False, "微信全局搜索查询写入后不一致"
+            return True, "全局搜索查询已验证"
+        except Exception as exc:
+            logger.warning("WeChat search control unavailable: %s", exc)
+            return False, f"微信全局搜索控件不可用：{type(exc).__name__}"
 
     def _read_uia_chat_titles(self, header_box: tuple[int, int, int, int]) -> list[str]:
         """读取当前微信主窗口中唯一可定位的群名标签，不做模糊或符号归一化。"""

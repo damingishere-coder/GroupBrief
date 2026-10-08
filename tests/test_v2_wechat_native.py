@@ -546,7 +546,95 @@ def test_wechat_main_window_class_rejects_auxiliary_windows():
     assert not WindowsWechatDriver._wechat_main_window_class("Chrome_WidgetWin_1")
 
 
-def test_target_search_overwrites_stale_query_before_paste(tmp_path, monkeypatch):
+def _install_search_controls(monkeypatch, controls):
+    def descendants(*, control_type):
+        assert control_type == "Edit"
+        return controls
+
+    monkeypatch.setitem(sys.modules, "pywinauto", SimpleNamespace(
+        Desktop=lambda **kwargs: SimpleNamespace(
+            window=lambda **kwargs: SimpleNamespace(descendants=descendants)
+        )
+    ))
+
+
+def _search_control(*, aid="", visible=True, readonly=False, accepts=True):
+    writes = []
+    value = SimpleNamespace(CurrentValue="旧查询", CurrentIsReadOnly=readonly)
+
+    def set_value(query):
+        writes.append(query)
+        if accepts:
+            value.CurrentValue = query
+
+    value.SetValue = set_value
+    control = SimpleNamespace(
+        element_info=SimpleNamespace(automation_id=aid),
+        is_visible=lambda: visible,
+        window_text=lambda: "搜索",
+        iface_value=value,
+    )
+    return control, writes
+
+
+def test_search_query_overwrites_only_unique_visible_search_control(tmp_path, monkeypatch):
+    driver = WindowsWechatDriver(_settings(tmp_path))
+    driver._window = 123
+    search, queries = _search_control()
+    composer, drafts = _search_control(aid="chat_input_field")
+    hidden, hidden_queries = _search_control(visible=False)
+    _install_search_controls(monkeypatch, [composer, search, hidden])
+
+    ok, _ = driver._set_search_query("Eason张UED-4群🤘")
+
+    assert ok
+    assert queries == ["Eason张UED-4群🤘"]
+    assert search.iface_value.CurrentValue == "Eason张UED-4群🤘"
+    assert drafts == hidden_queries == []
+    assert composer.iface_value.CurrentValue == "旧查询"
+
+
+@pytest.mark.parametrize("count,readonly,accepts", [
+    (0, False, True), (2, False, True), (1, True, True), (1, False, False),
+])
+def test_search_query_failure_does_not_touch_chat_draft(tmp_path, monkeypatch, count, readonly, accepts):
+    driver = WindowsWechatDriver(_settings(tmp_path))
+    driver._window = 123
+    searches = [_search_control(readonly=readonly, accepts=accepts) for _ in range(count)]
+    composer, drafts = _search_control(aid="chat_input_field")
+    _install_search_controls(monkeypatch, [composer] + [control for control, _ in searches])
+
+    ok, detail = driver._set_search_query("目标群")
+
+    assert not ok and detail
+    assert drafts == []
+    if count != 1 or readonly:
+        assert all(not writes for _, writes in searches)
+
+
+def test_failed_search_control_stops_before_clicking_or_typing(tmp_path, monkeypatch):
+    driver = WindowsWechatDriver(_settings(tmp_path))
+    monkeypatch.setattr(driver, "_imports", lambda: None)
+    monkeypatch.setattr(driver, "_desktop_unlocked", lambda: True)
+    monkeypatch.setattr(driver, "health_check", lambda: (True, "ok"))
+    monkeypatch.setattr(driver, "_wechat_windows", lambda: [123])
+    monkeypatch.setattr(driver, "_activate", lambda hwnd: True)
+    monkeypatch.setattr(driver, "_window_rect", lambda hwnd: (0, 0, 1000, 800))
+    monkeypatch.setattr(driver, "_set_search_query", lambda target: (False, "搜索控件不可用"))
+
+    def forbidden(*args):
+        pytest.fail("Failed search must not click, overwrite clipboard, or type into a draft")
+
+    for method in ("_click", "_hotkey", "_set_clipboard_text", "_ocr_screen"):
+        monkeypatch.setattr(driver, method, forbidden)
+
+    ok, detail = driver.open_and_verify("目标群")
+
+    assert not ok
+    assert "搜索控件不可用" in detail and "已停止发送" in detail
+
+
+def test_target_search_sets_query_without_composer_hotkeys(tmp_path, monkeypatch):
     driver = WindowsWechatDriver(_settings(tmp_path))
     hotkeys: list[tuple[str, str]] = []
     clicks: list[tuple[float, float]] = []
@@ -567,6 +655,7 @@ def test_target_search_overwrites_stale_query_before_paste(tmp_path, monkeypatch
     monkeypatch.setattr(driver, "health_check", lambda: (True, "ok"))
     monkeypatch.setattr(driver, "_wechat_windows", lambda: [123])
     monkeypatch.setattr(driver, "_activate", lambda hwnd: True)
+    monkeypatch.setattr(driver, "_set_search_query", lambda target: (True, "query verified"))
     monkeypatch.setattr(driver, "_hotkey", lambda modifier, key: hotkeys.append((modifier, key)))
     monkeypatch.setattr(driver, "_set_clipboard_text", lambda text: None)
     monkeypatch.setattr(driver, "_window_rect", lambda hwnd: (0, 0, 1000, 800))
@@ -577,9 +666,8 @@ def test_target_search_overwrites_stale_query_before_paste(tmp_path, monkeypatch
     ok, _ = driver.open_and_verify("文件传输助手")
 
     assert ok is True
-    assert hotkeys == [("ctrl", "a"), ("ctrl", "v")]
-    assert clicks[0] == (210.0, 49.6)
-    assert clicks[1] == (130.0, 200.0)
+    assert hotkeys == []
+    assert clicks == [(130.0, 200.0)]
 
 
 def test_target_search_retries_transient_ocr_miss(tmp_path, monkeypatch):
@@ -603,6 +691,7 @@ def test_target_search_retries_transient_ocr_miss(tmp_path, monkeypatch):
     monkeypatch.setattr(driver, "health_check", lambda: (True, "ok"))
     monkeypatch.setattr(driver, "_wechat_windows", lambda: [123])
     monkeypatch.setattr(driver, "_activate", lambda hwnd: True)
+    monkeypatch.setattr(driver, "_set_search_query", lambda target: (True, "query verified"))
     monkeypatch.setattr(driver, "_hotkey", lambda modifier, key: None)
     monkeypatch.setattr(driver, "_key", lambda key, key_up=False: None)
     monkeypatch.setattr(driver, "_set_clipboard_text", lambda text: None)
@@ -632,6 +721,7 @@ def test_target_search_falls_back_to_unique_uia_group_item(tmp_path, monkeypatch
     monkeypatch.setattr(driver, "health_check", lambda: (True, "ok"))
     monkeypatch.setattr(driver, "_wechat_windows", lambda: [123])
     monkeypatch.setattr(driver, "_activate", lambda hwnd: True)
+    monkeypatch.setattr(driver, "_set_search_query", lambda target: (True, "query verified"))
     monkeypatch.setattr(driver, "_hotkey", lambda modifier, key: None)
     monkeypatch.setattr(driver, "_set_clipboard_text", lambda text: None)
     monkeypatch.setattr(driver, "_window_rect", lambda hwnd: (0, 0, 1000, 800))
@@ -648,7 +738,7 @@ def test_target_search_falls_back_to_unique_uia_group_item(tmp_path, monkeypatch
 
     assert ok is True
     assert "精确查找并验证" in detail
-    assert clicks[1] == (160.0, 200.0)
+    assert clicks == [(160.0, 200.0)]
 
 
 @pytest.mark.parametrize(
@@ -671,6 +761,7 @@ def test_live_uied_ocr_failure_requires_unique_exact_uia_header(tmp_path, monkey
     monkeypatch.setattr(driver, "_desktop_unlocked", lambda: True)
     monkeypatch.setattr(driver, "_wechat_windows", lambda: [123])
     monkeypatch.setattr(driver, "_activate", lambda hwnd: True)
+    monkeypatch.setattr(driver, "_set_search_query", lambda target: (True, "query verified"))
     monkeypatch.setattr(driver, "_hotkey", lambda *args: None)
     monkeypatch.setattr(driver, "_set_clipboard_text", lambda text: None)
     monkeypatch.setattr(driver, "_window_rect", lambda hwnd: (0, 0, 1000, 800))
@@ -688,7 +779,7 @@ def test_live_uied_ocr_failure_requires_unique_exact_uia_header(tmp_path, monkey
     ok, detail = driver.open_and_verify(target)
 
     assert ok is expected
-    assert len(clicks) == 2  # A real group result must be selected before title fallback.
+    assert len(clicks) == 1  # A real group result must be selected before title fallback.
     assert ("UIA 聊天标题" if expected else "已停止发送") in detail
 
 
