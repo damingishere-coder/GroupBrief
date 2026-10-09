@@ -971,14 +971,20 @@ class WindowsWechatDriver:
             from pywinauto import Desktop
 
             window = Desktop(backend="uia").window(handle=self._window)
+            edits = window.descendants(control_type="Edit")
             searches = [
                 control
-                for control in window.descendants(control_type="Edit")
+                for control in edits
                 if control.is_visible()
                 and str(getattr(control.element_info, "name", "") or "").strip() in {"搜索", "Search"}
                 and str(getattr(control.element_info, "automation_id", "") or "") != "chat_input_field"
             ]
             if len(searches) != 1:
+                # 微信冷启动可能只暴露渲染窗口，完全没有 Edit 控件。
+                # 此时用系统光标位置证明全局搜索已获得焦点，再输入查询。
+                # 已存在编辑控件却无法唯一识别搜索时仍然停止，不绕过歧义。
+                if not edits:
+                    return self._set_keyboard_search_query(target)
                 return False, f"可验证的全局搜索框数量不是 1（当前 {len(searches)}）"
             value = searches[0].iface_value
             if value.CurrentIsReadOnly:
@@ -990,6 +996,88 @@ class WindowsWechatDriver:
         except Exception as exc:
             logger.warning("WeChat search control unavailable: %s", exc)
             return False, f"微信全局搜索控件不可用：{type(exc).__name__}"
+
+    def _search_focus_verified(self) -> bool:
+        """用 Windows 插入光标证明焦点在主窗口左上搜索区，拒绝聊天输入区。"""
+        import win32gui
+        import win32process
+        from ctypes import wintypes
+
+        if not self._window or win32gui.GetForegroundWindow() != self._window:
+            return False
+
+        class GuiThreadInfo(ctypes.Structure):
+            _fields_ = [
+                ("cbSize", wintypes.DWORD), ("flags", wintypes.DWORD),
+                ("hwndActive", wintypes.HWND), ("hwndFocus", wintypes.HWND),
+                ("hwndCapture", wintypes.HWND), ("hwndMenuOwner", wintypes.HWND),
+                ("hwndMoveSize", wintypes.HWND), ("hwndCaret", wintypes.HWND),
+                ("rcCaret", wintypes.RECT),
+            ]
+
+        info = GuiThreadInfo()
+        info.cbSize = ctypes.sizeof(info)
+        thread_id, _ = win32process.GetWindowThreadProcessId(self._window)
+        if not ctypes.windll.user32.GetGUIThreadInfo(thread_id, ctypes.byref(info)):
+            return False
+        if not info.hwndCaret or not info.hwndFocus:
+            return False
+        if any(
+            win32gui.GetAncestor(handle, 2) != self._window
+            for handle in (info.hwndFocus, info.hwndCaret)
+        ):
+            return False
+        caret = info.rcCaret
+        if caret.right <= caret.left or caret.bottom <= caret.top:
+            return False
+        caret_left, caret_top = win32gui.ClientToScreen(info.hwndCaret, (caret.left, caret.top))
+        caret_right, caret_bottom = win32gui.ClientToScreen(info.hwndCaret, (caret.right, caret.bottom))
+        left, top, right, bottom = self._window_rect(self._window)
+        width, height = right - left, bottom - top
+        return (
+            left + min(width * 0.075, 130) <= caret_left < caret_right <= left + min(width * 0.33, 600)
+            and top + min(height * 0.025, 40) <= caret_top < caret_bottom <= top + min(height * 0.12, 180)
+        )
+
+    def _set_keyboard_search_query(self, target: str) -> tuple[bool, str]:
+        """无 UIA 编辑控件时，严格核验搜索焦点和查询回读；绝不按 Enter。"""
+        import win32clipboard
+        import win32con
+
+        self._hotkey("ctrl", "f")
+        for _ in range(self._poll_rounds(self.stage_timeout)):
+            time.sleep(self.poll_interval)
+            if self._search_focus_verified():
+                break
+        else:
+            return False, "微信未暴露搜索控件，且无法证明光标位于全局搜索框"
+        self._set_clipboard_text(target)
+        if not self._search_focus_verified():
+            return False, "微信搜索框输入前焦点已改变"
+        self._hotkey("ctrl", "a")
+        if not self._search_focus_verified():
+            return False, "微信搜索框粘贴前焦点已改变"
+        self._hotkey("ctrl", "v")
+        time.sleep(self.delay)
+        if not self._search_focus_verified():
+            return False, "微信搜索框回读前焦点已改变"
+        # 清掉原剪贴板查询，避免复制没有生效时把原值误当成回读成功。
+        self._set_clipboard_text(f"GroupBrief-search-check-{uuid.uuid4().hex}")
+        self._hotkey("ctrl", "a")
+        self._hotkey("ctrl", "c")
+        time.sleep(self.delay)
+        win32clipboard.OpenClipboard()
+        try:
+            query = (
+                str(win32clipboard.GetClipboardData(win32con.CF_UNICODETEXT) or "")
+                if win32clipboard.IsClipboardFormatAvailable(win32con.CF_UNICODETEXT)
+                else ""
+            )
+        finally:
+            win32clipboard.CloseClipboard()
+        if query != target or not self._search_focus_verified():
+            return False, "微信全局搜索查询回读不一致或焦点已改变"
+        return True, "已通过搜索光标位置和查询回读验证全局搜索"
 
     def _read_uia_chat_titles(self, header_box: tuple[int, int, int, int]) -> list[str]:
         """读取当前微信主窗口中唯一可定位的群名标签，不做模糊或符号归一化。"""
@@ -1060,14 +1148,53 @@ class WindowsWechatDriver:
             logger.warning("WeChat UIA search fallback unavailable: %s", exc)
             return None, f"UIA 搜索兜底不可用：{type(exc).__name__}"
 
-    @staticmethod
-    def _click(x: float, y: float) -> None:
+    def _click(self, x: float, y: float) -> None:
         import win32api
         import win32con
+        import win32gui
+        import win32process
 
-        win32api.SetCursorPos((int(x), int(y)))
-        win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, 0, 0)
-        win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, 0, 0)
+        if not self._window or win32gui.GetForegroundWindow() != self._window:
+            raise RuntimeError("点击前微信主窗口已失去前台焦点")
+        point = (int(x), int(y))
+        left, top, right, bottom = self._window_rect(self._window)
+        hit = win32gui.WindowFromPoint(point)
+        root = win32gui.GetAncestor(hit, 2)
+        # 搜索浮层是无 Win32 owner 的 Qt 顶层工具窗口；只接受同一微信
+        # 进程、已知浮层类名且位于主窗口内的命中，遮挡的其他程序必须停止。
+        own_popup = (
+            bool(re.fullmatch(r"Qt\d+QWindowToolSaveBits", win32gui.GetClassName(root)))
+            and win32process.GetWindowThreadProcessId(root)[1]
+            == win32process.GetWindowThreadProcessId(self._window)[1]
+        )
+        if not (left <= x < right and top <= y < bottom) or (root != self._window and not own_popup):
+            raise RuntimeError("点击位置已不属于已验证的微信主窗口")
+        children: list[int] = []
+        win32gui.EnumChildWindows(self._window, lambda hwnd, out: out.append(hwnd), children)
+        saved: list[tuple[int, int]] = []
+        try:
+            for hwnd in children:
+                if not win32gui.GetClassName(hwnd).startswith("MMUIRenderSubWindow"):
+                    continue
+                left, top, right, bottom = win32gui.GetWindowRect(hwnd)
+                if not win32gui.IsWindowVisible(hwnd) or not (left <= x < right and top <= y < bottom):
+                    continue
+                style = win32gui.GetWindowLong(hwnd, win32con.GWL_EXSTYLE)
+                if style & win32con.WS_EX_TRANSPARENT:
+                    saved.append((hwnd, style))
+                    win32gui.SetWindowLong(hwnd, win32con.GWL_EXSTYLE, style & ~win32con.WS_EX_TRANSPARENT)
+            if saved:
+                time.sleep(0.05)
+            if win32gui.GetForegroundWindow() != self._window:
+                raise RuntimeError("微信渲染层点击前焦点已改变")
+            win32api.SetCursorPos(point)
+            win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, 0, 0)
+            win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, 0, 0)
+            if saved:
+                time.sleep(0.05)
+        finally:
+            for hwnd, style in reversed(saved):
+                win32gui.SetWindowLong(hwnd, win32con.GWL_EXSTYLE, style)
 
     def _focus_composer(self) -> None:
         if not self._window:
