@@ -7379,3 +7379,8 @@ textarea:focus-visible {
     display: none;
   }
 }
+.wechat-account-summary { display: flex; align-items: center; gap: 16px; margin-bottom: 16px; }
+.wechat-account-summary img, .wechat-account-candidates img { border-radius: 12px; flex-shrink: 0; }
+.wechat-account-candidates { display: flex; flex-wrap: wrap; gap: 16px; margin: 16px 0; padding: 16px; border: 1px solid var(--border); border-radius: 12px; }
+.wechat-account-candidates label { display: flex; align-items: center; gap: 10px; }
+.wechat-account-candidates small { display: block; }

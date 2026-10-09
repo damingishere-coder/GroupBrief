@@ -115,6 +115,7 @@ def system_health(settings: Settings = Depends(get_settings)):
         send_ok, send_detail = sender.health_check()
         sender_report = {"ok": send_ok}
     checks["wechat_sender"] = {
+        "account": sender_report.get("account", {"ok": False, "detail": "当前发送器不支持头像账号核验"}),
         "ok": send_ok,
         "status": "OK" if send_ok else "UNAVAILABLE",
         "detail": send_detail,
