@@ -612,6 +612,157 @@ def test_search_query_failure_does_not_touch_chat_draft(tmp_path, monkeypatch, c
         assert all(not writes for _, writes in searches)
 
 
+def test_render_only_search_uses_verified_keyboard_fallback(tmp_path, monkeypatch):
+    driver = WindowsWechatDriver(_settings(tmp_path))
+    driver._window = 123
+    _install_search_controls(monkeypatch, [])
+    targets = []
+    monkeypatch.setattr(driver, "_set_keyboard_search_query", lambda target: (targets.append(target) is None, "verified"))
+
+    assert driver._set_search_query("目标群") == (True, "verified")
+    assert targets == ["目标群"]
+
+
+@pytest.mark.parametrize("caret,owner,foreground,expected", [
+    ((175, 84, 177, 86), 123, 123, True),
+    ((700, 1100, 702, 1102), 123, 123, False),  # 聊天草稿区
+    ((40, 84, 42, 86), 123, 123, False),  # 左侧导航区
+    ((175, 84, 175, 86), 123, 123, False),
+    ((175, 84, 177, 86), 456, 123, False),
+    ((175, 84, 177, 86), 123, 456, False),
+])
+def test_search_focus_requires_own_foreground_caret_inside_search_area(tmp_path, monkeypatch, caret, owner, foreground, expected):
+    import ctypes
+
+    driver = WindowsWechatDriver(_settings(tmp_path))
+    driver._window = 123
+
+    def get_info(thread, pointer):
+        info = pointer._obj
+        info.hwndFocus = info.hwndCaret = owner
+        info.rcCaret.left, info.rcCaret.top, info.rcCaret.right, info.rcCaret.bottom = caret
+        return 1
+
+    monkeypatch.setattr(ctypes, "windll", SimpleNamespace(user32=SimpleNamespace(GetGUIThreadInfo=get_info)), raising=False)
+    monkeypatch.setitem(sys.modules, "win32gui", SimpleNamespace(
+        GetForegroundWindow=lambda: foreground, GetAncestor=lambda h, flag: h,
+        ClientToScreen=lambda h, point: (point[0] + 100, point[1] + 200),
+    ))
+    monkeypatch.setitem(sys.modules, "win32process", SimpleNamespace(GetWindowThreadProcessId=lambda h: (1, 2)))
+    monkeypatch.setattr(driver, "_window_rect", lambda h: (100, 200, 1764, 1603))
+
+    assert driver._search_focus_verified() is expected
+
+
+def _install_keyboard_search(monkeypatch, driver, *, focus=True, copied="目标群"):
+    clipboard = {"text": "original"}
+    calls = []
+
+    def hotkey(modifier, key):
+        calls.append(key)
+        if key == "c" and copied is not None:
+            clipboard["text"] = copied
+
+    monkeypatch.setattr(driver, "_hotkey", hotkey)
+    monkeypatch.setattr(driver, "_search_focus_verified", lambda: focus)
+    monkeypatch.setattr(driver, "_set_clipboard_text", lambda text: clipboard.update(text=text))
+    monkeypatch.setattr("app.sender.wechat_native.time.sleep", lambda seconds: None)
+    monkeypatch.setitem(sys.modules, "win32clipboard", SimpleNamespace(
+        OpenClipboard=lambda: None, CloseClipboard=lambda: None,
+        IsClipboardFormatAvailable=lambda fmt: True,
+        GetClipboardData=lambda fmt: clipboard["text"],
+    ))
+    monkeypatch.setitem(sys.modules, "win32con", SimpleNamespace(CF_UNICODETEXT=13))
+    return clipboard, calls
+
+
+def test_keyboard_search_requires_focus_before_touching_clipboard(tmp_path, monkeypatch):
+    driver = WindowsWechatDriver(_settings(tmp_path))
+    clipboard, calls = _install_keyboard_search(monkeypatch, driver, focus=False)
+
+    ok, detail = driver._set_keyboard_search_query("目标群")
+
+    assert not ok and "光标" in detail
+    assert clipboard["text"] == "original"
+    assert calls == ["f"]
+
+
+def test_keyboard_search_stops_when_focus_changes_before_paste(tmp_path, monkeypatch):
+    driver = WindowsWechatDriver(_settings(tmp_path))
+    _, calls = _install_keyboard_search(monkeypatch, driver)
+    focus = iter([True, True, False])
+    monkeypatch.setattr(driver, "_search_focus_verified", lambda: next(focus))
+
+    ok, detail = driver._set_keyboard_search_query("目标群")
+
+    assert not ok and "粘贴前" in detail
+    assert calls == ["f", "a"]
+
+
+@pytest.mark.parametrize("copied,expected", [("目标群", True), ("别的群", False), (None, False)])
+def test_keyboard_search_requires_independent_exact_query_readback(tmp_path, monkeypatch, copied, expected):
+    driver = WindowsWechatDriver(_settings(tmp_path))
+    clipboard, calls = _install_keyboard_search(monkeypatch, driver, copied=copied)
+
+    ok, _ = driver._set_keyboard_search_query("目标群")
+
+    assert ok is expected
+    assert calls == ["f", "a", "v", "a", "c"]
+    if copied is None:
+        assert clipboard["text"].startswith("GroupBrief-search-check-")
+
+
+@pytest.mark.parametrize("fails", [False, True])
+@pytest.mark.parametrize("hit,allowed", [(123, True), (333, True), (444, False), (555, False)])
+def test_click_restores_only_own_visible_render_style_even_after_failure(tmp_path, monkeypatch, fails, hit, allowed):
+    driver = WindowsWechatDriver(_settings(tmp_path))
+    driver._window = 123
+    styles = {1: 0x80020, 2: 0x80020, 3: 0x80020, 4: 0x80020}
+    changes = []
+    clicked = []
+
+    def set_style(hwnd, index, style):
+        styles[hwnd] = style
+        changes.append((hwnd, style))
+
+    def mouse_event(*args):
+        assert styles[1] == 0x80000
+        assert all(styles[h] == 0x80020 for h in (2, 3, 4))
+        if fails:
+            raise RuntimeError("input failed")
+        clicked.append(args)
+
+    monkeypatch.setitem(sys.modules, "win32gui", SimpleNamespace(
+        GetForegroundWindow=lambda: 123,
+        WindowFromPoint=lambda point: hit, GetAncestor=lambda h, flag: h,
+        EnumChildWindows=lambda hwnd, callback, out: [callback(h, out) for h in styles],
+        GetClassName=lambda h: "Qt51514QWindowToolSaveBits" if h in (333, 444) else "OtherWindow" if h in (2, 555) else "MMUIRenderSubWindowHW",
+        GetWindowRect=lambda h: (0, 0, 100, 100) if h != 3 else (200, 200, 300, 300),
+        IsWindowVisible=lambda h: h != 4,
+        GetWindowLong=lambda h, index: styles[h], SetWindowLong=set_style,
+    ))
+    monkeypatch.setitem(sys.modules, "win32con", SimpleNamespace(
+        GWL_EXSTYLE=-20, WS_EX_TRANSPARENT=32, MOUSEEVENTF_LEFTDOWN=2, MOUSEEVENTF_LEFTUP=4,
+    ))
+    monkeypatch.setitem(sys.modules, "win32api", SimpleNamespace(SetCursorPos=lambda point: None, mouse_event=mouse_event))
+    monkeypatch.setitem(sys.modules, "win32process", SimpleNamespace(GetWindowThreadProcessId=lambda h: (1, 99 if h == 444 else 42)))
+    monkeypatch.setattr("app.sender.wechat_native.time.sleep", lambda seconds: None)
+
+    if not allowed:
+        with pytest.raises(RuntimeError, match="点击位置"):
+            driver._click(50, 50)
+        assert changes == clicked == []
+        return
+    if fails:
+        with pytest.raises(RuntimeError, match="input failed"):
+            driver._click(50, 50)
+    else:
+        driver._click(50, 50)
+        assert len(clicked) == 2
+    assert changes == [(1, 0x80000), (1, 0x80020)]
+    assert all(style == 0x80020 for style in styles.values())
+
+
 def test_failed_search_control_stops_before_clicking_or_typing(tmp_path, monkeypatch):
     driver = WindowsWechatDriver(_settings(tmp_path))
     monkeypatch.setattr(driver, "_imports", lambda: None)
