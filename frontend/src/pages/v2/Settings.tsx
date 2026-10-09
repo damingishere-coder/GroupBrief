@@ -1,5 +1,6 @@
 import { useWorkspaceQuery, updateWorkspaceQuery } from "../../navigation";
 import { useUnsavedChanges } from "../../components/useUnsavedChanges";
+import { WechatAccountCard } from "../../components/WechatAccountCard";
 import { useEffect, useMemo, useState } from "react";
 import {
   CheckCircle,
@@ -330,6 +331,7 @@ export default function Settings() {
       <ContentSwap swapKey={tab}>
         {tab === "settings" && (
         <section className="settings-form-area" aria-label="运行设置">
+          <WechatAccountCard />
           {settingsError && <div className="settings-error" role="alert"><WarningCircle size={18} />{settingsError}</div>}
           {settingsLoading && <LoadingState label="正在读取真实设置…" />}
           {!settingsLoading && !settingsError && visibleGroups.every((group) => group.keys.length === 0) && <EmptyState title="后端没有返回可编辑设置" description="请确认本地服务已启动。" />}

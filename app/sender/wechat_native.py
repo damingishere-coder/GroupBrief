@@ -430,12 +430,15 @@ class WindowsWechatDriver:
             1.0,
         )
         self._window: int | None = None
+        self._verified_identity: dict | None = None
+        self._verified_target = ""
+        self._verified_avatar_sha = ""
         self._enable_dpi_awareness()
 
     def health_check(self) -> tuple[bool, str]:
         report = self.health_report()
         if report["ok"]:
-            return True, "微信原生发送器可用（依赖、桌面、中文 OCR、剪贴板、唯一窗口均通过）"
+            return True, "微信原生发送器可用（依赖、桌面、OCR、剪贴板及发送账号头像均通过）"
         for stage in ("dependencies", "desktop", "ocr", "clipboard", "window"):
             item = report[stage]
             if not item["ok"]:
@@ -480,17 +483,18 @@ class WindowsWechatDriver:
         except Exception as exc:
             stages["clipboard"] = {"ok": False, "detail": f"Windows 剪贴板不可用：{exc}"}
         try:
-            windows = self._wechat_windows()
-            window_ok = len(windows) == 1
-            stages["window"] = {
-                "ok": window_ok,
-                "detail": "找到唯一可见微信主窗口" if window_ok else f"必须存在唯一可见微信主窗口，当前找到 {len(windows)} 个",
-            }
+            from app.sender.wechat_account import inspect_account
+            account = inspect_account(self)
+            stages["window"] = {"ok": account["ok"], "detail": account["detail"]}
+            stages["account"] = account
         except Exception as exc:
             stages["window"] = {"ok": False, "detail": f"微信窗口检查失败：{exc}"}
         return {"ok": all(item["ok"] for item in stages.values()), **stages}
 
     def open_and_verify(self, target: str) -> tuple[bool, str]:
+        self._window = None
+        self._verified_identity = None
+        self._verified_target = ""
         target = (target or "").strip()
         if not target:
             return False, "发送目标为空"
@@ -508,8 +512,7 @@ class WindowsWechatDriver:
         ok, detail = self.health_check()
         if not ok:
             return False, detail
-        windows = self._wechat_windows()
-        self._window = windows[0]
+        self._verified_target = target
         activated = False
         for _ in range(3):
             if self._activate(self._window):
@@ -518,6 +521,10 @@ class WindowsWechatDriver:
             time.sleep(self.delay)
         if not activated:
             return False, "微信窗口无法激活"
+        try:
+            self._assert_send_context(check_target=False)
+        except Exception as exc:
+            return False, str(exc)
 
         left, top, right, bottom = self._window_rect(self._window)
         width, height = right - left, bottom - top
@@ -586,6 +593,7 @@ class WindowsWechatDriver:
             return NativeActionResult(False, "发送文字为空")
         submitted = False
         try:
+            self._assert_send_context()
             self._focus_composer()
             composer_empty, empty_detail = self._composer_is_empty()
             if not composer_empty:
@@ -606,6 +614,7 @@ class WindowsWechatDriver:
                         "baseline_attempts": baseline_attempts,
                     },
                 )
+            self._assert_send_context()
             self._set_clipboard_text(text)
             self._hotkey("ctrl", "v")
             staged_composer, staged_change, stage_attempts = self._wait_for_staged_change(
@@ -624,6 +633,7 @@ class WindowsWechatDriver:
                     "文字粘贴后未观察到输入区暂存，已停止且未按 Enter",
                     diagnostics=diagnostics,
                 )
+            self._assert_send_context()
             self._key("enter")
             submitted = True
             ok, detail, submit_diagnostics = self._wait_for_submission(
@@ -662,6 +672,7 @@ class WindowsWechatDriver:
     def paste_image(self, image_path: Path) -> NativeActionResult:
         submitted = False
         try:
+            self._assert_send_context()
             self._focus_composer()
             composer_empty, empty_detail = self._composer_is_empty()
             if not composer_empty:
@@ -682,6 +693,7 @@ class WindowsWechatDriver:
                         "baseline_attempts": baseline_attempts,
                     },
                 )
+            self._assert_send_context()
             self._set_clipboard_image(image_path)
             self._hotkey("ctrl", "v")
             staged_composer, staged_change, stage_attempts = self._wait_for_staged_change(
@@ -702,6 +714,7 @@ class WindowsWechatDriver:
                 )
             if not self._window:
                 return NativeActionResult(False, "微信窗口尚未验证")
+            self._assert_send_context()
             self._key("enter")
             submitted = True
             ok, detail, submit_diagnostics = self._wait_for_submission(
@@ -890,31 +903,96 @@ class WindowsWechatDriver:
         return cls._enumerate_wechat_windows(visible=False)
 
     def _prepare_wechat_window(self) -> tuple[bool, str]:
-        """恢复唯一、已存在的隐藏主窗口；绝不启动微信或处理登录。"""
+        """按已绑定头像选中唯一账号；恢复已有窗口，不启动或登录。"""
+        from app.sender.wechat_account import inspect_account
+        report = inspect_account(self, restore=True)
+        if not report["ok"]:
+            return False, report["detail"]
+        self._verified_identity = report["identity"]
+        self._window = report["identity"]["hwnd"]
+        self._verified_avatar_sha = report["avatar_sha256"]
+        return True, report["detail"]
 
-        visible = self._wechat_windows()
-        if len(visible) == 1:
-            return True, "找到唯一可见微信主窗口"
-        if len(visible) > 1:
-            return False, f"必须存在唯一可见微信主窗口，当前找到 {len(visible)} 个"
+    @staticmethod
+    def _account_window_identity(hwnd: int) -> dict:
+        import win32api
+        import win32con
+        import win32gui
+        import win32process
 
-        hidden = self._hidden_wechat_windows()
-        if len(hidden) != 1:
-            return False, (
-                "没有唯一可恢复的微信主窗口"
-                f"（可见 {len(visible)} 个，隐藏候选 {len(hidden)} 个）"
-            )
-        if not self._activate(hidden[0]):
-            return False, "唯一隐藏微信主窗口无法安全恢复"
-        deadline = time.monotonic() + max(self.stage_timeout, self.delay * 3)
-        while time.monotonic() < deadline:
-            visible = self._wechat_windows()
-            if len(visible) == 1 and visible[0] == hidden[0]:
-                return True, "已恢复唯一隐藏微信主窗口"
-            if len(visible) > 1:
-                return False, f"恢复后出现多个可见微信主窗口（{len(visible)} 个）"
-            time.sleep(self.poll_interval)
-        return False, "隐藏微信主窗口恢复后仍不可见"
+        if not win32gui.IsWindow(hwnd):
+            raise ValueError("微信窗口已关闭")
+        _, pid = win32process.GetWindowThreadProcessId(hwnd)
+        handle = win32api.OpenProcess(win32con.PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        try:
+            created = str(win32process.GetProcessTimes(handle)["CreationTime"])
+        finally:
+            handle.Close()
+        return {"hwnd": hwnd, "pid": pid, "created": created}
+
+    def _capture_account_avatar(self, hwnd: int, *, restore: bool = False):
+        import win32gui
+        import win32ui
+        from PIL import Image
+        from app.sender.wechat_account import normalized_avatar
+
+        if not self._desktop_unlocked():
+            raise ValueError("桌面已锁定")
+        if hwnd not in self._wechat_windows() + self._hidden_wechat_windows():
+            raise ValueError("候选不是当前会话的真实微信主窗口")
+        if not re.fullmatch(r"Qt\d+QWindowIcon", win32gui.GetClassName(hwnd)):
+            raise ValueError("当前微信界面版本不支持头像定位")
+        if win32gui.IsIconic(hwnd) or not win32gui.IsWindowVisible(hwnd):
+            if not restore or not self._activate(hwnd):
+                raise ValueError("微信窗口需要恢复后才能读取头像")
+            time.sleep(self.delay)
+        left, top, right, bottom = self._window_rect(hwnd)
+        width, height = right - left, bottom - top
+        if width < 400 or height < 300:
+            raise ValueError("微信主窗口尺寸异常")
+        scale = ctypes.windll.user32.GetDpiForWindow(hwnd) / 96
+        # 微信 4.x 左侧账号头像的逻辑坐标；Windows 按窗口 DPI 转为像素。
+        box = tuple(round(value * scale) for value in (19, 42, 55, 78))
+        hdc = win32gui.GetWindowDC(hwnd)
+        source = win32ui.CreateDCFromHandle(hdc)
+        memory = source.CreateCompatibleDC()
+        bitmap = win32ui.CreateBitmap()
+        bitmap.CreateCompatibleBitmap(source, width, height)
+        memory.SelectObject(bitmap)
+        try:
+            if not ctypes.windll.user32.PrintWindow(hwnd, memory.GetSafeHdc(), 2):
+                raise ValueError("无法读取微信窗口画面")
+            frame = Image.frombuffer("RGB", (width, height), bitmap.GetBitmapBits(True), "raw", "BGRX", 0, 1)
+            return normalized_avatar(frame.crop(box))
+        finally:
+            memory.DeleteDC()
+            source.DeleteDC()
+            win32gui.ReleaseDC(hwnd, hdc)
+            win32gui.DeleteObject(bitmap.GetHandle())
+
+    def _assert_send_context(self, *, check_target: bool = True) -> None:
+        import win32gui
+        from app.sender.wechat_account import inspect_account
+
+        if not self._window or not self._verified_identity:
+            raise ValueError("发送账号尚未验证，已停止发送")
+        report = inspect_account(self)
+        if (not report["ok"] or report.get("identity") != self._verified_identity
+                or report.get("avatar_sha256") != self._verified_avatar_sha):
+            raise ValueError(f"发送账号核验失败，已停止发送：{report['detail']}")
+        foreground = win32gui.GetForegroundWindow()
+        if win32gui.GetAncestor(foreground, 2) != self._window:
+            raise ValueError("当前前台窗口不是已核验的微信账号，已停止发送")
+        if not check_target:
+            return
+        left, top, right, bottom = self._window_rect(self._window)
+        chat_left, chat_right = _main_chat_horizontal_bounds(left, right)
+        box = (chat_left, top, chat_right, top + int((bottom - top) * 0.16))
+        titles = self._read_uia_chat_titles(box)
+        if len(titles) == 1 and titles[0] == self._verified_target:
+            return
+        if not any(_selected_header_matches(line.text, self._verified_target) for line in self._ocr_screen(box)):
+            raise ValueError("发送前目标群已变化或无法核验，已停止发送")
 
     @staticmethod
     def _activate(hwnd: int) -> bool:
@@ -1492,7 +1570,7 @@ class WechatNativeSender(WechatSender):
             return True, "Windows 微信原生发送器 dry-run"
         report = report or self.health_report()
         if report["ok"]:
-            return True, "微信原生发送器可用（依赖、桌面、中文 OCR、剪贴板、唯一窗口均通过）"
+            return True, "微信原生发送器可用（依赖、桌面、OCR、剪贴板及发送账号头像均通过）"
         for stage in ("dependencies", "desktop", "ocr", "clipboard", "window"):
             item = report[stage]
             if not item["ok"]:
@@ -1608,6 +1686,8 @@ def validate_wechat_sender_mode(settings: Settings) -> str:
     mode = str(settings.wechat_sender_mode or "").strip().lower()
     if mode not in {"native", "legacy_cli"}:
         raise ValueError(f"不支持的微信发送 Provider：{settings.wechat_sender_mode}")
+    if mode == "legacy_cli" and settings.wechat_sender_account_binding:
+        raise ValueError("已绑定头像的微信发送必须使用 native；旧发送器不能绕过账号核验")
     return mode
 
 

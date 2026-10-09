@@ -158,6 +158,8 @@ class Settings(BaseSettings):
     # 微信发送（V2）。默认适配微信 4.1.x 的 Windows 键盘/剪贴板/OCR 驱动；
     # legacy_cli 保留旧 wechat-automation-api 兼容入口。
     wechat_sender_mode: str = "native"
+    # 只能通过头像预览绑定 API 保存；通用设置 API 不允许编辑。
+    wechat_sender_account_binding: str = ""
     wechat_native_action_delay_seconds: float = 0.6
     wechat_native_stage_timeout_seconds: float = 5.0
     wechat_native_submit_timeout_seconds: float = 8.0

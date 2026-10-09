@@ -24,6 +24,19 @@ from app.sender.wechat_native import (
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def isolate_account_guard(monkeypatch, request):
+    """这些测试覆盖原有搜索/提交行为；头像安全规则由独立测试覆盖。"""
+    if request.node.name.startswith("test_prepare_window"):
+        return
+    def prepared(driver):
+        driver._window = 123
+        return True, "mock account verified"
+    monkeypatch.setattr(WindowsWechatDriver, "_prepare_wechat_window", prepared)
+    monkeypatch.setattr(WindowsWechatDriver, "_assert_send_context", lambda *args, **kwargs: None)
+    monkeypatch.setattr("app.sender.wechat_account.inspect_account", lambda *args, **kwargs: {"ok": True, "detail": "mock verified"})
+
+
 def _write_valid_png(path: Path) -> None:
     Image.new("RGBA", (8, 8), (0, 0, 0, 0)).save(path, format="PNG")
 
@@ -494,32 +507,28 @@ def test_health_report_rejects_missing_chinese_ocr(tmp_path, monkeypatch):
     assert "中文" in report["ocr"]["detail"]
 
 
-def test_prepare_window_restores_only_one_existing_hidden_main_window(tmp_path, monkeypatch):
+def test_prepare_window_uses_only_avatar_verified_identity(tmp_path, monkeypatch):
     driver = WindowsWechatDriver(_settings(tmp_path))
-    visible = iter([[], [321]])
-    activated: list[int] = []
-    monkeypatch.setattr(driver, "_wechat_windows", lambda: next(visible))
-    monkeypatch.setattr(driver, "_hidden_wechat_windows", lambda: [321])
-    monkeypatch.setattr(driver, "_activate", lambda hwnd: activated.append(hwnd) or True)
+    monkeypatch.setattr("app.sender.wechat_account.inspect_account", lambda *args, **kwargs: {
+        "ok": True, "detail": "已核验头像", "identity": {"hwnd": 321, "pid": 999}, "avatar_sha256": "abc"})
 
     ok, detail = driver._prepare_wechat_window()
 
     assert ok is True
-    assert "已恢复" in detail
-    assert activated == [321]
+    assert "已核验" in detail
+    assert driver._window == 321
 
 
-def test_prepare_window_rejects_multiple_hidden_candidates_without_activation(tmp_path, monkeypatch):
+def test_prepare_window_rejects_ambiguous_avatar(tmp_path, monkeypatch):
     driver = WindowsWechatDriver(_settings(tmp_path))
     activated: list[int] = []
-    monkeypatch.setattr(driver, "_wechat_windows", lambda: [])
-    monkeypatch.setattr(driver, "_hidden_wechat_windows", lambda: [321, 654])
+    monkeypatch.setattr("app.sender.wechat_account.inspect_account", lambda *args, **kwargs: {"ok": False, "detail": "匹配 2 个头像"})
     monkeypatch.setattr(driver, "_activate", lambda hwnd: activated.append(hwnd) or True)
 
     ok, detail = driver._prepare_wechat_window()
 
     assert ok is False
-    assert "隐藏候选 2" in detail
+    assert "匹配 2" in detail
     assert activated == []
 
 

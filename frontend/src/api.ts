@@ -1,5 +1,12 @@
 const BASE = "/api";
 
+export interface WechatAccount { bound: boolean; account_name?: string; avatar?: string; avatar_sha256?: string; detail: string; verification?: { ok: boolean; detail: string } }
+export interface WechatAccountCandidate { candidate_id?: string; label: string; ok: boolean; avatar?: string; detail?: string }
+export const getWechatAccount = () => get<WechatAccount>("/wechat-sender/account");
+export const scanWechatAccounts = () => post<{ candidates: WechatAccountCandidate[] }>("/wechat-sender/account/candidates");
+export const bindWechatAccount = (candidate_id: string, account_name: string) => put<WechatAccount>("/wechat-sender/account/binding", { candidate_id, account_name });
+export const verifyWechatAccount = () => post<{ ok: boolean; detail: string }>("/wechat-sender/account/verify");
+
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
     headers: { "Content-Type": "application/json" },
