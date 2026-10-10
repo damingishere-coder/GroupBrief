@@ -36,6 +36,23 @@ _WAIT_OBJECT_0 = 0
 _WAIT_ABANDONED = 0x80
 
 
+def _open_clipboard() -> None:
+    """仅等待剪贴板的短暂占用；最多 3 秒，不重做复制、写入或发送。"""
+    import win32clipboard
+
+    for attempt in range(61):
+        try:
+            win32clipboard.OpenClipboard()
+            return
+        except Exception as exc:
+            code = getattr(exc, "winerror", None)
+            if code is None and exc.args:
+                code = exc.args[0]
+            if code != 5 or attempt == 60:
+                raise
+            time.sleep(0.05)
+
+
 class NativeWechatDriver(Protocol):
     def health_check(self) -> tuple[bool, str]: ...
     def open_and_verify(self, target: str) -> tuple[bool, str]: ...
@@ -624,6 +641,7 @@ class WindowsWechatDriver:
                 )
             self._assert_send_context()
             self._set_clipboard_text(text)
+            self._assert_send_context()
             self._hotkey("ctrl", "v")
             staged_composer, staged_change, stage_attempts = self._wait_for_staged_change(
                 before_composer
@@ -703,6 +721,7 @@ class WindowsWechatDriver:
                 )
             self._assert_send_context()
             self._set_clipboard_image(image_path)
+            self._assert_send_context()
             self._hotkey("ctrl", "v")
             staged_composer, staged_change, stage_attempts = self._wait_for_staged_change(
                 before_composer
@@ -807,7 +826,7 @@ class WindowsWechatDriver:
     def _check_clipboard() -> None:
         import win32clipboard
 
-        win32clipboard.OpenClipboard()
+        _open_clipboard()
         win32clipboard.CloseClipboard()
 
     @staticmethod
@@ -1152,7 +1171,7 @@ class WindowsWechatDriver:
         self._hotkey("ctrl", "a")
         self._hotkey("ctrl", "c")
         time.sleep(self.delay)
-        win32clipboard.OpenClipboard()
+        _open_clipboard()
         try:
             query = (
                 str(win32clipboard.GetClipboardData(win32con.CF_UNICODETEXT) or "")
@@ -1567,11 +1586,12 @@ class WindowsWechatDriver:
 
         sentinel = f"GroupBrief-empty-check-{uuid.uuid4().hex}"
         self._set_clipboard_text(sentinel)
+        self._assert_send_context()
         self._hotkey("ctrl", "a")
         self._hotkey("ctrl", "c")
         time.sleep(self.poll_interval)
         try:
-            win32clipboard.OpenClipboard()
+            _open_clipboard()
             formats: list[int] = []
             value = ""
             try:
@@ -1605,7 +1625,7 @@ class WindowsWechatDriver:
         import win32clipboard
         import win32con
 
-        win32clipboard.OpenClipboard()
+        _open_clipboard()
         try:
             win32clipboard.EmptyClipboard()
             win32clipboard.SetClipboardData(win32con.CF_UNICODETEXT, text)
@@ -1622,7 +1642,7 @@ class WindowsWechatDriver:
             stream = io.BytesIO()
             image.convert("RGB").save(stream, "BMP")
             dib = stream.getvalue()[14:]
-        win32clipboard.OpenClipboard()
+        _open_clipboard()
         try:
             win32clipboard.EmptyClipboard()
             win32clipboard.SetClipboardData(win32con.CF_DIB, dib)
