@@ -1019,3 +1019,131 @@ def test_submission_verification_requires_composer_to_return_near_empty():
         before, staged, before.copy(), chat_before, chat_after
     )
     assert ok is True
+
+
+def _install_send_regions(monkeypatch, composer, chat, *, extra=()):
+    def control(kind, aid, box, visible=True):
+        return SimpleNamespace(
+            element_info=SimpleNamespace(
+                automation_id=aid,
+                rectangle=SimpleNamespace(left=box[0], top=box[1], right=box[2], bottom=box[3]),
+            ),
+            kind=kind,
+            is_visible=lambda: visible,
+        )
+    controls = [control("Edit", "chat_input_field", composer), control("List", "chat_message_list", chat)]
+    controls += [control(*args) for args in extra]
+    seen_handles = []
+    def window(*, handle):
+        seen_handles.append(handle)
+        return SimpleNamespace(descendants=lambda *, control_type: [c for c in controls if c.kind == control_type])
+    monkeypatch.setitem(sys.modules, "pywinauto", SimpleNamespace(Desktop=lambda **kwargs: SimpleNamespace(window=window)))
+    return controls, seen_handles
+
+
+@pytest.mark.parametrize("scale", [1, 1.25, 1.5, 1.75, 2])
+@pytest.mark.parametrize("origin", [(0, 0), (-1920, 400), (800, -1440)])
+def test_send_regions_use_actual_controls_at_any_scale_and_monitor(tmp_path, monkeypatch, scale, origin):
+    driver = WindowsWechatDriver(_settings(tmp_path))
+    driver._window = 123
+    def box(value):
+        return tuple(int(v * scale) + origin[i % 2] for i, v in enumerate(value))
+    composer, chat = box((360, 710, 1090, 880)), box((350, 140, 1100, 700))
+    monkeypatch.setattr(driver, "_window_rect", lambda hwnd: box((0, 0, 1100, 950)))
+    controls, handles = _install_send_regions(monkeypatch, composer, chat, extra=[
+        ("Edit", "search_input", box((80, 50, 280, 90)), True),
+        ("Edit", "chat_input_field", composer, False),
+    ])
+    grabbed, clicks = [], []
+    def grab(*, bbox, all_screens):
+        assert all_screens
+        grabbed.append(bbox)
+        return Image.new("RGB", (bbox[2] - bbox[0], bbox[3] - bbox[1]), "white")
+    monkeypatch.setattr("PIL.ImageGrab.grab", grab)
+    monkeypatch.setattr(driver, "_click", lambda x, y: clicks.append((x, y)))
+    monkeypatch.setattr("app.sender.wechat_native.time.sleep", lambda *args: None)
+    driver._focus_composer()
+    driver._capture_send_regions()
+    assert grabbed == [composer, chat]
+    assert handles == [123, 123]
+    assert clicks == [((composer[0] + composer[2]) / 2, (composer[1] + composer[3]) / 2)]
+
+
+@pytest.mark.parametrize("composer,chat,extra", [
+    ((350, 710, 1090, 880), (350, 140, 1100, 700), [("Edit", "chat_input_field", (350, 710, 1090, 880), True)]),
+    ((350, 710, 1200, 880), (350, 140, 1100, 700), []),
+    ((350, 690, 1090, 880), (350, 140, 1100, 700), []),
+    ((350, 710, 1090, 720), (350, 140, 1100, 700), []),
+])
+def test_invalid_send_regions_stop_without_capture(tmp_path, monkeypatch, composer, chat, extra):
+    driver = WindowsWechatDriver(_settings(tmp_path))
+    driver._window = 123
+    monkeypatch.setattr(driver, "_window_rect", lambda hwnd: (0, 0, 1100, 950))
+    _install_send_regions(monkeypatch, composer, chat, extra=extra)
+    monkeypatch.setattr("PIL.ImageGrab.grab", lambda **kwargs: pytest.fail("must not capture guessed regions"))
+    with pytest.raises(RuntimeError):
+        driver._capture_send_regions()
+
+
+def test_send_region_layout_change_is_rejected(tmp_path, monkeypatch):
+    driver = WindowsWechatDriver(_settings(tmp_path))
+    driver._window = 123
+    boxes = ((350, 710, 1090, 880), (350, 140, 1100, 700))
+    monkeypatch.setattr(driver, "_read_send_region_boxes", lambda: boxes)
+    monkeypatch.setattr("PIL.ImageGrab.grab", lambda **kwargs: Image.new("RGB", (200, 80), "white"))
+    driver._capture_send_regions()
+    boxes = ((400, 710, 1140, 880), (400, 140, 1150, 700))
+    with pytest.raises(RuntimeError, match="布局或窗口位置已变化"):
+        driver._capture_send_regions()
+
+
+def test_actual_composer_crop_ignores_unrelated_session_changes(tmp_path, monkeypatch):
+    driver = WindowsWechatDriver(_settings(tmp_path))
+    driver._window = 123
+    boxes = ((350, 710, 1090, 880), (350, 140, 1100, 700))
+    monkeypatch.setattr(driver, "_read_send_region_boxes", lambda: boxes)
+    screen = Image.new("RGB", (1100, 950), "white")
+    monkeypatch.setattr("PIL.ImageGrab.grab", lambda *, bbox, all_screens: screen.crop(bbox))
+    before, chat_before = driver._capture_send_regions()
+    ImageDraw.Draw(screen).rectangle((370, 740, 850, 850), fill="black")
+    staged, _ = driver._capture_send_regions()
+    ImageDraw.Draw(screen).rectangle(boxes[0], fill="white")
+    # 会话红点、发送按钮与聊天消息都可变化，但不能算成编辑框残留。
+    ImageDraw.Draw(screen).rectangle((100, 720, 340, 870), fill="green")
+    ImageDraw.Draw(screen).rectangle((980, 900, 1090, 930), fill="grey")
+    ImageDraw.Draw(screen).rectangle((400, 600, 850, 690), fill="black")
+    after, chat_after = driver._capture_send_regions()
+    assert driver._verify_submission(before, staged, after, chat_before, chat_after)[0]
+    # 消息区变化仍不足以证明发送：尚有文字/图片预览时必须失败。
+    ImageDraw.Draw(screen).rectangle((370, 740, 850, 850), fill="black")
+    still_staged, _ = driver._capture_send_regions()
+    assert not driver._verify_submission(before, staged, still_staged, chat_before, chat_after)[0]
+    assert not driver._verify_submission(before, staged, after, chat_before, chat_before)[0]
+
+
+@pytest.mark.parametrize("width,height", [(2, 16), (4, 32), (6, 48)])
+def test_empty_green_caret_blink_is_not_staging_or_residual_text(width, height):
+    before = Image.new("RGB", (800, 170), (250, 250, 250))
+    caret = before.copy()
+    ImageDraw.Draw(caret).rectangle((0, 5, width - 1, 5 + height - 1), fill=(0, 195, 117))
+    assert WindowsWechatDriver._composer_difference_ratio(before, caret) == 0
+    assert WindowsWechatDriver._composer_difference_ratio(caret, before) == 0
+    staged = before.copy()
+    ImageDraw.Draw(staged).rectangle((15, 10, 500, 120), fill="black")
+    chat = before.copy()
+    ImageDraw.Draw(chat).rectangle((15, 10, 500, 120), fill="black")
+    assert WindowsWechatDriver._verify_submission(before, staged, caret, before, chat)[0]
+    assert not WindowsWechatDriver._verify_submission(before, caret, before, before, chat)[0]
+
+
+@pytest.mark.parametrize("box,color", [
+    ((0, 5, 3, 36), "black"),
+    ((20, 5, 23, 36), (0, 195, 117)),
+    ((0, 5, 20, 36), (0, 195, 117)),
+    ((0, 5, 3, 90), (0, 195, 117)),
+])
+def test_composer_caret_filter_keeps_text_and_preview_changes(box, color):
+    before = Image.new("RGB", (800, 170), (250, 250, 250))
+    after = before.copy()
+    ImageDraw.Draw(after).rectangle(box, fill=color)
+    assert WindowsWechatDriver._composer_difference_ratio(before, after) > 0
