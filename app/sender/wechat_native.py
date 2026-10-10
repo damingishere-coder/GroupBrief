@@ -434,6 +434,7 @@ class WindowsWechatDriver:
         self._verified_target = ""
         self._verified_avatar_sha = ""
         self._send_region_boxes: tuple | None = None
+        self._send_window_box: tuple | None = None
         self._enable_dpi_awareness()
 
     def health_check(self) -> tuple[bool, str]:
@@ -1316,9 +1317,25 @@ class WindowsWechatDriver:
         from PIL import ImageGrab
 
         boxes = self._read_send_region_boxes()
-        if self._send_region_boxes is not None and boxes != self._send_region_boxes:
-            raise RuntimeError("发送核验期间微信布局或窗口位置已变化，无法确认提交结果")
-        self._send_region_boxes = boxes
+        window_box = self._window_rect(self._window)
+        if self._send_region_boxes is not None:
+            old_composer, old_chat = self._send_region_boxes
+            composer_box, chat_box = boxes
+            # 粘贴长文字或图片会向上展开编辑区并同步缩短消息列表。
+            # 只允许两者的公共分界线变化；移动、缩放、换列、标题变化仍停止。
+            vertical_expansion = (
+                window_box == self._send_window_box
+                and (composer_box[0], composer_box[2], composer_box[3])
+                == (old_composer[0], old_composer[2], old_composer[3])
+                and chat_box[:3] == old_chat[:3]
+                and composer_box[1] <= old_composer[1]
+                and abs((composer_box[1] - chat_box[3]) - (old_composer[1] - old_chat[3])) <= 2
+            )
+            if not vertical_expansion:
+                raise RuntimeError("发送核验期间微信布局或窗口位置已变化，无法确认提交结果")
+        else:
+            self._send_region_boxes = boxes
+            self._send_window_box = window_box
         composer = ImageGrab.grab(bbox=boxes[0], all_screens=True).convert("RGB")
         chat = ImageGrab.grab(bbox=boxes[1], all_screens=True).convert("RGB")
         return composer, chat
@@ -1338,8 +1355,17 @@ class WindowsWechatDriver:
         """排除微信空编辑框左上角绿色插入光标的闪烁，不放宽内容阈值。"""
         from PIL import ImageChops
 
-        if first.size != second.size:
+        if first.width != second.width:
             return 1.0
+        if first.height != second.height:
+            from PIL import Image
+
+            height = max(first.height, second.height)
+            def padded(value):
+                canvas = Image.new("RGB", (value.width, height), value.getpixel((value.width - 1, value.height - 1)))
+                canvas.paste(value, (0, 0))
+                return canvas
+            first, second = padded(first), padded(second)
         box = ImageChops.difference(first, second).getbbox()
         if box is not None:
             left, top, right, bottom = box
@@ -1362,6 +1388,14 @@ class WindowsWechatDriver:
                 if changed:
                     return 0.0
         return cls._difference_ratio(first, second)
+
+    @classmethod
+    def _chat_difference_ratio(cls, first, second) -> float:
+        if first.width != second.width:
+            return 1.0
+        # 编辑区展开造成列表高度变化时，只比较共同可见区域，不能仅凭尺寸认定发出。
+        box = (0, 0, first.width, min(first.height, second.height))
+        return cls._difference_ratio(first.crop(box), second.crop(box))
 
     def _poll_rounds(self, timeout_seconds: float) -> int:
         return max(1, int(timeout_seconds / self.poll_interval) + 1)
@@ -1443,7 +1477,7 @@ class WindowsWechatDriver:
         staged_change = cls._composer_difference_ratio(before_composer, staged_composer)
         cleared_change = cls._composer_difference_ratio(staged_composer, after_composer)
         returned_toward_empty = cls._composer_difference_ratio(before_composer, after_composer)
-        chat_change = cls._difference_ratio(before_chat, after_chat)
+        chat_change = cls._chat_difference_ratio(before_chat, after_chat)
         empty_delta_limit = min(max(staged_change * 0.25, 0.0003), 0.0015)
         return {
             "staged_change": staged_change,
