@@ -19,6 +19,7 @@ from app.sender.wechat_native import (
     _select_group_search_match,
     _select_uia_group_search_match,
     _title_matches,
+    _SendLayoutTransition,
 )
 
 import pytest
@@ -1200,11 +1201,90 @@ def test_capture_accepts_editor_expansion_and_collapse_with_stable_window(tmp_pa
 def test_unrelated_layout_change_is_not_editor_expansion(tmp_path, monkeypatch, boxes):
     driver = WindowsWechatDriver(_settings(tmp_path))
     driver._window = 123
+    monkeypatch.setattr("app.sender.wechat_native.time.sleep", lambda *args: None)
     monkeypatch.setattr(driver, "_window_rect", lambda hwnd: (0, 0, 1100, 950))
     baseline = ((350, 710, 1090, 880), (350, 140, 1100, 700))
     monkeypatch.setattr(driver, "_read_send_region_boxes", lambda: baseline)
     monkeypatch.setattr("PIL.ImageGrab.grab", lambda **kwargs: Image.new("RGB", (200, 80), "white"))
     driver._capture_send_regions()
     monkeypatch.setattr(driver, "_read_send_region_boxes", lambda: boxes)
-    with pytest.raises(RuntimeError, match="布局或窗口位置已变化"):
+    with pytest.raises(RuntimeError, match="布局或窗口位置已变化|展开/收起未完成"):
         driver._capture_send_regions()
+
+
+@pytest.mark.parametrize("editor_first", [False, True])
+def test_capture_waits_for_both_sides_of_expansion_animation(tmp_path, monkeypatch, editor_first):
+    driver = WindowsWechatDriver(_settings(tmp_path))
+    driver._window = 123
+    monkeypatch.setattr(driver, "_window_rect", lambda hwnd: (0, 0, 1100, 950))
+    monkeypatch.setattr("app.sender.wechat_native.time.sleep", lambda *args: None)
+    baseline = ((350, 710, 1090, 880), (350, 140, 1100, 700))
+    expanded = ((350, 510, 1090, 880), (350, 140, 1100, 500))
+    partial = ((350, 510, 1090, 880), (350, 140, 1100, 650)) if editor_first else ((350, 650, 1090, 880), (350, 140, 1100, 500))
+    pending = iter([baseline, partial, expanded])
+    reads, captured = [], []
+    def boxes():
+        value = next(pending)
+        reads.append(value)
+        if value == partial and editor_first:
+            raise _SendLayoutTransition(value)
+        return value
+    def grab(*, bbox, all_screens):
+        captured.append(bbox)
+        return Image.new("RGB", (bbox[2]-bbox[0], bbox[3]-bbox[1]), "white")
+    monkeypatch.setattr(driver, "_read_send_region_boxes", boxes)
+    monkeypatch.setattr("PIL.ImageGrab.grab", grab)
+    driver._capture_send_regions()
+    driver._capture_send_regions()
+    assert reads == [baseline, partial, expanded]
+    assert captured == [*baseline, *expanded]
+
+
+def test_expansion_that_never_finishes_is_not_captured(tmp_path, monkeypatch):
+    driver = WindowsWechatDriver(_settings(tmp_path))
+    driver._window = 123
+    driver._send_window_box = (0, 0, 1100, 950)
+    driver._send_region_boxes = ((350, 710, 1090, 880), (350, 140, 1100, 700))
+    monkeypatch.setattr(driver, "_window_rect", lambda hwnd: driver._send_window_box)
+    monkeypatch.setattr(driver, "_read_send_region_boxes", lambda: ((350, 650, 1090, 880), (350, 140, 1100, 500)))
+    monkeypatch.setattr("app.sender.wechat_native.time.sleep", lambda *args: None)
+    monkeypatch.setattr("PIL.ImageGrab.grab", lambda **kwargs: pytest.fail("unstable layout must not be captured"))
+    with pytest.raises(RuntimeError, match="展开/收起未完成"):
+        driver._capture_send_regions()
+
+
+def test_image_waits_for_expansion_then_verifies_collapse_after_enter(tmp_path, monkeypatch):
+    driver = WindowsWechatDriver(_settings(tmp_path))
+    driver._window = 123
+    monkeypatch.setattr(driver, "_window_rect", lambda hwnd: (0, 0, 1100, 950))
+    monkeypatch.setattr("app.sender.wechat_native.time.sleep", lambda *args: None)
+    monkeypatch.setattr(driver, "_focus_composer", lambda: None)
+    monkeypatch.setattr(driver, "_composer_is_empty", lambda: (True, "empty"))
+    monkeypatch.setattr(driver, "_set_clipboard_image", lambda *args: None)
+    state = {"phase": "empty", "partial_seen": False}
+    normal = ((350, 710, 1090, 880), (350, 140, 1100, 700))
+    partial = ((350, 650, 1090, 880), (350, 140, 1100, 500))
+    expanded = ((350, 510, 1090, 880), (350, 140, 1100, 500))
+    def boxes():
+        if state["phase"] == "animating":
+            state["partial_seen"] = True
+            state["phase"] = "staged"
+            return partial
+        return expanded if state["phase"] == "staged" else normal
+    def grab(*, bbox, all_screens):
+        image = Image.new("RGB", (bbox[2]-bbox[0], bbox[3]-bbox[1]), (250, 250, 250))
+        if bbox == expanded[0] and state["phase"] == "staged":
+            ImageDraw.Draw(image).rectangle((20, 10, 200, 310), fill="blue")
+        if bbox == normal[1] and state["phase"] == "sent":
+            ImageDraw.Draw(image).rectangle((20, 400, 200, 550), fill="blue")
+        return image
+    def enter(name):
+        assert name == "enter" and state["phase"] == "staged" and state["partial_seen"]
+        state["phase"] = "sent"
+    monkeypatch.setattr(driver, "_read_send_region_boxes", boxes)
+    monkeypatch.setattr("PIL.ImageGrab.grab", grab)
+    monkeypatch.setattr(driver, "_hotkey", lambda *args: state.update(phase="animating"))
+    monkeypatch.setattr(driver, "_key", enter)
+    result = driver.paste_image(tmp_path / "image.png")
+    assert result.success and result.submitted and not result.outcome_unknown
+    assert result.verification_level == "ui_observed"
