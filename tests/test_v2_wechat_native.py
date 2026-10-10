@@ -25,6 +25,119 @@ from app.sender.wechat_native import (
 import pytest
 
 
+@pytest.mark.parametrize("blocked_attempts", [1, 40, 60])
+def test_clipboard_busy_wait_does_not_repeat_writes(monkeypatch, blocked_attempts):
+    calls = []
+    opens = 0
+
+    def open_clipboard():
+        nonlocal opens
+        opens += 1
+        if opens <= blocked_attempts:
+            raise OSError(5, "OpenClipboard", "拒绝访问")
+
+    monkeypatch.setitem(sys.modules, "win32clipboard", SimpleNamespace(
+        OpenClipboard=open_clipboard,
+        CloseClipboard=lambda: calls.append("close"),
+        EmptyClipboard=lambda: calls.append("empty"),
+        SetClipboardData=lambda fmt, text: calls.append((fmt, text)),
+    ))
+    monkeypatch.setitem(sys.modules, "win32con", SimpleNamespace(CF_UNICODETEXT=13))
+    monkeypatch.setattr("app.sender.wechat_native.time.sleep", lambda _: None)
+
+    WindowsWechatDriver._set_clipboard_text("本次群报")
+
+    assert opens == blocked_attempts + 1
+    assert calls == ["empty", (13, "本次群报"), "close"]
+
+
+@pytest.mark.parametrize("code,expected_opens", [(5, 61), (87, 1)])
+def test_clipboard_failure_never_clears_or_closes_unopened_clipboard(monkeypatch, code, expected_opens):
+    opens = []
+    changes = []
+
+    def open_clipboard():
+        opens.append(True)
+        raise OSError(code, "OpenClipboard", "失败")
+
+    monkeypatch.setitem(sys.modules, "win32clipboard", SimpleNamespace(
+        OpenClipboard=open_clipboard,
+        CloseClipboard=lambda: changes.append("close"),
+        EmptyClipboard=lambda: changes.append("empty"),
+        SetClipboardData=lambda *args: changes.append("write"),
+    ))
+    monkeypatch.setitem(sys.modules, "win32con", SimpleNamespace(CF_UNICODETEXT=13))
+    monkeypatch.setattr("app.sender.wechat_native.time.sleep", lambda _: None)
+
+    with pytest.raises(OSError):
+        WindowsWechatDriver._set_clipboard_text("群报")
+
+    assert len(opens) == expected_opens
+    assert changes == []
+
+
+def test_busy_clipboard_read_still_stops_without_overwriting_draft(tmp_path, monkeypatch):
+    driver = WindowsWechatDriver(_settings(tmp_path))
+    writes = []
+    keys = []
+    opened = []
+    closed = []
+
+    def open_clipboard():
+        opened.append(True)
+        raise OSError(5, "OpenClipboard", "拒绝访问")
+
+    monkeypatch.setitem(sys.modules, "win32clipboard", SimpleNamespace(
+        OpenClipboard=open_clipboard,
+        CloseClipboard=lambda: closed.append(True),
+    ))
+    monkeypatch.setitem(sys.modules, "win32con", SimpleNamespace(CF_UNICODETEXT=13))
+    monkeypatch.setattr("app.sender.wechat_native.time.sleep", lambda _: None)
+    monkeypatch.setattr(driver, "_focus_composer", lambda: None)
+    monkeypatch.setattr(driver, "_set_clipboard_text", lambda text: writes.append(text))
+    monkeypatch.setattr(driver, "_hotkey", lambda *args: keys.append(args))
+    monkeypatch.setattr(driver, "_key", lambda *args: keys.append(args))
+
+    result = driver.paste_text("本次群报")
+
+    assert not result.success and not result.submitted and not result.outcome_unknown
+    assert len(opened) == 61 and closed == []
+    assert len(writes) == 1 and writes[0].startswith("GroupBrief-empty-check-")
+    assert keys == [("ctrl", "a"), ("ctrl", "c")]
+    assert "无法确认微信输入区为空" in result.detail
+
+
+@pytest.mark.parametrize("stage", ["text", "image"])
+def test_context_change_while_waiting_for_clipboard_stops_before_paste(tmp_path, monkeypatch, stage):
+    driver = WindowsWechatDriver(_settings(tmp_path))
+    before = Image.new("RGB", (20, 20), "white")
+    clipboard_ready = False
+    keys = []
+
+    def set_clipboard(*args):
+        nonlocal clipboard_ready
+        clipboard_ready = True
+
+    def assert_context():
+        if clipboard_ready:
+            raise RuntimeError("账号或群聊已切换")
+
+    monkeypatch.setattr(driver, "_assert_send_context", assert_context)
+    monkeypatch.setattr(driver, "_focus_composer", lambda: None)
+    monkeypatch.setattr(driver, "_composer_is_empty", lambda: (True, "empty"))
+    monkeypatch.setattr(driver, "_capture_stable_baseline", lambda: (True, before, before, 1))
+    monkeypatch.setattr(driver, "_set_clipboard_text", set_clipboard)
+    monkeypatch.setattr(driver, "_set_clipboard_image", set_clipboard)
+    monkeypatch.setattr(driver, "_hotkey", lambda *args: keys.append(args))
+    monkeypatch.setattr(driver, "_key", lambda *args: keys.append(args))
+
+    result = driver.paste_text("群报") if stage == "text" else driver.paste_image(tmp_path / "daily_image.png")
+
+    assert not result.success and not result.submitted and not result.outcome_unknown
+    assert keys == []
+    assert "已切换" in result.detail
+
+
 @pytest.fixture(autouse=True)
 def isolate_account_guard(monkeypatch, request):
     """这些测试覆盖原有搜索/提交行为；头像安全规则由独立测试覆盖。"""
