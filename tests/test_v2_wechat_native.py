@@ -1088,6 +1088,7 @@ def test_invalid_send_regions_stop_without_capture(tmp_path, monkeypatch, compos
 def test_send_region_layout_change_is_rejected(tmp_path, monkeypatch):
     driver = WindowsWechatDriver(_settings(tmp_path))
     driver._window = 123
+    monkeypatch.setattr(driver, "_window_rect", lambda hwnd: (0, 0, 1100, 950))
     boxes = ((350, 710, 1090, 880), (350, 140, 1100, 700))
     monkeypatch.setattr(driver, "_read_send_region_boxes", lambda: boxes)
     monkeypatch.setattr("PIL.ImageGrab.grab", lambda **kwargs: Image.new("RGB", (200, 80), "white"))
@@ -1100,6 +1101,7 @@ def test_send_region_layout_change_is_rejected(tmp_path, monkeypatch):
 def test_actual_composer_crop_ignores_unrelated_session_changes(tmp_path, monkeypatch):
     driver = WindowsWechatDriver(_settings(tmp_path))
     driver._window = 123
+    monkeypatch.setattr(driver, "_window_rect", lambda hwnd: (0, 0, 1100, 950))
     boxes = ((350, 710, 1090, 880), (350, 140, 1100, 700))
     monkeypatch.setattr(driver, "_read_send_region_boxes", lambda: boxes)
     screen = Image.new("RGB", (1100, 950), "white")
@@ -1147,3 +1149,62 @@ def test_composer_caret_filter_keeps_text_and_preview_changes(box, color):
     after = before.copy()
     ImageDraw.Draw(after).rectangle(box, fill=color)
     assert WindowsWechatDriver._composer_difference_ratio(before, after) > 0
+
+
+@pytest.mark.parametrize("stage", ["text", "image"])
+def test_expanded_composer_is_verified_without_resizing_its_content(stage):
+    empty = Image.new("RGB", (800, 170), (250, 250, 250))
+    expanded = Image.new("RGB", (800, 360), (250, 250, 250))
+    ImageDraw.Draw(expanded).rectangle((20, 10, 200, 310), fill="black" if stage == "text" else "blue")
+    chat_before = Image.new("RGB", (800, 700), "white")
+    chat_after = chat_before.copy()
+    ImageDraw.Draw(chat_after).rectangle((20, 450, 200, 650), fill="blue")
+    assert WindowsWechatDriver._verify_submission(empty, expanded, empty, chat_before, chat_after)[0]
+    assert not WindowsWechatDriver._verify_submission(empty, expanded, expanded, chat_before, chat_after)[0]
+    assert not WindowsWechatDriver._verify_submission(empty, expanded, empty, chat_before, chat_before)[0]
+    assert WindowsWechatDriver._composer_difference_ratio(empty, Image.new("RGB", (800, 360), (250, 250, 250))) == 0
+
+
+def test_chat_height_change_alone_does_not_count_as_message_submission():
+    small = Image.new("RGB", (800, 400), "white")
+    large = Image.new("RGB", (800, 700), "white")
+    assert WindowsWechatDriver._chat_difference_ratio(small, large) == 0
+    assert WindowsWechatDriver._chat_difference_ratio(large, small) == 0
+
+
+def test_capture_accepts_editor_expansion_and_collapse_with_stable_window(tmp_path, monkeypatch):
+    driver = WindowsWechatDriver(_settings(tmp_path))
+    driver._window = 123
+    window_box = (0, 0, 1100, 950)
+    monkeypatch.setattr(driver, "_window_rect", lambda hwnd: window_box)
+    boxes = ((350, 710, 1090, 880), (350, 140, 1100, 700))
+    monkeypatch.setattr(driver, "_read_send_region_boxes", lambda: boxes)
+    monkeypatch.setattr("PIL.ImageGrab.grab", lambda *, bbox, all_screens: Image.new("RGB", (bbox[2]-bbox[0], bbox[3]-bbox[1]), "white"))
+    before, _ = driver._capture_send_regions()
+    boxes = ((350, 510, 1090, 880), (350, 140, 1100, 500))
+    staged, _ = driver._capture_send_regions()
+    assert staged.height == 370
+    boxes = ((350, 710, 1090, 880), (350, 140, 1100, 700))
+    after, _ = driver._capture_send_regions()
+    assert before.size == after.size
+    window_box = (0, 0, 1101, 950)
+    with pytest.raises(RuntimeError, match="布局或窗口位置已变化"):
+        driver._capture_send_regions()
+
+
+@pytest.mark.parametrize("boxes", [
+    ((350, 510, 1090, 880), (350, 140, 1100, 700)),
+    ((350, 510, 1090, 880), (350, 180, 1100, 500)),
+    ((350, 730, 1090, 880), (350, 140, 1100, 720)),
+])
+def test_unrelated_layout_change_is_not_editor_expansion(tmp_path, monkeypatch, boxes):
+    driver = WindowsWechatDriver(_settings(tmp_path))
+    driver._window = 123
+    monkeypatch.setattr(driver, "_window_rect", lambda hwnd: (0, 0, 1100, 950))
+    baseline = ((350, 710, 1090, 880), (350, 140, 1100, 700))
+    monkeypatch.setattr(driver, "_read_send_region_boxes", lambda: baseline)
+    monkeypatch.setattr("PIL.ImageGrab.grab", lambda **kwargs: Image.new("RGB", (200, 80), "white"))
+    driver._capture_send_regions()
+    monkeypatch.setattr(driver, "_read_send_region_boxes", lambda: boxes)
+    with pytest.raises(RuntimeError, match="布局或窗口位置已变化"):
+        driver._capture_send_regions()
