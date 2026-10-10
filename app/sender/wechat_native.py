@@ -433,6 +433,7 @@ class WindowsWechatDriver:
         self._verified_identity: dict | None = None
         self._verified_target = ""
         self._verified_avatar_sha = ""
+        self._send_region_boxes: tuple | None = None
         self._enable_dpi_awareness()
 
     def health_check(self) -> tuple[bool, str]:
@@ -1275,28 +1276,51 @@ class WindowsWechatDriver:
                 win32gui.SetWindowLong(hwnd, win32con.GWL_EXSTYLE, style)
 
     def _focus_composer(self) -> None:
-        if not self._window:
-            raise RuntimeError("微信窗口尚未验证")
-        left, top, right, bottom = self._window_rect(self._window)
-        chat_left, chat_right = _main_chat_horizontal_bounds(left, right)
-        self._click((chat_left + chat_right) / 2, bottom - min(120, (bottom - top) * 0.18))
+        composer, _ = self._read_send_region_boxes()
+        left, top, right, bottom = composer
+        self._click((left + right) / 2, (top + bottom) / 2)
         time.sleep(self.delay)
 
-    def _capture_send_regions(self):
+    def _read_send_region_boxes(self) -> tuple[tuple[int, int, int, int], tuple[int, int, int, int]]:
+        """只接受当前主窗口的真实编辑区和消息列表，拒绝比例猜测。"""
         if not self._window:
             raise RuntimeError("微信窗口尚未验证")
+        from pywinauto import Desktop
+
+        window_box = self._window_rect(self._window)
+        root = Desktop(backend="uia").window(handle=self._window)
+        boxes = []
+        for kind, automation_id in (("Edit", "chat_input_field"), ("List", "chat_message_list")):
+            matches = []
+            for control in root.descendants(control_type=kind):
+                if control.element_info.automation_id != automation_id or not control.is_visible():
+                    continue
+                rect = control.element_info.rectangle
+                box = (int(rect.left), int(rect.top), int(rect.right), int(rect.bottom))
+                left, top, right, bottom = box
+                wl, wt, wr, wb = window_box
+                if not (wl <= left < right <= wr and wt <= top < bottom <= wb):
+                    raise RuntimeError("微信输入区或消息列表已超出已验证窗口")
+                if right - left < 100 or bottom - top < 30:
+                    raise RuntimeError("微信输入区或消息列表不可读取")
+                matches.append(box)
+            if len(matches) != 1:
+                raise RuntimeError(f"无法唯一定位微信 {automation_id}，已停止发送")
+            boxes.append(matches[0])
+        composer, chat = boxes
+        if chat[3] > composer[1] or min(chat[2], composer[2]) <= max(chat[0], composer[0]):
+            raise RuntimeError("微信输入区与消息列表位置异常，已停止发送")
+        return composer, chat
+
+    def _capture_send_regions(self):
         from PIL import ImageGrab
 
-        left, top, right, bottom = self._window_rect(self._window)
-        height = bottom - top
-        content_left, content_right = _main_chat_horizontal_bounds(left, right)
-        composer_top = bottom - min(250, int(height * 0.30))
-        composer = ImageGrab.grab(
-            bbox=(content_left, composer_top, content_right, bottom - 35), all_screens=True
-        ).convert("RGB")
-        chat = ImageGrab.grab(
-            bbox=(content_left, top + min(100, int(height * 0.15)), content_right, composer_top), all_screens=True
-        ).convert("RGB")
+        boxes = self._read_send_region_boxes()
+        if self._send_region_boxes is not None and boxes != self._send_region_boxes:
+            raise RuntimeError("发送核验期间微信布局或窗口位置已变化，无法确认提交结果")
+        self._send_region_boxes = boxes
+        composer = ImageGrab.grab(bbox=boxes[0], all_screens=True).convert("RGB")
+        chat = ImageGrab.grab(bbox=boxes[1], all_screens=True).convert("RGB")
         return composer, chat
 
     @staticmethod
@@ -1309,16 +1333,47 @@ class WindowsWechatDriver:
         means = ImageStat.Stat(difference).mean
         return sum(means) / (255.0 * max(len(means), 1))
 
+    @classmethod
+    def _composer_difference_ratio(cls, first, second) -> float:
+        """排除微信空编辑框左上角绿色插入光标的闪烁，不放宽内容阈值。"""
+        from PIL import ImageChops
+
+        if first.size != second.size:
+            return 1.0
+        box = ImageChops.difference(first, second).getbbox()
+        if box is not None:
+            left, top, right, bottom = box
+            # 微信 100%-200% DPI 下光标宽 2-6px、高 16-48px，位于首行左边缘。
+            if 0 <= left < right <= 6 and 0 <= top < bottom <= 64 and 12 <= bottom - top <= 48:
+                def caret(pixel):
+                    r, g, b = pixel
+                    return r <= 10 and 185 <= g <= 205 and 105 <= b <= 125
+                def background(pixel):
+                    return min(pixel) >= 240 and max(pixel) - min(pixel) <= 3
+                changed = 0
+                for y in range(top, bottom):
+                    for x in range(left, right):
+                        a, b = first.getpixel((x, y)), second.getpixel((x, y))
+                        if a == b:
+                            continue
+                        changed += 1
+                        if not ((caret(a) and background(b)) or (background(a) and caret(b))):
+                            return cls._difference_ratio(first, second)
+                if changed:
+                    return 0.0
+        return cls._difference_ratio(first, second)
+
     def _poll_rounds(self, timeout_seconds: float) -> int:
         return max(1, int(timeout_seconds / self.poll_interval) + 1)
 
     def _capture_stable_baseline(self):
+        self._send_region_boxes = None
         previous_composer, previous_chat = self._capture_send_regions()
         attempts = self._poll_rounds(self.stage_timeout)
         for attempt in range(1, attempts + 1):
             time.sleep(self.poll_interval)
             composer, chat = self._capture_send_regions()
-            if self._difference_ratio(previous_composer, composer) <= 0.0003:
+            if self._composer_difference_ratio(previous_composer, composer) <= 0.0003:
                 return True, composer, chat, attempt
             previous_composer, previous_chat = composer, chat
         return False, previous_composer, previous_chat, attempts
@@ -1328,7 +1383,7 @@ class WindowsWechatDriver:
         max_change = 0.0
         for attempt in range(1, attempts + 1):
             composer, _ = self._capture_send_regions()
-            change = self._difference_ratio(before_composer, composer)
+            change = self._composer_difference_ratio(before_composer, composer)
             max_change = max(max_change, change)
             if change >= 0.0005:
                 return composer, change, attempt
@@ -1385,9 +1440,9 @@ class WindowsWechatDriver:
         before_chat,
         after_chat,
     ) -> dict[str, float]:
-        staged_change = cls._difference_ratio(before_composer, staged_composer)
-        cleared_change = cls._difference_ratio(staged_composer, after_composer)
-        returned_toward_empty = cls._difference_ratio(before_composer, after_composer)
+        staged_change = cls._composer_difference_ratio(before_composer, staged_composer)
+        cleared_change = cls._composer_difference_ratio(staged_composer, after_composer)
+        returned_toward_empty = cls._composer_difference_ratio(before_composer, after_composer)
         chat_change = cls._difference_ratio(before_chat, after_chat)
         empty_delta_limit = min(max(staged_change * 0.25, 0.0003), 0.0015)
         return {
