@@ -1288,3 +1288,24 @@ def test_image_waits_for_expansion_then_verifies_collapse_after_enter(tmp_path, 
     result = driver.paste_image(tmp_path / "image.png")
     assert result.success and result.submitted and not result.outcome_unknown
     assert result.verification_level == "ui_observed"
+
+
+@pytest.mark.parametrize("bottom_delta", [-2, -1, 1, 2])
+def test_editor_bottom_rounding_is_bounded_to_one_pixel(tmp_path, monkeypatch, bottom_delta):
+    driver = WindowsWechatDriver(_settings(tmp_path))
+    driver._window = 123
+    window = (0, 0, 1100, 950)
+    monkeypatch.setattr(driver, "_window_rect", lambda hwnd: window)
+    boxes = ((350, 710, 1090, 880), (350, 140, 1100, 700))
+    monkeypatch.setattr(driver, "_read_send_region_boxes", lambda: boxes)
+    monkeypatch.setattr("PIL.ImageGrab.grab", lambda **kwargs: Image.new("RGB", (200, 80), "white"))
+    driver._capture_send_regions()
+    boxes = ((350, 510, 1090, 880 + bottom_delta), (350, 140, 1100, 500))
+    if abs(bottom_delta) > 1:
+        with pytest.raises(RuntimeError, match="布局或窗口位置已变化"):
+            driver._capture_send_regions()
+    else:
+        driver._capture_send_regions()
+        window = (0, 1, 1100, 951)
+        with pytest.raises(RuntimeError, match="布局或窗口位置已变化"):
+            driver._capture_send_regions()

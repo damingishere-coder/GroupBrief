@@ -1344,8 +1344,10 @@ class WindowsWechatDriver:
             # 公共分界线的过渡，绝不忽略移动、缩放、换列或标题区域变化。
             anchored = (
                 window_box == self._send_window_box
-                and (composer_box[0], composer_box[2], composer_box[3])
-                == (old_composer[0], old_composer[2], old_composer[3])
+                and (composer_box[0], composer_box[2]) == (old_composer[0], old_composer[2])
+                # Qt 的多行编辑区底边在显示缩放取整时可能变化 1px；
+                # 主窗口边界仍须完全一致，不能把真实移动/缩放当成取整。
+                and abs(composer_box[3] - old_composer[3]) <= 1
                 and chat_box[:3] == old_chat[:3]
                 and composer_box[1] <= old_composer[1]
                 and chat_box[3] <= old_chat[3]
