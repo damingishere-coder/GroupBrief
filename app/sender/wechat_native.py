@@ -72,6 +72,12 @@ class NativeActionResult:
     diagnostics: dict[str, object] = field(default_factory=dict)
 
 
+class _SendLayoutTransition(RuntimeError):
+    def __init__(self, boxes):
+        super().__init__("微信输入区与消息列表正在过渡，尚不可截图")
+        self.boxes = boxes
+
+
 def _now() -> str:
     return datetime.now().isoformat()
 
@@ -1309,33 +1315,49 @@ class WindowsWechatDriver:
                 raise RuntimeError(f"无法唯一定位微信 {automation_id}，已停止发送")
             boxes.append(matches[0])
         composer, chat = boxes
-        if chat[3] > composer[1] or min(chat[2], composer[2]) <= max(chat[0], composer[0]):
+        if min(chat[2], composer[2]) <= max(chat[0], composer[0]):
             raise RuntimeError("微信输入区与消息列表位置异常，已停止发送")
+        if chat[3] > composer[1]:
+            raise _SendLayoutTransition((composer, chat))
         return composer, chat
 
     def _capture_send_regions(self):
         from PIL import ImageGrab
 
-        boxes = self._read_send_region_boxes()
-        window_box = self._window_rect(self._window)
-        if self._send_region_boxes is not None:
+        deadline = time.monotonic() + self.stage_timeout
+        for attempt in range(self._poll_rounds(self.stage_timeout)):
+            overlapping = False
+            try:
+                boxes = self._read_send_region_boxes()
+            except _SendLayoutTransition as exc:
+                boxes, overlapping = exc.boxes, True
+            window_box = self._window_rect(self._window)
+            if self._send_region_boxes is None:
+                if overlapping:
+                    raise RuntimeError("微信初始输入区布局尚未稳定，已停止发送")
+                self._send_region_boxes = boxes
+                self._send_window_box = window_box
+                break
             old_composer, old_chat = self._send_region_boxes
             composer_box, chat_box = boxes
-            # 粘贴长文字或图片会向上展开编辑区并同步缩短消息列表。
-            # 只允许两者的公共分界线变化；移动、缩放、换列、标题变化仍停止。
-            vertical_expansion = (
+            # 图片编辑区与消息列表的动画可能先后更新；只等待固定窗口内
+            # 公共分界线的过渡，绝不忽略移动、缩放、换列或标题区域变化。
+            anchored = (
                 window_box == self._send_window_box
                 and (composer_box[0], composer_box[2], composer_box[3])
                 == (old_composer[0], old_composer[2], old_composer[3])
                 and chat_box[:3] == old_chat[:3]
                 and composer_box[1] <= old_composer[1]
-                and abs((composer_box[1] - chat_box[3]) - (old_composer[1] - old_chat[3])) <= 2
+                and chat_box[3] <= old_chat[3]
             )
-            if not vertical_expansion:
+            if not anchored:
                 raise RuntimeError("发送核验期间微信布局或窗口位置已变化，无法确认提交结果")
-        else:
-            self._send_region_boxes = boxes
-            self._send_window_box = window_box
+            gap_delta = (composer_box[1] - chat_box[3]) - (old_composer[1] - old_chat[3])
+            if not overlapping and abs(gap_delta) <= 2:
+                break
+            if attempt + 1 >= self._poll_rounds(self.stage_timeout) or time.monotonic() >= deadline:
+                raise RuntimeError("微信图片编辑区展开/收起未完成，无法确认提交结果")
+            time.sleep(self.poll_interval)
         composer = ImageGrab.grab(bbox=boxes[0], all_screens=True).convert("RGB")
         chat = ImageGrab.grab(bbox=boxes[1], all_screens=True).convert("RGB")
         return composer, chat
