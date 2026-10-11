@@ -10,7 +10,6 @@ from __future__ import annotations
 import json
 import hashlib
 import os
-import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -18,6 +17,7 @@ from pathlib import Path
 from app.ai.concurrency import bounded_slot, normalized_limit
 from app.config.settings import Settings
 from app.core.logging import get_logger
+from app.core.codex_binary import resolve_codex_binary
 from app.providers.ai.base import (
     ExternalCallInvalidResponseError,
     ExternalCallNotSubmittedError,
@@ -98,12 +98,7 @@ class CodexGPTProvider(DeepSeekV4FlashProvider):
     def _resolve_binary(self) -> str:
         if self._resolved_binary:
             return self._resolved_binary
-        resolved = shutil.which(self.codex_path)
-        if not resolved:
-            candidate = Path(self.codex_path).expanduser()
-            if candidate.is_file():
-                resolved = str(candidate.resolve())
-        self._resolved_binary = resolved or ""
+        self._resolved_binary = resolve_codex_binary(self.codex_path)
         return self._resolved_binary
 
     def health_report(self) -> dict:

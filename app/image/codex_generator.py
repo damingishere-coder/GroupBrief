@@ -13,7 +13,6 @@ import json
 import os
 import re
 import signal
-import shutil
 import subprocess
 import threading
 import time
@@ -27,6 +26,7 @@ from app.config.settings import Settings, get_settings
 from app.ai.concurrency import bounded_slot, normalized_limit
 from app.ai.image_readability import apply_image_visual_rules
 from app.core.logging import get_logger
+from app.core.codex_binary import resolve_codex_binary
 from app.image.image_task import ImageTaskResult, detect_image_format, verify_image
 
 logger = get_logger("groupbrief.image")
@@ -902,12 +902,7 @@ class CodexImageGenerator:
     def _resolve_binary(self) -> str:
         if self._resolved_binary:
             return self._resolved_binary
-        resolved = shutil.which(self.codex_path)
-        if not resolved:
-            candidate = Path(self.codex_path).expanduser()
-            if candidate.is_file():
-                resolved = str(candidate.resolve())
-        self._resolved_binary = resolved or ""
+        self._resolved_binary = resolve_codex_binary(self.codex_path)
         return self._resolved_binary
 
     def _build_command(self, result_path: Path) -> list[str]:
