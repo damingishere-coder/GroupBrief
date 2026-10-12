@@ -124,6 +124,7 @@ def test_context_change_while_waiting_for_clipboard_stops_before_paste(tmp_path,
 
     monkeypatch.setattr(driver, "_assert_send_context", assert_context)
     monkeypatch.setattr(driver, "_focus_composer", lambda: None)
+    monkeypatch.setattr(driver, "_ensure_image_composer_focus", lambda: None)
     monkeypatch.setattr(driver, "_composer_is_empty", lambda: (True, "empty"))
     monkeypatch.setattr(driver, "_capture_stable_baseline", lambda: (True, before, before, 1))
     monkeypatch.setattr(driver, "_set_clipboard_text", set_clipboard)
@@ -1372,6 +1373,8 @@ def test_image_waits_for_expansion_then_verifies_collapse_after_enter(tmp_path, 
     monkeypatch.setattr(driver, "_window_rect", lambda hwnd: (0, 0, 1100, 950))
     monkeypatch.setattr("app.sender.wechat_native.time.sleep", lambda *args: None)
     monkeypatch.setattr(driver, "_focus_composer", lambda: None)
+    monkeypatch.setattr(driver, "_ensure_image_composer_focus", lambda: None)
+    monkeypatch.setattr(driver, "_verify_image_clipboard", lambda token: {"clipboard_verified": True})
     monkeypatch.setattr(driver, "_composer_is_empty", lambda: (True, "empty"))
     monkeypatch.setattr(driver, "_set_clipboard_image", lambda *args: None)
     state = {"phase": "empty", "partial_seen": False}
