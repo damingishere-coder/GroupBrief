@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import ctypes
+import hashlib
 import io
 import os
 import re
@@ -697,9 +698,11 @@ class WindowsWechatDriver:
 
     def paste_image(self, image_path: Path) -> NativeActionResult:
         submitted = False
+        diagnostics = {"phase": "image_preflight"}
         try:
             self._assert_send_context()
             self._focus_composer()
+            self._ensure_image_composer_focus()
             composer_empty, empty_detail = self._composer_is_empty()
             if not composer_empty:
                 return NativeActionResult(
@@ -720,19 +723,22 @@ class WindowsWechatDriver:
                     },
                 )
             self._assert_send_context()
-            self._set_clipboard_image(image_path)
+            clipboard_token = self._set_clipboard_image(image_path)
             self._assert_send_context()
+            self._ensure_image_composer_focus()
+            diagnostics["composer_focus_verified"] = True
+            diagnostics.update(self._verify_image_clipboard(clipboard_token))
             self._hotkey("ctrl", "v")
             staged_composer, staged_change, stage_attempts = self._wait_for_staged_change(
                 before_composer
             )
-            diagnostics = {
+            diagnostics.update({
                 "phase": "composer_staged",
                 "baseline_stable": True,
                 "baseline_attempts": baseline_attempts,
                 "stage_attempts": stage_attempts,
                 "staged_change": round(staged_change, 6),
-            }
+            })
             if staged_composer is None:
                 return NativeActionResult(
                     False,
@@ -774,7 +780,7 @@ class WindowsWechatDriver:
                 submitted,
                 "unknown" if submitted else "",
                 submitted,
-                {"phase": "exception_after_submit" if submitted else "exception_before_submit"},
+                {**diagnostics, "phase": "exception_after_submit" if submitted else "exception_before_submit"},
             )
 
     @staticmethod
@@ -1307,6 +1313,36 @@ class WindowsWechatDriver:
         self._click((left + right) / 2, (top + bottom) / 2)
         time.sleep(self.delay)
 
+    def _ensure_image_composer_focus(self) -> None:
+        """确认图片快捷键接收者是唯一聊天编辑框；仅在已核验窗口内修复焦点。"""
+        from pywinauto import Desktop
+
+        self._assert_send_context()
+        composer_box, _ = self._read_send_region_boxes()
+        root = Desktop(backend="uia").window(handle=self._window)
+        editors = []
+        for control in root.descendants(control_type="Edit"):
+            if control.element_info.automation_id != "chat_input_field" or not control.is_visible():
+                continue
+            rect = control.element_info.rectangle
+            if (int(rect.left), int(rect.top), int(rect.right), int(rect.bottom)) == composer_box:
+                editors.append(control)
+        if len(editors) != 1:
+            raise RuntimeError("无法唯一核验图片粘贴的聊天输入框，已停止发送")
+        editor = editors[0]
+        if not editor.has_keyboard_focus():
+            # 坐标点击成功不能证明虚拟编辑框获得了键盘焦点。
+            # UIA SetFocus 不输入内容、不清空草稿，也不会重复粘贴。
+            self._assert_send_context()
+            editor.set_focus()
+        for attempt in range(self._poll_rounds(self.stage_timeout)):
+            self._assert_send_context()
+            if editor.has_keyboard_focus():
+                return
+            if attempt + 1 < self._poll_rounds(self.stage_timeout):
+                time.sleep(self.poll_interval)
+        raise RuntimeError("聊天输入框未获得图片粘贴焦点，已停止且未粘贴或发送")
+
     def _read_send_region_boxes(self) -> tuple[tuple[int, int, int, int], tuple[int, int, int, int]]:
         """只接受当前主窗口的真实编辑区和消息列表，拒绝比例猜测。"""
         if not self._window:
@@ -1633,7 +1669,7 @@ class WindowsWechatDriver:
             win32clipboard.CloseClipboard()
 
     @staticmethod
-    def _set_clipboard_image(image_path: Path) -> None:
+    def _set_clipboard_image(image_path: Path) -> dict:
         import win32clipboard
         import win32con
         from PIL import Image
@@ -1646,6 +1682,40 @@ class WindowsWechatDriver:
         try:
             win32clipboard.EmptyClipboard()
             win32clipboard.SetClipboardData(win32con.CF_DIB, dib)
+            copied = bytes(win32clipboard.GetClipboardData(win32con.CF_DIB))
+            if copied != dib:
+                raise RuntimeError("图片剪贴板写入回读不一致，已停止发送")
+            return {
+                "sequence": int(win32clipboard.GetClipboardSequenceNumber()),
+                "dib_sha256": hashlib.sha256(dib).hexdigest(),
+                "dib_size_bytes": len(dib),
+            }
+        finally:
+            win32clipboard.CloseClipboard()
+
+    @staticmethod
+    def _verify_image_clipboard(token: dict) -> dict:
+        """粘贴前只读回验剪贴板；变化时停止，绝不重写或补按 Ctrl+V。"""
+        import win32clipboard
+        import win32con
+
+        if not isinstance(token, dict):
+            raise RuntimeError("缺少已回读的图片剪贴板凭据，已停止发送")
+        _open_clipboard()
+        try:
+            if int(win32clipboard.GetClipboardSequenceNumber()) != token["sequence"]:
+                raise RuntimeError("图片粘贴前剪贴板已被更换，已停止发送")
+            if not win32clipboard.IsClipboardFormatAvailable(win32con.CF_DIB):
+                raise RuntimeError("图片粘贴前剪贴板不再包含图片，已停止发送")
+            dib = bytes(win32clipboard.GetClipboardData(win32con.CF_DIB))
+            if hashlib.sha256(dib).hexdigest() != token["dib_sha256"]:
+                raise RuntimeError("图片粘贴前剪贴板内容已变化，已停止发送")
+            return {
+                "clipboard_verified": True,
+                "clipboard_sequence": token["sequence"],
+                "clipboard_dib_sha256": token["dib_sha256"],
+                "clipboard_dib_size_bytes": len(dib),
+            }
         finally:
             win32clipboard.CloseClipboard()
 
