@@ -20,21 +20,49 @@ def driver_for(tmp_path, monkeypatch):
 
 
 def install_clipboard(monkeypatch):
-    state = {"data": b"", "sequence": 50, "available": True, "events": []}
+    state = {"data": b"", "sequence": 50, "available": True, "events": [],
+             "formats": [8, 2, 17], "dirty": False, "read_count": 0}
+    def empty():
+        state["data"] = b""
+        state["formats"] = []
+        state["dirty"] = True
+        state["events"].append("empty")
     def put(fmt, value):
         assert fmt == 8
         state["data"] = value
+        state["formats"] = [8, 2, 17]
+        state["dirty"] = True
         state["sequence"] += 1
         state["events"].append("write")
-    monkeypatch.setitem(sys.modules, "win32con", SimpleNamespace(CF_DIB=8))
+    def close():
+        state["events"].append("close")
+        if state["dirty"]:
+            # 本机真实复现：发布 DIB 时关闭写入锁后序号 +2，字节不变。
+            # 后续只读 Open/Close 不能产生第二次发布或改变序号。
+            state["sequence"] += 2
+            state["dirty"] = False
+            hook = state.get("after_write_close")
+            if hook:
+                hook()
+    def get_data(_):
+        state["read_count"] += 1
+        return state.get("readback_override", state["data"])
+    def enum_formats(previous):
+        formats = state["formats"]
+        index = 0 if previous == 0 else formats.index(previous) + 1
+        return formats[index] if index < len(formats) else 0
+    monkeypatch.setitem(sys.modules, "win32con", SimpleNamespace(
+        CF_DIB=8, CF_BITMAP=2, CF_DIBV5=17, CF_UNICODETEXT=13, CF_HDROP=15,
+    ))
     monkeypatch.setitem(sys.modules, "win32clipboard", SimpleNamespace(
         OpenClipboard=lambda: state["events"].append("open"),
-        CloseClipboard=lambda: state["events"].append("close"),
-        EmptyClipboard=lambda: state["events"].append("empty"),
+        CloseClipboard=close,
+        EmptyClipboard=empty,
         SetClipboardData=put,
-        GetClipboardData=lambda _: state["data"],
+        GetClipboardData=get_data,
         IsClipboardFormatAvailable=lambda _: state["available"],
         GetClipboardSequenceNumber=lambda: state["sequence"],
+        EnumClipboardFormats=enum_formats,
     ))
     return state
 
@@ -44,18 +72,25 @@ def test_image_clipboard_is_read_back_and_verified_without_recopy(tmp_path, monk
     image = tmp_path / "image.png"
     Image.new("RGB", (64, 128), "blue").save(image)
     token = WindowsWechatDriver._set_clipboard_image(image)
+    assert token["sequence"] == state["sequence"] == 53
+    assert set(token["formats"]) == {8, 2, 17}
     assert token["dib_sha256"] == hashlib.sha256(state["data"]).hexdigest()
+    assert state["read_count"] == 2
     result = WindowsWechatDriver._verify_image_clipboard(token)
     assert result["clipboard_verified"]
+    assert result["clipboard_sequence"] == 53
+    assert set(result["clipboard_formats"]) == {8, 2, 17}
     assert result["clipboard_dib_size_bytes"] > 64 * 128 * 3
-    assert state["events"] == ["open", "empty", "write", "close", "open", "close"]
+    assert state["events"] == ["open", "empty", "write", "close", "open", "close", "open", "close"]
+    assert state["read_count"] == 3 and state["sequence"] == 53
 
 
 @pytest.mark.parametrize("change,error", [("sequence", "已被更换"), ("format", "不再包含图片"), ("content", "内容已变化")])
 def test_image_clipboard_changes_stop_without_clearing_or_recopying(monkeypatch, change, error):
     state = install_clipboard(monkeypatch)
     state["data"] = b"original"
-    token = {"sequence": 50, "dib_sha256": hashlib.sha256(b"original").hexdigest()}
+    token = {"sequence": 50, "dib_sha256": hashlib.sha256(b"original").hexdigest(),
+             "dib_size_bytes": len(b"original"), "formats": [8, 2, 17]}
     if change == "sequence":
         state["sequence"] = 51
     elif change == "format":
@@ -65,6 +100,45 @@ def test_image_clipboard_changes_stop_without_clearing_or_recopying(monkeypatch,
     with pytest.raises(RuntimeError, match=error):
         WindowsWechatDriver._verify_image_clipboard(token)
     assert state["events"] == ["open", "close"]
+
+
+@pytest.mark.parametrize("extra_format", [13, 15, 49161])
+def test_image_clipboard_rejects_non_image_formats_even_with_same_sequence_and_dib(monkeypatch, extra_format):
+    state = install_clipboard(monkeypatch)
+    state["data"] = b"original"
+    token = {"sequence": 50, "dib_sha256": hashlib.sha256(b"original").hexdigest(),
+             "dib_size_bytes": len(b"original"), "formats": [8, 2, 17]}
+    state["formats"].append(extra_format)
+    with pytest.raises(RuntimeError, match="格式"):
+        WindowsWechatDriver._verify_image_clipboard(token)
+    assert state["events"] == ["open", "close"]
+
+
+@pytest.mark.parametrize("change", ["content", "format"])
+def test_image_clipboard_rechecks_published_content_without_rewriting(tmp_path, monkeypatch, change):
+    state = install_clipboard(monkeypatch)
+    image = tmp_path / "image.png"
+    Image.new("RGB", (64, 128), "blue").save(image)
+    def change_after_close():
+        if change == "content":
+            state["data"] = b"replacement"
+        else:
+            state["formats"].append(13)
+    state["after_write_close"] = change_after_close
+    with pytest.raises(RuntimeError):
+        WindowsWechatDriver._set_clipboard_image(image)
+    assert state["events"] == ["open", "empty", "write", "close", "open", "close"]
+    assert state["events"].count("write") == 1
+
+
+def test_image_clipboard_first_readback_failure_still_closes_without_recopy(tmp_path, monkeypatch):
+    state = install_clipboard(monkeypatch)
+    state["readback_override"] = b"wrong"
+    image = tmp_path / "image.png"
+    Image.new("RGB", (64, 128), "blue").save(image)
+    with pytest.raises(RuntimeError, match="写入回读不一致"):
+        WindowsWechatDriver._set_clipboard_image(image)
+    assert state["events"] == ["open", "empty", "write", "close"]
 
 
 def install_editor(driver, monkeypatch, *, initially_focused=False, focus_succeeds=True, count=1):
@@ -138,6 +212,8 @@ def test_image_paste_uses_verified_clipboard_once_and_requires_preview(tmp_path,
     assert result.success == preview and result.submitted == preview
     assert not result.outcome_unknown
     assert result.diagnostics["clipboard_verified"] and result.diagnostics["composer_focus_verified"]
+    assert result.diagnostics["clipboard_sequence"] == 53
+    assert set(result.diagnostics["clipboard_formats"]) == {8, 2, 17}
     assert keys == [("ctrl", "v")] + (["enter"] if preview else [])
     assert focus["set_focus"] == 1 and state["events"].count("write") == 1
 
