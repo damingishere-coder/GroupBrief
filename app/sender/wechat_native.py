@@ -1685,13 +1685,45 @@ class WindowsWechatDriver:
             copied = bytes(win32clipboard.GetClipboardData(win32con.CF_DIB))
             if copied != dib:
                 raise RuntimeError("图片剪贴板写入回读不一致，已停止发送")
+        finally:
+            win32clipboard.CloseClipboard()
+
+        # Windows 发布 DIB 并合成其他图片格式时可能在 CloseClipboard 后
+        # 更新序号。先关闭写入锁，再只读核验原图并记录已发布的序号。
+        _open_clipboard()
+        try:
+            if not win32clipboard.IsClipboardFormatAvailable(win32con.CF_DIB):
+                raise RuntimeError("图片剪贴板发布后不再包含图片，已停止发送")
+            copied = bytes(win32clipboard.GetClipboardData(win32con.CF_DIB))
+            if copied != dib:
+                raise RuntimeError("图片剪贴板发布后内容已变化，已停止发送")
+            formats = WindowsWechatDriver._image_clipboard_formats()
             return {
                 "sequence": int(win32clipboard.GetClipboardSequenceNumber()),
                 "dib_sha256": hashlib.sha256(dib).hexdigest(),
                 "dib_size_bytes": len(dib),
+                "formats": formats,
             }
         finally:
             win32clipboard.CloseClipboard()
+
+    @staticmethod
+    def _image_clipboard_formats() -> list[int]:
+        """调用方持有剪贴板锁；拒绝可能让微信粘贴文字或文件的格式。"""
+        import win32clipboard
+        import win32con
+
+        formats: list[int] = []
+        current = 0
+        while True:
+            current = win32clipboard.EnumClipboardFormats(current)
+            if current == 0:
+                break
+            formats.append(int(current))
+        allowed = {win32con.CF_DIB, win32con.CF_BITMAP, getattr(win32con, "CF_DIBV5", 17)}
+        if win32con.CF_DIB not in formats or set(formats) - allowed:
+            raise RuntimeError("图片剪贴板格式不符合预期，已停止发送")
+        return formats
 
     @staticmethod
     def _verify_image_clipboard(token: dict) -> dict:
@@ -1710,11 +1742,15 @@ class WindowsWechatDriver:
             dib = bytes(win32clipboard.GetClipboardData(win32con.CF_DIB))
             if hashlib.sha256(dib).hexdigest() != token["dib_sha256"]:
                 raise RuntimeError("图片粘贴前剪贴板内容已变化，已停止发送")
+            formats = WindowsWechatDriver._image_clipboard_formats()
+            if int(win32clipboard.GetClipboardSequenceNumber()) != token["sequence"]:
+                raise RuntimeError("图片粘贴前剪贴板已被更换，已停止发送")
             return {
                 "clipboard_verified": True,
                 "clipboard_sequence": token["sequence"],
                 "clipboard_dib_sha256": token["dib_sha256"],
                 "clipboard_dib_size_bytes": len(dib),
+                "clipboard_formats": formats,
             }
         finally:
             win32clipboard.CloseClipboard()
