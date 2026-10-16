@@ -464,8 +464,8 @@ class WindowsWechatDriver:
     def health_check(self) -> tuple[bool, str]:
         report = self.health_report()
         if report["ok"]:
-            return True, "微信原生发送器可用（依赖、桌面、OCR、剪贴板及发送账号头像均通过）"
-        for stage in ("dependencies", "desktop", "ocr", "clipboard", "window"):
+            return True, "微信原生发送器检查通过（依赖、桌面、OCR、剪贴板、头像和编辑控件；未测试发送）"
+        for stage in ("dependencies", "desktop", "ocr", "clipboard", "window", "controls"):
             item = report[stage]
             if not item["ok"]:
                 return False, item["detail"]
@@ -478,6 +478,7 @@ class WindowsWechatDriver:
             "ocr": {"ok": False, "detail": "尚未检查"},
             "clipboard": {"ok": False, "detail": "尚未检查"},
             "window": {"ok": False, "detail": "尚未检查"},
+            "controls": {"ok": False, "detail": "尚未检查微信搜索框和聊天输入框"},
         }
         if os.name != "nt":
             stages["dependencies"] = {"ok": False, "detail": "Windows 原生微信发送器仅支持 Windows"}
@@ -494,6 +495,8 @@ class WindowsWechatDriver:
             "ok": unlocked,
             "detail": "Windows 桌面已解锁" if unlocked else "Windows 桌面已锁定，已停止微信自动发送",
         }
+        if not unlocked:
+            return {"ok": False, **stages}
         try:
             language = asyncio.run(self._ocr_language())
             ocr_ok = language.lower().startswith("zh")
@@ -513,9 +516,47 @@ class WindowsWechatDriver:
             account = inspect_account(self)
             stages["window"] = {"ok": account["ok"], "detail": account["detail"]}
             stages["account"] = account
+            if account["ok"]:
+                stages["controls"] = self._control_health((account.get("identity") or {}).get("hwnd"))
         except Exception as exc:
             stages["window"] = {"ok": False, "detail": f"微信窗口检查失败：{exc}"}
         return {"ok": all(item["ok"] for item in stages.values()), **stages}
+
+    def _control_health(self, hwnd: int | None) -> dict:
+        """只读检查已绑定窗口的真实编辑控件，不激活、不输入、不改草稿。"""
+        if not hwnd:
+            return {"ok": False, "detail": "缺少已核验账号窗口，无法检查微信控件"}
+        try:
+            from pywinauto import Desktop
+
+            edits = Desktop(backend="uia").window(handle=hwnd).descendants(control_type="Edit")
+            searches = [control for control in edits if self._is_search_control(control)]
+            composers = [
+                control for control in edits
+                if control.is_visible()
+                and str(getattr(control.element_info, "automation_id", "") or "") == "chat_input_field"
+            ]
+            ok = len(searches) == len(composers) == 1
+            return {
+                "ok": ok,
+                "detail": (
+                    "微信全局搜索框和聊天输入框均可唯一识别（未测试发送）" if ok else
+                    f"微信编辑控件不可用：搜索框 {len(searches)} 个，聊天输入框 {len(composers)} 个；"
+                    "请打开微信聊天主界面，仍未恢复时退出并重新打开微信；未尝试发送"
+                ),
+                "search_count": len(searches),
+                "composer_count": len(composers),
+            }
+        except Exception as exc:
+            return {"ok": False, "detail": f"微信编辑控件检查失败：{type(exc).__name__}；未尝试发送"}
+
+    @staticmethod
+    def _is_search_control(control) -> bool:
+        return (
+            control.is_visible()
+            and str(getattr(control.element_info, "name", "") or "").strip() in {"搜索", "Search"}
+            and str(getattr(control.element_info, "automation_id", "") or "") != "chat_input_field"
+        )
 
     def open_and_verify(self, target: str) -> tuple[bool, str]:
         self._window = None
@@ -1086,9 +1127,7 @@ class WindowsWechatDriver:
             searches = [
                 control
                 for control in edits
-                if control.is_visible()
-                and str(getattr(control.element_info, "name", "") or "").strip() in {"搜索", "Search"}
-                and str(getattr(control.element_info, "automation_id", "") or "") != "chat_input_field"
+                if self._is_search_control(control)
             ]
             if len(searches) != 1:
                 # 微信冷启动可能只暴露渲染窗口，完全没有 Edit 控件。
@@ -1809,8 +1848,8 @@ class WechatNativeSender(WechatSender):
             return True, "Windows 微信原生发送器 dry-run"
         report = report or self.health_report()
         if report["ok"]:
-            return True, "微信原生发送器可用（依赖、桌面、OCR、剪贴板及发送账号头像均通过）"
-        for stage in ("dependencies", "desktop", "ocr", "clipboard", "window"):
+            return True, "微信原生发送器检查通过（依赖、桌面、OCR、剪贴板、头像和编辑控件；未测试发送）"
+        for stage in ("dependencies", "desktop", "ocr", "clipboard", "window", "controls"):
             item = report[stage]
             if not item["ok"]:
                 return False, item["detail"]

@@ -19,11 +19,14 @@ describe("Dashboard runtime refresh policy", () => {
     expect(runtimeRefreshDelay("not_started", { isToday: true, visible: true, now })).toBe(30_000);
   });
 
-  it("stops for history, hidden pages and terminal states", () => {
+  it("stops for history and hidden pages", () => {
     expect(runtimeRefreshDelay("running", { isToday: false, visible: true })).toBeNull();
     expect(runtimeRefreshDelay("running", { isToday: true, visible: false })).toBeNull();
-    expect(runtimeRefreshDelay("complete", { isToday: true, visible: true })).toBeNull();
-    expect(runtimeRefreshDelay("blocked", { isToday: true, visible: true })).toBeNull();
-    expect(runtimeRefreshDelay("failed", { isToday: true, visible: true })).toBeNull();
+  });
+
+  it("keeps observing delivery after generation and manual recovery after failures", () => {
+    for (const status of ["partial", "complete", "blocked", "failed", "needs_attention"] as const) {
+      expect(runtimeRefreshDelay(status, { isToday: true, visible: true })).toBe(30_000);
+    }
   });
 });

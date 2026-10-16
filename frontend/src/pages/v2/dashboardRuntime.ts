@@ -20,7 +20,8 @@ export function runtimeRefreshDelay(
 ): number | null {
   if (!options.isToday || !options.visible) return null;
   if (status === "running" || status === "retry_pending") return 3_000;
-  if (status !== "not_started") return null;
+  // 生成完成后仍要观察稍后的发送结果及人工处理结果。
+  if (status !== "not_started") return 30_000;
 
   const scheduled = options.scheduledAt ? Date.parse(options.scheduledAt) : Number.NaN;
   const now = options.now ?? Date.now();

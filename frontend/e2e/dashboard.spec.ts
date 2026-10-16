@@ -252,6 +252,39 @@ test("Dashboard 人工核对只写状态，不调用发送接口", async ({ page
   expect(calls.some((call) => call.path === "/api/v2/pipeline/send")).toBe(false);
 });
 
+test("发送暂停时显著显示警告，即使基础依赖检查通过也不显示绿灯", async ({ page }) => {
+  const calls = await installFakeApi(page, true);
+  await page.goto(`/#/dashboard?date=${runDate}`);
+
+  await expect(page.getByRole("alert")).toContainText("微信发送未完成：1 个群需要处理");
+  await expect(page.locator(".studio-status-line .status-dot")).toHaveClass(/warn/);
+  await expect(page.getByRole("button", { name: "基础服务正常" })).toBeVisible();
+  expect(calls.some((call) => call.path.startsWith("/api/v2/pipeline/"))).toBe(false);
+});
+
+test("当天生成结束后持续刷新，后续发送失败可自动显示且不会发送", async ({ page }) => {
+  const calls = await installFakeApi(page);
+  await page.clock.install({ time: new Date(`${runDate}T09:59:00+08:00`) });
+  let reads = 0;
+  await page.route("**/api/v2/dashboard?*", async (route) => {
+    reads += 1;
+    const failed = reads >= 3;
+    return json(route, {
+      ...dashboard,
+      counts: { ...dashboard.counts, held: failed ? 1 : 0 },
+      cards: dashboard.cards.map(card => ({ ...card, send_hold: failed,
+        send_state: failed ? "failed_final" : "ready", send_error: failed ? "搜索框不可用" : "" })),
+    });
+  });
+  await page.goto(`/#/dashboard?date=${runDate}`);
+  await expect(page.getByRole("heading", { name: "今天的精彩，从这里开始" })).toBeVisible();
+  await page.clock.fastForward(30_000);
+  await expect.poll(() => reads).toBeGreaterThanOrEqual(2);
+  await page.clock.fastForward(30_000);
+  await expect(page.getByRole("alert")).toContainText("搜索框不可用");
+  expect(calls.some((call) => call.path.startsWith("/api/v2/pipeline/"))).toBe(false);
+});
+
 test("Dashboard 对历史已发送诊断图同时显示失败事实且不提供重发", async ({ page }) => {
   const calls = await installFakeApi(page, false, true);
   await page.goto(`/#/dashboard?date=${runDate}`);
