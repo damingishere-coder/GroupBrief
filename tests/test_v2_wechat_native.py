@@ -148,6 +148,7 @@ def isolate_account_guard(monkeypatch, request):
         driver._window = 123
         return True, "mock account verified"
     monkeypatch.setattr(WindowsWechatDriver, "_prepare_wechat_window", prepared)
+    monkeypatch.setattr(WindowsWechatDriver, "_desktop_unlocked", staticmethod(lambda: True))
     monkeypatch.setattr(WindowsWechatDriver, "_assert_send_context", lambda *args, **kwargs: None)
     monkeypatch.setattr("app.sender.wechat_account.inspect_account", lambda *args, **kwargs: {"ok": True, "detail": "mock verified"})
 
@@ -699,6 +700,63 @@ def _search_control(*, aid="", visible=True, readonly=False, accepts=True):
         iface_value=value,
     )
     return control, writes
+
+
+@pytest.mark.parametrize("search_count,composer_count,expected", [
+    (0, 0, False), (1, 0, False), (0, 1, False), (2, 1, False), (1, 2, False), (1, 1, True),
+])
+def test_control_health_requires_unique_search_and_composer_without_input(
+    tmp_path, monkeypatch, search_count, composer_count, expected,
+):
+    driver = WindowsWechatDriver(_settings(tmp_path))
+    controls = [_search_control() for _ in range(search_count)]
+    controls += [_search_control(aid="chat_input_field") for _ in range(composer_count)]
+    _install_search_controls(monkeypatch, [control for control, _ in controls])
+    for method in ("_activate", "_hotkey", "_key", "_set_clipboard_text"):
+        monkeypatch.setattr(driver, method, lambda *a: pytest.fail("健康检查不得输入或激活窗口"))
+
+    report = driver._control_health(123)
+
+    assert report["ok"] is expected
+    assert report["search_count"] == search_count
+    assert report["composer_count"] == composer_count
+    assert all(not writes for _, writes in controls)
+
+
+def test_health_report_rejects_avatar_match_with_missing_controls(tmp_path, monkeypatch):
+    driver = WindowsWechatDriver(_settings(tmp_path))
+    monkeypatch.setattr("app.sender.wechat_native.os.name", "nt")
+    monkeypatch.setattr(driver, "_imports", lambda: None)
+    monkeypatch.setattr(driver, "_desktop_unlocked", lambda: True)
+    monkeypatch.setattr(driver, "_check_clipboard", lambda: None)
+    async def chinese_ocr():
+        return "zh-CN"
+    monkeypatch.setattr(driver, "_ocr_language", chinese_ocr)
+    monkeypatch.setattr("app.sender.wechat_account.inspect_account", lambda *a, **k: {
+        "ok": True, "detail": "头像匹配", "identity": {"hwnd": 123},
+    })
+    _install_search_controls(monkeypatch, [])
+
+    report = driver.health_report()
+
+    assert report["window"]["ok"]
+    assert not report["ok"] and not report["controls"]["ok"]
+    monkeypatch.setattr(driver, "health_report", lambda: report)
+    assert "编辑控件不可用" in driver.health_check()[1]
+    assert "编辑控件不可用" in WechatNativeSender(settings=driver.settings, driver=driver).health_check()[1]
+
+
+def test_locked_health_check_does_not_probe_wechat_window(tmp_path, monkeypatch):
+    driver = WindowsWechatDriver(_settings(tmp_path))
+    monkeypatch.setattr("app.sender.wechat_native.os.name", "nt")
+    monkeypatch.setattr(driver, "_imports", lambda: None)
+    monkeypatch.setattr(driver, "_desktop_unlocked", lambda: False)
+    monkeypatch.setattr("app.sender.wechat_account.inspect_account",
+                        lambda *a, **k: pytest.fail("桌面锁定时不得检查窗口"))
+
+    report = driver.health_report()
+    assert not report["ok"]
+    assert "锁定" in report["desktop"]["detail"]
 
 
 def test_search_query_overwrites_only_unique_visible_search_control(tmp_path, monkeypatch):

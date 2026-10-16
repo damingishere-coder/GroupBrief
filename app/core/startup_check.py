@@ -57,7 +57,7 @@ def run_startup_checks(settings: Settings) -> list[dict]:
                 "name": "微信客户端",
                 "ok": running,
                 "status": "OK" if running else "OFFLINE",
-                "detail": "微信已登录" if running else "微信 PC 客户端未运行（需登录且不锁屏）",
+                "detail": "微信进程存在（登录、桌面与发送控件需实时核验）" if running else "微信 PC 客户端未运行（需登录且不锁屏）",
             }
         )
     except Exception as e:

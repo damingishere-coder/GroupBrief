@@ -108,10 +108,10 @@ export default function AppShell({
           <button
             className="studio-system"
             onClick={() => navigateToHash("settings?section=health")}
-            title="系统健康"
+            title="检查系统状态"
           >
             <Heartbeat size={19} />
-            <span>系统健康</span>
+            <span>系统检查</span>
             <ArrowUpRight size={15} />
           </button>
           <button

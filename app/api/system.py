@@ -21,6 +21,18 @@ from app.version import APP_VERSION
 router = APIRouter(prefix="/api/system", tags=["system"])
 
 
+def _wechat_runtime_check(settings: Settings) -> dict:
+    """实时、只读检查本机发送能力，不激活窗口或发送消息。"""
+    from app.sender.wechat_native import create_wechat_sender
+
+    try:
+        ok, detail = create_wechat_sender(settings=settings).health_check()
+        return {"ok": ok, "status": "OK" if ok else "UNAVAILABLE", "detail": detail,
+                "checked_at": datetime.now().astimezone().isoformat()}
+    except Exception as exc:
+        return {"ok": False, "status": "ERROR", "detail": str(exc)[:200]}
+
+
 @router.get("/health")
 def health():
     return {
@@ -122,10 +134,9 @@ def readiness(
         "WeChatDataAnalysis",
         required=has_groups,
     )
-    checks["wechat_client"] = startup_dependency(
-        "微信客户端",
-        "微信客户端",
-        required=has_send_groups,
+    checks["wechat_client"] = (
+        _wechat_runtime_check(settings) if has_send_groups else
+        {"ok": True, "status": "NOT_REQUIRED", "detail": "微信客户端 当前无启用任务"}
     )
     codex = startup_dependency("Codex GPT", "Codex GPT", required=has_groups)
     deepseek = startup_dependency("DeepSeek", "DeepSeek 备用", required=has_groups)
@@ -228,6 +239,23 @@ def readiness(
         "status": daily_status,
         "detail": daily_detail,
     }
+    if has_send_groups:
+        from app.scheduler.runtime_status import build_daily_status
+        from app.v2.run_store import RunStore
+
+        try:
+            run_date = datetime.now(ZoneInfo(settings.app_timezone)).date().isoformat()
+            store = RunStore(settings.output_dir)
+            runs = [store.load_run(group.display_name or group.wechat_group_name, run_date)
+                    for group in enabled_groups]
+            daily = build_daily_status(store, run_date, runs=runs, app_timezone=settings.app_timezone,
+                                       schedule_rules=[group.schedule_rule for group in enabled_groups])
+            daily_result["overall_status"] = daily["overall_status"]
+            if daily["overall_status"] in {"blocked", "failed", "needs_attention"}:
+                daily_result.update(ok=False, status=daily["overall_status"].upper(),
+                                    detail="今日任务存在失败或暂停，请查看各群发送结果")
+        except Exception as exc:
+            daily_result.update(ok=False, status="ERROR", detail=str(exc)[:200])
     # readiness 仅表示进程和依赖可用性；今日任务结果单独投影，不再拖低 ready。
     ready = all(item["ok"] for item in checks.values())
     payload = {

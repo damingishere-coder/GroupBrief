@@ -137,6 +137,7 @@ export default function Dashboard() {
       setPageVisible(visible);
       if (visible && runDate === shanghaiDateInputValue()) {
         dashboard.reload();
+        health.reload();
       }
     };
     document.addEventListener("visibilitychange", onVisibilityChange);
@@ -154,10 +155,10 @@ export default function Dashboard() {
       scheduledAt: runtimeScheduledAt,
     });
     if (delay === null) return;
-    const timer = window.setTimeout(() => {
+    const timer = window.setInterval(() => {
       dashboard.reload();
     }, delay);
-    return () => window.clearTimeout(timer);
+    return () => window.clearInterval(timer);
   }, [
     dashboard.reload,
     pageVisible,
@@ -165,6 +166,12 @@ export default function Dashboard() {
     runtimeScheduledAt,
     runtimeStatus,
   ]);
+
+  useEffect(() => {
+    if (!pageVisible || runDate !== shanghaiDateInputValue()) return;
+    const timer = window.setInterval(health.reload, 30_000);
+    return () => window.clearInterval(timer);
+  }, [health.reload, pageVisible, runDate]);
 
   const refresh = () => {
     dashboard.reload();
@@ -192,7 +199,7 @@ export default function Dashboard() {
     ? Object.entries(health.data.checks).filter(([, check]) => !check.ok)
     : [];
   const systemHealthy =
-    healthChecks.length > 0 && healthChecks.every((check) => check.ok);
+    !health.error && healthChecks.length > 0 && healthChecks.every((check) => check.ok);
 
   if (
     dashboard.loading &&
@@ -222,6 +229,13 @@ export default function Dashboard() {
 
   const data = dashboard.data;
   const counts = data.counts;
+  const sendFailures = data.cards.filter((card) =>
+    card.send_state === "failed_final" || card.send_state === "unknown" ||
+    (card.send_hold && Boolean(card.send_error)),
+  );
+  const dailyNeedsAttention = ["blocked", "failed", "needs_attention"].includes(
+    data.daily_status?.overall_status || "",
+  ) || counts.failed > 0 || counts.held > 0 || sendFailures.length > 0;
   const dailyStatusMeta = {
     resting: { label: "休息，下一工作日运行", tone: "neutral" as const },
     not_started: { label: "今日未开始", tone: "neutral" as const },
@@ -402,7 +416,7 @@ export default function Dashboard() {
       </section>
       <div className="studio-status-line">
         <span>
-          <span className={`status-dot ${systemHealthy ? "ok" : "warn"}`} />
+          <span className={`status-dot ${systemHealthy && !dailyNeedsAttention ? "ok" : "warn"}`} />
           {dailyStatusMeta.label} ·{" "}
           {counts.failed || counts.held
             ? `失败 ${counts.failed} 个，暂停待核对 ${counts.held} 个`
@@ -415,15 +429,22 @@ export default function Dashboard() {
           {health.loading
             ? "健康检查中"
             : systemHealthy
-              ? "系统健康"
+              ? "基础服务正常"
               : "系统需要关注"}{" "}
           ↗
         </button>
       </div>
+      {sendFailures.length > 0 && (
+        <div className="studio-alert" role="alert">
+          <strong>微信发送未完成：{sendFailures.length} 个群需要处理</strong>
+          <p>{sendFailures[0].send_error || "发送结果无法确认，请先核对微信记录。"}</p>
+          <p>未完成的日报不会显示为已发送；暂停任务需人工核对后处理。</p>
+        </div>
+      )}
       {healthOpen && (
         <div className="studio-alert" role="status">
           {health.error ||
-            (systemHealthy ? "所有系统检查均正常" : "以下检查需要关注")}
+            (systemHealthy ? "基础服务检查通过；发送结果以各群日报状态为准。" : "以下检查需要关注")}
           {healthProblems.map(([name, check]) => (
             <p key={name}>
               {name}：{check.detail || check.status}

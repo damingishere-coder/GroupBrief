@@ -185,6 +185,46 @@ def test_readiness_degrades_when_required_wechat_dependency_failed(tmp_path):
     assert response.json()["checks"]["wechat_data"]["status"] == "UNAVAILABLE"
 
 
+def test_readiness_rechecks_sender_and_reports_today_send_failure(tmp_path, monkeypatch):
+    from app.db.models import Group
+    from app.v2.run_store import RunStore
+    from zoneinfo import ZoneInfo
+
+    client, api = _readiness_client(tmp_path)
+    settings = api.dependency_overrides[get_settings]()
+    api.state.startup_checks = [
+        {"name": name, "ok": True, "status": "OK", "detail": "旧启动快照正常"}
+        for name in ("微信客户端", "WeChatDataAnalysis", "Codex GPT")
+    ]
+    sessions = api.dependency_overrides[repo.get_session]()
+    session = next(sessions)
+    try:
+        session.add(Group(display_name="测试群", enabled=True, wechat_send_enabled=True))
+        session.commit()
+    finally:
+        sessions.close()
+    today = datetime.now(ZoneInfo(settings.app_timezone)).date().isoformat()
+    store = RunStore(settings.output_dir)
+    store.save_run("测试群", today, {"status": "READY_TO_SEND", "send_state": "failed_final",
+                                    "send_hold": True, "send_error": "搜索控件不可用"})
+    run_path = store.group_dir("测试群", today) / "run.json"
+    before = run_path.read_bytes()
+    probes = []
+    monkeypatch.setattr(system, "_wechat_runtime_check", lambda s: probes.append(s) or {
+        "ok": False, "status": "UNAVAILABLE", "detail": "当前微信编辑控件不可用",
+    })
+
+    with client:
+        response = client.get("/api/system/ready")
+
+    assert probes == [settings]
+    assert response.status_code == 503
+    assert response.json()["checks"]["wechat_client"]["detail"] == "当前微信编辑控件不可用"
+    assert response.json()["daily_result"]["status"] == "BLOCKED"
+    assert not response.json()["daily_result"]["ok"]
+    assert run_path.read_bytes() == before
+
+
 def test_idle_scheduler_stays_ready_even_when_last_event_is_old(tmp_path, monkeypatch):
     from datetime import datetime, timedelta
 
@@ -277,6 +317,40 @@ def test_deep_health_formatting_reuses_existing_reports():
         "window": {"ok": False, "detail": "未检查"},
     }
     assert sender.health_check(sender_report) == (False, "桌面已锁定")
+
+
+def test_deep_health_reports_send_failures_without_modifying_runs(tmp_path, monkeypatch):
+    from app.config.settings import Settings
+    from app.v2.run_store import RunStore
+    from app.data_sources.wechat_data_analysis import WeChatDataAnalysisSource
+    from zoneinfo import ZoneInfo
+
+    settings = Settings(output_root_override=str(tmp_path / "output"))
+    store = RunStore(settings.output_dir)
+    today = datetime.now(ZoneInfo(settings.app_timezone)).date().isoformat()
+    store.save_run("测试群", today, {"status": "READY_TO_SEND", "send_state": "failed_final",
+                                    "send_hold": True, "send_error": "搜索框不可用"})
+    path = store.run_path("测试群", today)
+    before = path.read_bytes()
+    monkeypatch.setattr(v2_ui, "_store", lambda _: store)
+    monkeypatch.setattr(WeChatDataAnalysisSource, "health_check", lambda _: SimpleNamespace(
+        ok=True, status=SimpleNamespace(value="OK"), detail="测试数据源"))
+    monkeypatch.setattr(CodexGPTProvider, "health_report", lambda _: {
+        "model": "test", "binary": {}, "version": {},
+    })
+    monkeypatch.setattr(CodexGPTProvider, "health_check", lambda *a: (True, "test"))
+    monkeypatch.setattr(CodexImageGenerator, "health_report", lambda _: {
+        "binary": {}, "version": {}, "last_image_smoke": {},
+    })
+    monkeypatch.setattr(CodexImageGenerator, "health_check", lambda *a: (True, "test"))
+    monkeypatch.setattr("app.sender.wechat_native.create_wechat_sender", lambda **k:
+                        SimpleNamespace(health_check=lambda: (True, "test")))
+
+    payload = v2_ui.system_health(settings)
+
+    assert not payload["checks"]["recent_task"]["ok"]
+    assert payload["checks"]["recent_task"]["status"] == "BLOCKED"
+    assert path.read_bytes() == before
 
 
 def test_recovery_endpoint_reuses_one_run_snapshot(monkeypatch):

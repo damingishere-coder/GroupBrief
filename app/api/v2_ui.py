@@ -139,6 +139,9 @@ def system_health(settings: Settings = Depends(get_settings)):
             "window",
             {"ok": send_ok, "detail": send_detail},
         ),
+        "controls": sender_report.get(
+            "controls", {"ok": False, "detail": "当前发送器未提供编辑控件检查"},
+        ),
     }
 
     try:
@@ -176,17 +179,22 @@ def system_health(settings: Settings = Depends(get_settings)):
 
     store = _store(settings)
     runs = store.list_runs()
-    last_run = runs[0] if runs else {}
+    from datetime import datetime
+    from app.scheduler.runtime_status import build_daily_status
+
+    today = datetime.now(_tz(settings)).date().isoformat()
+    today_runs = [run for run in runs if run.get("run_date") == today]
+    daily = build_daily_status(store, today, runs=today_runs, app_timezone=settings.app_timezone)
+    task_ok = daily["overall_status"] not in {"blocked", "failed", "needs_attention"}
     incomplete = sum(
         1 for run in runs if run.get("status") not in ("SENT", "FAILED")
     )
     checks["recent_task"] = {
-        "ok": True,
-        "status": "OK",
+        "ok": task_ok,
+        "status": "OK" if task_ok else str(daily["overall_status"]).upper(),
         "detail": (
-            f"最近：{last_run.get('group_name', '—')} "
-            f"{last_run.get('run_date', '—')} "
-            f"{last_run.get('status', '—')}；未完成任务 {incomplete} 个"
+            f"今日任务：{daily['overall_status']}；历史及今日未完成任务 {incomplete} 个；"
+            "发送结果以各群日报状态为准"
         ),
     }
 
