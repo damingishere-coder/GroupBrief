@@ -14,7 +14,7 @@
 <p align="center">
   <a href="#快速开始">快速开始</a> ·
   <a href="docs/USER_GUIDE.md">使用指南</a> ·
-  <a href="docs/UPGRADING.md">升级到 2.0</a> ·
+  <a href="docs/UPGRADING.md">升级到 2.1</a> ·
   <a href="docs/README.md">文档中心</a> ·
   <a href="CHANGELOG.md">更新记录</a>
 </p>

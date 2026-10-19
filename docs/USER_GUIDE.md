@@ -1,4 +1,4 @@
-# GroupBrief 2.0 使用指南
+# GroupBrief 2.1 使用指南
 
 ## 第一次使用
 
