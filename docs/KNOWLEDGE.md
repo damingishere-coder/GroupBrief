@@ -1,9 +1,11 @@
 # Memory & Insight 分阶段实施
 
-## 当前交付：Phase 0 消息底座 / Phase 1 周度洞察 / Phase 2 本地搜索
+## 当前交付：Phase 0–5 消息底座、搜索、记忆与洞察
 
-此阶段新增可选的统一消息层、来源记录、后台导入账本和消息证据页面。
-不改变日报流水线、图片、发送账本或原 output 文件。没有 AI 调用。
+2.1 已包含 Phase 0–5，具体能力与边界见下文各阶段。功能默认关闭，需显式安装扩展结构并配置。
+
+消息底座增加可选的统一消息层、来源记录、后台导入账本和消息证据页面。
+不改变日报流水线、图片、发送账本或原 output 文件。导入、确定性统计和本地搜索不调用 AI；Phase 3 起的补充 AI 默认关闭，需独立预算与调用账本。
 
 入口：运行任务 → 知识任务。先预览历史导入，再确认本地建库。
 每条消息能查看上下文、来源归档及原记录；重复出现在多份快照中的消息只列一次。
@@ -50,13 +52,13 @@ Phase 1 可选独立缺日读取见下文；默认仍关闭。
 `/knowledge/status`、`/knowledge/jobs` 提供状态，`/jobs/{id}/pause|retry` 控制本地任务。
 `POST /knowledge/backfill/preview` 返回范围及版本；`POST /knowledge/backfill` 验证版本后返回 202。
 
-## 后续阶段
+## 阶段状态
 
 1. Phase 1（已实现）：全员确定性 Weekly Insight、可选独立缺日读取和周期 revision。
 2. Phase 2（已实现）：中文 FTS5、跨日期检索、报告索引及性能验收。
-3. Phase 3：AI 操作账本、分析复用、增量 Memory、证据验证、合并和撤销。
-4. Phase 4：Storyline 时间轴和内容型周报。
-5. Phase 5：Monthly Insight，复用消息与记忆底座。
+3. Phase 3（已实现）：AI 操作账本、分析复用、增量 Memory、证据验证、合并和撤销。
+4. Phase 4（已实现）：Storyline 时间轴和内容型周报。
+5. Phase 5（已实现）：Monthly Insight，复用消息与记忆底座。
 6. Phase 6：存在实际召回缺口后再试点 Semantic Search。
 
 各阶段独立 PR、检查、灰度和回滚。AI 未知结果不得自动重试；历史 AI 首批近 90 天仍需成本预览。
