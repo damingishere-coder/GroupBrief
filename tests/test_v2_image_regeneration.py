@@ -262,6 +262,8 @@ def test_two_different_runs_can_regenerate_concurrently(tmp_path):
     settings = SimpleNamespace(output_dir=tmp_path, image_generation_concurrency=2)
     store = RunStore(tmp_path)
     guard = threading.Lock()
+    first_started = threading.Event()
+    both_started = threading.Barrier(2, timeout=10)
 
     class ConcurrentGenerator:
         def __init__(self):
@@ -272,10 +274,14 @@ def test_two_different_runs_can_regenerate_concurrently(tmp_path):
             with guard:
                 self.active += 1
                 self.maximum = max(self.maximum, self.active)
-            time.sleep(0.12)
-            output_path.write_bytes(NEW_PNG)
-            with guard:
-                self.active -= 1
+            first_started.set()
+            try:
+                # 等两项任务都进入生成器，再释放，避免依赖机器的文件写入速度。
+                both_started.wait()
+                output_path.write_bytes(NEW_PNG)
+            finally:
+                with guard:
+                    self.active -= 1
             return ImageTaskResult(True, image_path=output_path)
 
     generator = ConcurrentGenerator()
@@ -283,10 +289,13 @@ def test_two_different_runs_can_regenerate_concurrently(tmp_path):
         store.save_run(group, "2026-08-21", {"status": "SENT"})
         store.prompt_path(group, "2026-08-21").write_text("真实 Prompt", encoding="utf-8")
         store.image_path(group, "2026-08-21").write_bytes(OLD_PNG)
-        enqueue_regeneration(settings, group, "2026-08-21", generator=generator)
 
-    deadline = time.time() + 3
-    while time.time() < deadline:
+    enqueue_regeneration(settings, "并发群A", "2026-08-21", generator=generator)
+    assert first_started.wait(timeout=10)
+    enqueue_regeneration(settings, "并发群B", "2026-08-21", generator=generator)
+
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
         states = [
             store.load_run(group, "2026-08-21").get("image_regen_status")
             for group in ("并发群A", "并发群B")
