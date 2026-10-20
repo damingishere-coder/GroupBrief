@@ -150,6 +150,8 @@ def isolate_account_guard(monkeypatch, request):
     monkeypatch.setattr(WindowsWechatDriver, "_prepare_wechat_window", prepared)
     monkeypatch.setattr(WindowsWechatDriver, "_desktop_unlocked", staticmethod(lambda: True))
     monkeypatch.setattr(WindowsWechatDriver, "_assert_send_context", lambda *args, **kwargs: None)
+    if not request.node.name.startswith("test_ensure_chat_controls"):
+        monkeypatch.setattr(WindowsWechatDriver, "_ensure_chat_controls", lambda self: (True, "mock chat ready"))
     monkeypatch.setattr("app.sender.wechat_account.inspect_account", lambda *args, **kwargs: {"ok": True, "detail": "mock verified"})
 
 
@@ -721,6 +723,167 @@ def test_control_health_requires_unique_search_and_composer_without_input(
     assert report["search_count"] == search_count
     assert report["composer_count"] == composer_count
     assert all(not writes for _, writes in controls)
+
+
+def _chat_control_report(searches=1, composers=0):
+    return {"ok": searches == composers == 1, "search_count": searches,
+            "composer_count": composers, "detail": "控件检查"}
+
+
+def _session_row(aid="session_item_匿名会话", rect=(50, 100, 350, 160), *, visible=True, enabled=True,
+                 class_name="mmui::ChatSessionCell"):
+    return SimpleNamespace(
+        element_info=SimpleNamespace(automation_id=aid, class_name=class_name),
+        is_visible=lambda: visible, is_enabled=lambda: enabled,
+        rectangle=lambda: SimpleNamespace(left=rect[0], top=rect[1], right=rect[2], bottom=rect[3]),
+    )
+
+
+def _install_session_list(monkeypatch, rows, *, count=1, rect=(50, 80, 350, 700)):
+    def children(*, control_type):
+        assert control_type == "ListItem"
+        return rows
+
+    control = _session_row("session_list", rect)
+    control.children = children
+
+    def descendants(*, control_type):
+        assert control_type == "List"
+        return [control] * count
+
+    monkeypatch.setitem(sys.modules, "pywinauto", SimpleNamespace(
+        Desktop=lambda **kwargs: SimpleNamespace(
+            window=lambda **kwargs: SimpleNamespace(descendants=descendants))))
+
+
+@pytest.mark.parametrize("search_count", [0, 1])
+def test_ensure_chat_controls_opens_one_visible_session_and_waits_without_typing(tmp_path, monkeypatch, search_count):
+    driver = WindowsWechatDriver(_settings(tmp_path))
+    driver._window = 123
+    reports = iter([_chat_control_report(search_count), _chat_control_report(search_count), _chat_control_report(1, 1)])
+    monkeypatch.setattr(driver, "_control_health", lambda hwnd: next(reports))
+    monkeypatch.setattr(driver, "_window_rect", lambda hwnd: (0, 0, 1000, 800))
+    monkeypatch.setattr("app.sender.wechat_native.time.sleep", lambda seconds: None)
+    _install_session_list(monkeypatch, [
+        _session_row(rect=(50, 200, 350, 260)),
+        _session_row(rect=(50, 0, 350, 60)),
+        _session_row(visible=False), _session_row(enabled=False),
+        _session_row("session_item_公众号"), _session_row("session_item_折叠的聊天"),
+        _session_row("search_item_匿名搜索项"), _session_row("session_item_"),
+        _session_row(class_name="mmui::ChatTextItemView"),
+        _session_row(rect=(50, 100, 350, 160)),
+    ])
+    clicks = []
+    monkeypatch.setattr(driver, "_click", lambda x, y: clicks.append((x, y)))
+    for name in ("_key", "_hotkey", "_set_clipboard_text", "_set_clipboard_image"):
+        monkeypatch.setattr(driver, name, lambda *args: pytest.fail("打开会话不得输入、粘贴或发送"))
+
+    ok, detail = driver._ensure_chat_controls()
+
+    assert ok and "已打开已有聊天" in detail
+    assert clicks == [(200.0, 130.0)]
+
+
+@pytest.mark.parametrize("report", [
+    _chat_control_report(1, 1), _chat_control_report(2, 0), _chat_control_report(0, 1),
+    _chat_control_report(1, 2), {"ok": False, "detail": "UIA 错误"},
+])
+def test_ensure_chat_controls_does_not_click_ready_ambiguous_or_unreadable_controls(tmp_path, monkeypatch, report):
+    driver = WindowsWechatDriver(_settings(tmp_path))
+    monkeypatch.setattr(driver, "_control_health", lambda hwnd: report)
+    monkeypatch.setattr(driver, "_click", lambda *args: pytest.fail("不得点击"))
+    _install_session_list(monkeypatch, [_session_row()])
+
+    ok, _ = driver._ensure_chat_controls()
+
+    assert ok is report["ok"]
+
+
+@pytest.mark.parametrize("count,rect,rows", [
+    (0, (50, 80, 350, 700), [_session_row()]),
+    (2, (50, 80, 350, 700), [_session_row()]),
+    (1, (-50, 80, 350, 700), [_session_row()]),
+    (1, (50, 80, 350, 700), []),
+    (1, (50, 80, 350, 700), [_session_row(rect=(50, 680, 350, 740))]),
+])
+def test_ensure_chat_controls_rejects_unproven_or_clipped_session_lists(tmp_path, monkeypatch, count, rect, rows):
+    driver = WindowsWechatDriver(_settings(tmp_path))
+    driver._window = 123
+    monkeypatch.setattr(driver, "_control_health", lambda hwnd: _chat_control_report())
+    monkeypatch.setattr(driver, "_window_rect", lambda hwnd: (0, 0, 1000, 800))
+    monkeypatch.setattr(driver, "_click", lambda *args: pytest.fail("不得猜测会话位置"))
+    _install_session_list(monkeypatch, rows, count=count, rect=rect)
+
+    ok, _ = driver._ensure_chat_controls()
+
+    assert not ok
+
+
+def test_ensure_chat_controls_stops_when_account_changes_before_click(tmp_path, monkeypatch):
+    driver = WindowsWechatDriver(_settings(tmp_path))
+    driver._window = 123
+    monkeypatch.setattr(driver, "_control_health", lambda hwnd: _chat_control_report())
+    monkeypatch.setattr(driver, "_window_rect", lambda hwnd: (0, 0, 1000, 800))
+    _install_session_list(monkeypatch, [_session_row()])
+    checks = []
+
+    def check_context(**kwargs):
+        checks.append(kwargs)
+        if len(checks) == 2:
+            raise ValueError("账号已改变")
+
+    monkeypatch.setattr(driver, "_assert_send_context", check_context)
+    monkeypatch.setattr(driver, "_click", lambda *args: pytest.fail("账号变化后不得点击"))
+
+    ok, _ = driver._ensure_chat_controls()
+
+    assert not ok and len(checks) == 2
+    assert checks == [{"check_target": False}] * 2
+
+
+def test_ensure_chat_controls_clicks_once_and_stops_if_composer_never_appears(tmp_path, monkeypatch):
+    driver = WindowsWechatDriver(_settings(tmp_path))
+    driver._window = 123
+    monkeypatch.setattr(driver, "_control_health", lambda hwnd: _chat_control_report())
+    monkeypatch.setattr(driver, "_window_rect", lambda hwnd: (0, 0, 1000, 800))
+    monkeypatch.setattr(driver, "_poll_rounds", lambda timeout: 2)
+    monkeypatch.setattr("app.sender.wechat_native.time.sleep", lambda seconds: None)
+    _install_session_list(monkeypatch, [_session_row()])
+    clicks = []
+    monkeypatch.setattr(driver, "_click", lambda *args: clicks.append(args))
+
+    ok, detail = driver._ensure_chat_controls()
+
+    assert not ok and "仍未就绪" in detail
+    assert len(clicks) == 1
+
+
+def test_open_and_verify_prepares_existing_chat_before_full_health_check(tmp_path, monkeypatch):
+    driver = WindowsWechatDriver(_settings(tmp_path))
+    events = []
+    monkeypatch.setattr(driver, "_imports", lambda: None)
+    monkeypatch.setattr(driver, "_activate", lambda hwnd: events.append("activate") or True)
+    monkeypatch.setattr(driver, "_window_rect", lambda hwnd: (0, 0, 1000, 800))
+    monkeypatch.setattr(driver, "_ensure_chat_controls", lambda: events.append("open_chat") or (True, "ready"))
+    monkeypatch.setattr(driver, "health_check", lambda: events.append("health") or (True, "ready"))
+    monkeypatch.setattr(driver, "_set_search_query", lambda target: events.append(("search", target)) or (False, "stop here"))
+
+    ok, _ = driver.open_and_verify("匿名目标群")
+
+    assert not ok
+    assert events == ["activate", "open_chat", "health", ("search", "匿名目标群")]
+
+
+def test_open_and_verify_does_not_prepare_chat_without_verified_account(tmp_path, monkeypatch):
+    driver = WindowsWechatDriver(_settings(tmp_path))
+    monkeypatch.setattr(driver, "_imports", lambda: None)
+    monkeypatch.setattr(driver, "_prepare_wechat_window", lambda: (False, "账号无法唯一核验"))
+    monkeypatch.setattr(driver, "_activate", lambda *args: pytest.fail("不得激活"))
+    monkeypatch.setattr(driver, "_ensure_chat_controls", lambda: pytest.fail("不得打开会话"))
+
+    ok, detail = driver.open_and_verify("匿名目标群")
+
+    assert not ok and "账号" in detail
 
 
 def test_health_report_rejects_avatar_match_with_missing_controls(tmp_path, monkeypatch):
