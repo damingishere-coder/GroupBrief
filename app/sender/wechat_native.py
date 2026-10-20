@@ -537,12 +537,17 @@ class WindowsWechatDriver:
                 and str(getattr(control.element_info, "automation_id", "") or "") == "chat_input_field"
             ]
             ok = len(searches) == len(composers) == 1
+            recovery_hint = (
+                "发送前会先打开已有聊天并复检输入框；未尝试发送"
+                if len(searches) <= 1 and not composers else
+                "请打开微信聊天主界面，仍未恢复时退出并重新打开微信；未尝试发送"
+            )
             return {
                 "ok": ok,
                 "detail": (
                     "微信全局搜索框和聊天输入框均可唯一识别（未测试发送）" if ok else
                     f"微信编辑控件不可用：搜索框 {len(searches)} 个，聊天输入框 {len(composers)} 个；"
-                    "请打开微信聊天主界面，仍未恢复时退出并重新打开微信；未尝试发送"
+                    f"{recovery_hint}"
                 ),
                 "search_count": len(searches),
                 "composer_count": len(composers),
@@ -557,6 +562,61 @@ class WindowsWechatDriver:
             and str(getattr(control.element_info, "name", "") or "").strip() in {"搜索", "Search"}
             and str(getattr(control.element_info, "automation_id", "") or "") != "chat_input_field"
         )
+
+    def _ensure_chat_controls(self) -> tuple[bool, str]:
+        """未打开会话时，只点击已核验主窗口中的一个真实会话，再只读复检。"""
+        report = self._control_health(self._window)
+        if report["ok"]:
+            return True, report["detail"]
+        if report.get("composer_count") != 0 or report.get("search_count") not in (0, 1):
+            return False, report["detail"]
+        try:
+            from pywinauto import Desktop
+
+            self._assert_send_context(check_target=False)
+            root = Desktop(backend="uia").window(handle=self._window)
+            lists = [
+                control for control in root.descendants(control_type="List")
+                if control.is_visible() and control.is_enabled()
+                and str(control.element_info.automation_id or "") == "session_list"
+            ]
+            if len(lists) != 1:
+                return False, "无法唯一识别微信已有会话列表，未点击或输入"
+            left, top, right, bottom = self._window_rect(self._window)
+            box = lists[0].rectangle()
+            if not (left <= box.left < box.right <= right and top <= box.top < box.bottom <= bottom):
+                return False, "微信会话列表不在已核验主窗口内，未点击或输入"
+            rows = []
+            folders = {"公众号", "服务号", "折叠的聊天", "Official Accounts", "Service Accounts", "Folded Chats"}
+            for control in lists[0].children(control_type="ListItem"):
+                info = control.element_info
+                automation_id = str(info.automation_id or "")
+                if (
+                    not control.is_visible() or not control.is_enabled()
+                    or not automation_id.startswith("session_item_")
+                    or automation_id.removeprefix("session_item_") in folders | {""}
+                    or info.class_name != "mmui::ChatSessionCell"
+                ):
+                    continue
+                rect = control.rectangle()
+                if box.left <= rect.left < rect.right <= box.right and box.top <= rect.top < rect.bottom <= box.bottom:
+                    rows.append((rect.top, rect.left, rect.right, rect.bottom))
+            if not rows:
+                return False, "微信没有可确认且完整可见的已有聊天，未点击或输入"
+            row_top, row_left, row_right, row_bottom = min(rows)
+            self._assert_send_context(check_target=False)
+            self._click((row_left + row_right) / 2, (row_top + row_bottom) / 2)
+            for attempt in range(self._poll_rounds(self.stage_timeout)):
+                self._assert_send_context(check_target=False)
+                report = self._control_health(self._window)
+                if report["ok"]:
+                    return True, "已打开已有聊天，搜索框和聊天输入框均已核验；未输入或发送"
+                if attempt + 1 < self._poll_rounds(self.stage_timeout):
+                    time.sleep(self.poll_interval)
+            return False, f"已打开已有聊天，但输入控件仍未就绪：{report['detail']}"
+        except Exception as exc:
+            logger.warning("WeChat existing chat preparation failed: %s", type(exc).__name__)
+            return False, f"微信已有聊天准备失败：{type(exc).__name__}；未输入或发送"
 
     def open_and_verify(self, target: str) -> tuple[bool, str]:
         self._window = None
@@ -576,9 +636,6 @@ class WindowsWechatDriver:
         prepared, prepare_detail = self._prepare_wechat_window()
         if not prepared:
             return False, prepare_detail
-        ok, detail = self.health_check()
-        if not ok:
-            return False, detail
         self._verified_target = target
         activated = False
         for _ in range(3):
@@ -597,6 +654,15 @@ class WindowsWechatDriver:
         width, height = right - left, bottom - top
         if width < 600 or height < 420:
             return False, "微信窗口尺寸异常，请恢复主窗口后重试"
+
+        # 冷启动尚未选中会话时没有 chat_input_field，先打开已有聊天，
+        # 再做完整健康检查；之后仍须独立搜索并核验真正的发送目标。
+        ok, detail = self._ensure_chat_controls()
+        if not ok:
+            return False, detail
+        ok, detail = self.health_check()
+        if not ok:
+            return False, detail
 
         # 多屏和窗口尺寸变化会让比例坐标点到聊天输入区。只向唯一的
         # 全局搜索控件写入查询，不能用 Ctrl+A/粘贴覆盖用户聊天草稿。
